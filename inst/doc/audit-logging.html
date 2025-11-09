@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Audit logging and hooks</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Audit logging and hooks</h1>
+
+
+
+<div id="overview" class="section level2">
+<h2>Overview</h2>
+<p>‘shinyOAuth’ emits structured audit events at key steps in the OAuth
+2.0/OIDC flow. These may help detect anomalous activity (e.g., brute
+force, replay, or configuration errors).</p>
+<p>This vignette covers: - How to register audit hooks to export/store
+events - Which audit events are emitted &amp; what fields are included
+in each event - Best practices</p>
+</div>
+<div id="receiving-audit-events" class="section level2">
+<h2>Receiving audit events</h2>
+<p>There are two hook options you can set. Both receive the same event
+object (a named list). The functions you should register under these
+options should be fast, non-blocking, and never throw errors.</p>
+<ul>
+<li><code>options(shinyOAuth.audit_hook = function(event) { ... })</code>
+- intended for audit-specific sinks</li>
+<li><code>options(shinyOAuth.trace_hook = function(event) { ... })</code>
+- a more general-purpose tracing hook used for both audit events and
+error traces</li>
+</ul>
+<p>Example of printing audit events to console:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_hook =</span> <span class="cf">function</span>(event) {</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>    <span class="fu">cat</span>(<span class="fu">sprintf</span>(<span class="st">&quot;[AUDIT] %s %s</span><span class="sc">\n</span><span class="st">&quot;</span>, event<span class="sc">$</span>type, event<span class="sc">$</span>trace_id))</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>    <span class="fu">str</span>(event)</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>})</span></code></pre></div>
+<p>To stop receiving events, unset the option:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_hook =</span> <span class="cn">NULL</span>)</span></code></pre></div>
+</div>
+<div id="event-structure" class="section level2">
+<h2>Event structure</h2>
+<p>All audit events share the following base shape:</p>
+<ul>
+<li><code>type</code>: a string starting with
+<code>audit_...</code></li>
+<li><code>trace_id</code>: a short correlation id for linking related
+records</li>
+<li><code>timestamp</code>: POSIXct time when the event was created
+(from <code>Sys.time()</code>)</li>
+<li>Additional key/value fields depending on the event (see event
+catalog)</li>
+</ul>
+<p>When events are emitted from within a Shiny session, a JSON-friendly
+<code>shiny_session</code> list is attached to every event to correlate
+audit activity with the HTTP request and session. The structure is
+designed to be directly serializable with
+<code>jsonlite::toJSON()</code>:</p>
+<ul>
+<li><code>shiny_session$token</code>: the Shiny per-session token
+(<code>session$token</code>) when available.</li>
+<li><code>shiny_session$http</code>: a compact HTTP summary with fields:
+<ul>
+<li><code>method</code>, <code>path</code>, <code>query_string</code>,
+<code>host</code>, <code>scheme</code>, <code>remote_addr</code></li>
+<li><code>headers</code>: a list of request headers derived from
+<code>HTTP_*</code> environment variables, with lowercase names (e.g.,
+<code>user_agent</code>, <code>x_forwarded_for</code>).</li>
+</ul></li>
+</ul>
+<p>Note: the raw <code>session$request</code> from Shiny is not included
+to keep the event JSON-serializable and concise.</p>
+<p>Note: the <code>shiny_session$http</code> summary intentionally
+captures all <code>HTTP_*</code> headers and the raw
+<code>QUERY_STRING</code> from the active Shiny request. If you forward
+events to a log sink, this may include sensitive material such as the
+authorization code, <code>state</code>, and every request header
+(including <code>Cookie</code>, <code>Authorization</code>, and other
+bearer tokens). Consider stripping or redacting sensitive headers and
+query parameters in your hook before exporting.</p>
+</div>
+<div id="event-catalog" class="section level2">
+<h2>Event catalog</h2>
+<div id="authorization-redirect-issuance" class="section level3">
+<h3>Authorization redirect issuance</h3>
+<div id="event-audit_redirect_issued" class="section level4">
+<h4>Event: <code>audit_redirect_issued</code></h4>
+<ul>
+<li><p>When: after <code>prepare_call()</code> builds the authorization
+URL</p></li>
+<li><p>Context:</p>
+<ul>
+<li><code>provider</code>, <code>issuer</code></li>
+<li><code>client_id_digest</code></li>
+<li><code>state_digest</code></li>
+<li><code>browser_token_digest</code></li>
+<li><code>pkce_method</code> (e.g., <code>S256</code>,
+<code>plain</code>, or <code>NA</code>)</li>
+<li><code>nonce_present</code> (logical)</li>
+<li><code>scopes_count</code></li>
+<li><code>redirect_uri</code></li>
+</ul></li>
+</ul>
+</div>
+</div>
+<div id="callback-received" class="section level3">
+<h3>Callback received</h3>
+<div id="event-audit_callback_received" class="section level4">
+<h4>Event: <code>audit_callback_received</code></h4>
+<ul>
+<li>When: <code>handle_callback()</code> begins processing a
+callback</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>code_digest</code>,
+<code>state_digest</code>, <code>browser_token_digest</code></li>
+</ul>
+</div>
+</div>
+<div id="callback-validation" class="section level3">
+<h3>Callback validation</h3>
+<p>Callback validation spans decryption + freshness + binding of the
+encrypted payload as well as subsequent checks of values bound to the
+state (browser token, PKCE code verifier, nonce). Each check emits
+either a success (only once for the payload) or a failure audit
+event.</p>
+<div id="event-audit_callback_validation_success" class="section level4">
+<h4>Event: <code>audit_callback_validation_success</code></h4>
+<ul>
+<li>When: the encrypted <code>state</code> payload has been decrypted
+and verified for freshness and client/provider binding (emitted from
+<code>state_payload_decrypt_validate()</code>)</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>state_digest</code></li>
+</ul>
+</div>
+<div id="event-audit_callback_validation_failed" class="section level4">
+<h4>Event: <code>audit_callback_validation_failed</code></h4>
+<ul>
+<li>When: a validation step fails prior to token exchange</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>state_digest</code>,
+<code>phase</code>, <code>error_class</code> (+
+<code>browser_token_digest</code> when phase is
+<code>browser_token_validation</code>)</li>
+<li>Phases include: <code>payload_validation</code>,
+<code>browser_token_validation</code>,
+<code>pkce_verifier_validation</code>,
+<code>nonce_validation</code></li>
+<li>Note: Failures related to state store access (lookup/removal) are
+reported as their own events (see below) rather than using the
+<code>callback_validation_failed</code> event.</li>
+</ul>
+</div>
+</div>
+<div id="state-store-access" class="section level3">
+<h3>State store access</h3>
+<p>State retrieval and removal of the single-use state entry are emitted
+as separate events by <code>state_store_get_remove()</code>.</p>
+<div id="event-audit_state_store_lookup_failed" class="section level4">
+<h4>Event: <code>audit_state_store_lookup_failed</code></h4>
+<ul>
+<li>When: retrieving the single-use state entry from the configured
+<code>state_store</code> fails (missing, malformed, or underlying cache
+error)</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>state_digest</code>,
+<code>error_class</code>, <code>phase</code>
+(<code>state_store_lookup</code>)</li>
+<li>Notes: The flow aborts with an invalid state error.</li>
+</ul>
+</div>
+<div id="event-audit_state_store_removal_failed" class="section level4">
+<h4>Event: <code>audit_state_store_removal_failed</code></h4>
+<ul>
+<li>When: removal of the single-use state entry (enforcing one-time use)
+fails</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>state_digest</code>,
+<code>error_class</code>, <code>phase</code>
+(<code>state_store_removal</code>)</li>
+<li>Notes: A failure to remove also aborts the flow with an invalid
+state error; the event is emitted best-effort and will never itself
+throw.</li>
+</ul>
+<p>Digest differences: For <code>audit_callback_validation_failed</code>
+during payload decryption (<code>phase = &quot;payload_validation&quot;</code>)
+the <code>state_digest</code> is computed from the encrypted payload
+(plaintext not yet available). For state store events the digest
+reflects the plaintext state string.</p>
+</div>
+</div>
+<div id="token-exchange" class="section level3">
+<h3>Token exchange</h3>
+<div id="event-audit_token_exchange" class="section level4">
+<h4>Event: <code>audit_token_exchange</code></h4>
+<ul>
+<li>When: authorization code successfully exchanged for tokens</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>code_digest</code>,
+<code>used_pkce</code>, <code>received_id_token</code>,
+<code>received_refresh_token</code></li>
+</ul>
+</div>
+<div id="event-audit_token_exchange_error" class="section level4">
+<h4>Event: <code>audit_token_exchange_error</code></h4>
+<ul>
+<li>When: token exchange fails</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>code_digest</code>,
+<code>error_class</code></li>
+</ul>
+</div>
+</div>
+<div id="login-result" class="section level3">
+<h3>Login result</h3>
+<div id="event-audit_login_success" class="section level4">
+<h4>Event: <code>audit_login_success</code></h4>
+<ul>
+<li>When: token set is verified and an <code>OAuthToken</code> is
+created</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>sub_digest</code>,
+<code>refresh_token_present</code>, <code>expires_at</code></li>
+</ul>
+</div>
+<div id="event-audit_login_failed" class="section level4">
+<h4>Event: <code>audit_login_failed</code></h4>
+<ul>
+<li>When: surface-level login failure during callback handling in the
+Shiny module</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>phase</code>
+(<code>sync_token_exchange</code>|<code>async_token_exchange</code>),
+<code>error_class</code></li>
+</ul>
+</div>
+</div>
+<div id="logout-and-session-clears" class="section level3">
+<h3>Logout and session clears</h3>
+<div id="event-audit_logout" class="section level4">
+<h4>Event: <code>audit_logout</code></h4>
+<ul>
+<li>When: <code>values$logout()</code> is called on the module</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>reason</code> (default
+<code>manual_logout</code>)</li>
+</ul>
+</div>
+<div id="event-audit_session_cleared" class="section level4">
+<h4>Event: <code>audit_session_cleared</code></h4>
+<ul>
+<li>When: the module clears the token reactively</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>reason</code></li>
+<li>Reasons include: <code>refresh_failed_async</code>,
+<code>refresh_failed_sync</code>, <code>reauth_window</code>,
+<code>token_expired</code></li>
+</ul>
+</div>
+</div>
+<div id="refresh-failures-while-keeping-the-session-indefinite-sessions" class="section level3">
+<h3>Refresh failures while keeping the session (indefinite
+sessions)</h3>
+<div id="event-audit_refresh_failed_but_kept_session" class="section level4">
+<h4>Event: <code>audit_refresh_failed_but_kept_session</code></h4>
+<ul>
+<li>When: a token refresh attempt fails but the module is configured not
+to clear the session (i.e., <code>indefinite_session = TRUE</code> in
+<code>oauth_module_server()</code>)</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>reason</code>
+(<code>refresh_failed_async</code>|<code>refresh_failed_sync</code>),
+<code>kept_token</code> (TRUE), <code>error_class</code></li>
+</ul>
+</div>
+</div>
+<div id="browser-cookiewebcrypto-error" class="section level3">
+<h3>Browser cookie/WebCrypto error</h3>
+<div id="event-audit_browser_cookie_error" class="section level4">
+<h4>Event: <code>audit_browser_cookie_error</code></h4>
+<ul>
+<li>When: the browser reports it could not set/read the module cookie or
+WebCrypto is unavailable</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>reason</code>,
+<code>url_protocol</code></li>
+<li>Notes: This typically indicates that third-party cookies are
+blocked, all cookies are disabled, or the WebCrypto API is unavailable
+in the environment (e.g., very old browsers or restrictive embedded
+webviews).</li>
+</ul>
+</div>
+</div>
+<div id="invalid-browser-token" class="section level3">
+<h3>Invalid browser token</h3>
+<div id="event-audit_invalid_browser_token" class="section level4">
+<h4>Event: <code>audit_invalid_browser_token</code></h4>
+<ul>
+<li>When: the module receives an invalid <code>shinyOAuth_sid</code>
+value from the browser and requests regeneration</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>reason</code>,
+<code>length</code></li>
+</ul>
+</div>
+</div>
+<div id="token-refresh" class="section level3">
+<h3>Token refresh</h3>
+<div id="event-audit_token_refresh" class="section level4">
+<h4>Event: <code>audit_token_refresh</code></h4>
+<ul>
+<li>When: <code>refresh_token()</code> successfully refreshes the access
+token</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>had_refresh_token</code>,
+<code>new_expires_at</code></li>
+</ul>
+</div>
+</div>
+<div id="userinfo-fetch" class="section level3">
+<h3>Userinfo fetch</h3>
+<div id="event-audit_userinfo" class="section level4">
+<h4>Event: <code>audit_userinfo</code></h4>
+<ul>
+<li>When: <code>get_userinfo()</code> successfully retrieves user
+information</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>sub_digest</code></li>
+</ul>
+</div>
+</div>
+<div id="state-parsing-failures" class="section level3">
+<h3>State parsing failures</h3>
+<p>State parsing failures occur while decoding and validating the
+encrypted wrapper prior to extracting the logical state value.</p>
+<div id="event-audit_state_parse_failure" class="section level4">
+<h4>Event: <code>audit_state_parse_failure</code></h4>
+<ul>
+<li>When: the encrypted state wrapper or its components fail
+validation/decoding</li>
+<li>Context: includes <code>phase = decrypt</code>, a
+<code>reason</code> code (e.g., <code>token_b64_invalid</code>,
+<code>iv_missing</code>, <code>tag_len_invalid</code>),
+<code>token_digest</code>, and any additional details (such as lengths).
+Emitted best-effort from parsing utilities and never interferes with
+control flow.</li>
+</ul>
+</div>
+</div>
+<div id="modulesession-lifecycle" class="section level3">
+<h3>Module/session lifecycle</h3>
+<div id="event-audit_session_started" class="section level4">
+<h4>Event: <code>audit_session_started</code></h4>
+<ul>
+<li>When: the authentication module (<code>oauth_module_server()</code>)
+is initialized for a Shiny session</li>
+<li>Context: <code>module_id</code>, <code>ns_prefix</code>,
+<code>client_provider</code>, <code>client_issuer</code>,
+<code>client_id_digest</code>, plus the standard
+<code>shiny_session</code> context described above</li>
+</ul>
+</div>
+</div>
+</div>
+<div id="where-to-find-these-in-code" class="section level2">
+<h2>Where to find these in code</h2>
+<ul>
+<li>Redirect and login audits are emitted from
+<code>R/methods__login.R</code></li>
+<li>Module lifecycle/session audits are emitted from
+<code>R/oauth_module_server.R</code></li>
+<li>All events flow through <code>audit_event()</code> defined in
+<code>R/errors.R</code>, which delegates to the hook options</li>
+</ul>
+</div>
+<div id="best-practices-for-audit-hooks" class="section level2">
+<h2>Best practices for audit hooks</h2>
+<ul>
+<li>Keep hooks fast and never throw; wrap internals with
+<code>try(..., silent = TRUE)</code> if needed</li>
+<li>Export to your logging backend in JSON for easy parsing</li>
+<li>Do not attempt to reverse digests; use them only for
+correlation</li>
+<li>Consider adding a host/app identifier to the record before
+exporting</li>
+<li>If you also want error traces, set
+<code>options(shinyOAuth.trace_hook=...)</code></li>
+</ul>
+<p>Example of a JSON export hook:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>json_hook <span class="ot">&lt;-</span> <span class="cf">function</span>(event) {</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>    <span class="fu">try</span>({</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>        line <span class="ot">&lt;-</span> jsonlite<span class="sc">::</span><span class="fu">toJSON</span>(event, <span class="at">auto_unbox =</span> <span class="cn">TRUE</span>, <span class="at">null =</span> <span class="st">&quot;null&quot;</span>)</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>        <span class="fu">cat</span>(line, <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span>, <span class="at">file =</span> <span class="st">&quot;shinyOAuth-audit.log&quot;</span>, <span class="at">append =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>    }, <span class="at">silent =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>}</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a></span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_hook =</span> json_hook)</span></code></pre></div>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

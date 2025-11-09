@@ -1,0 +1,34 @@
+Package: shinyOAuth
+Title: Provider-Agnostic OAuth Authentication for 'shiny' Applications
+Version: 0.1.1
+Authors@R: 
+    person("Luka", "Koning", email = "koningluka@gmail.com", role = c("aut", "cre", "cph"))
+Description: Provides a simple, configurable, provider-agnostic 'OAuth 2.0' and
+    'OpenID Connect' (OIDC) authentication framework for 'shiny' applications
+    using 'S7' classes. Defines providers, clients, and tokens, as well
+    as various supporting functions and a 'shiny' module. Features include
+    cross-site request forgery (CSRF) protection, state encryption,
+    'Proof Key for Code Exchange' (PKCE) handling, validation of OIDC identity
+    tokens (nonces, signatures, claims), automatic user info retrieval, asynchronous
+    flows, and hooks for audit logging.
+License: MIT + file LICENSE
+Encoding: UTF-8
+RoxygenNote: 7.3.3
+Imports: S7 (>= 0.2.0), R6 (>= 2.0), rlang (>= 1.0.0), shiny (>=
+        1.7.0), jsonlite (>= 1.0), openssl (>= 2.0.0), httr2 (>=
+        1.0.0), cachem (>= 1.1.0), jose (>= 1.2.0), cli (>= 3.0.0),
+        htmltools (>= 0.5.0)
+Suggests: testthat (>= 3.0.0), knitr, rmarkdown, webfakes, promises,
+        future, withr, later, sodium, shinytest2, xml2
+Depends: R (>= 4.1.0)
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+URL: https://github.com/lukakoning/shinyOAuth,
+        https://lukakoning.github.io/shinyOAuth/
+BugReports: https://github.com/lukakoning/shinyOAuth/issues
+NeedsCompilation: no
+Packaged: 2025-11-05 15:15:20 UTC; dhrko
+Author: Luka Koning [aut, cre, cph]
+Maintainer: Luka Koning <koningluka@gmail.com>
+Repository: CRAN
+Date/Publication: 2025-11-09 16:10:02 UTC

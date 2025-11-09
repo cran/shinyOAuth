@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Usage</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Usage</h1>
+
+
+
+<div id="overview" class="section level2">
+<h2>Overview</h2>
+<p>‘shinyOAuth’ implements provider‑agnostic OAuth 2.0 and OpenID
+Connect (OIDC) authorization/authentication for Shiny apps, with modern
+S7 classes and secure defaults. It streamlines the full
+authorization/authentication flow, including:</p>
+<ul>
+<li>Building authorization URLs and redirecting unauthenticated
+users</li>
+<li>State, nonce, and PKCE generation, sealing, and verification</li>
+<li>Authorization code exchange and token validation</li>
+<li>Optional userinfo retrieval &amp; ID token signature/claims
+validation</li>
+<li>Proactive token refresh and re‑authentication triggers</li>
+</ul>
+<p>For a full step-by-step protocol breakdown, see the separate
+vignette:
+<code>vignette(&quot;authentication-flow&quot;, package = &quot;shinyOAuth&quot;)</code>.</p>
+<p>For a detailed explanation of audit logging key events during the
+flow, see:
+<code>vignette(&quot;audit-logging&quot;, package = &quot;shinyOAuth&quot;)</code>.</p>
+</div>
+<div id="minimal-shiny-module-example" class="section level2">
+<h2>Minimal Shiny module example</h2>
+<p>Below is a minimal example using a GitHub’s OAuth 2.0 app (same as
+shown in the README). Register an OAuth application at <a href="https://github.com/settings/developers" class="uri">https://github.com/settings/developers</a> and set
+environment variables <code>GITHUB_OAUTH_CLIENT_ID</code> and
+<code>GITHUB_OAUTH_CLIENT_SECRET</code>.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(shiny)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">library</span>(shinyOAuth)</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider_github</span>()</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a></span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;GITHUB_OAUTH_CLIENT_ID&quot;</span>),</span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;GITHUB_OAUTH_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;http://127.0.0.1:8100&quot;</span>,</span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;read:user&quot;</span>, <span class="st">&quot;user:email&quot;</span>)</span>
+<span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a>)</span>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a></span>
+<span id="cb1-14"><a href="#cb1-14" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">fluidPage</span>(</span>
+<span id="cb1-15"><a href="#cb1-15" tabindex="-1"></a>  <span class="co"># Include JavaScript dependency:</span></span>
+<span id="cb1-16"><a href="#cb1-16" tabindex="-1"></a>  <span class="fu">use_shinyOAuth</span>(),</span>
+<span id="cb1-17"><a href="#cb1-17" tabindex="-1"></a>  <span class="co"># Render login status &amp; user info:</span></span>
+<span id="cb1-18"><a href="#cb1-18" tabindex="-1"></a>  <span class="fu">uiOutput</span>(<span class="st">&quot;login&quot;</span>)</span>
+<span id="cb1-19"><a href="#cb1-19" tabindex="-1"></a>)</span>
+<span id="cb1-20"><a href="#cb1-20" tabindex="-1"></a></span>
+<span id="cb1-21"><a href="#cb1-21" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb1-22"><a href="#cb1-22" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(<span class="st">&quot;auth&quot;</span>, client, <span class="at">auto_redirect =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb1-23"><a href="#cb1-23" tabindex="-1"></a>  output<span class="sc">$</span>login <span class="ot">&lt;-</span> <span class="fu">renderUI</span>({</span>
+<span id="cb1-24"><a href="#cb1-24" tabindex="-1"></a>    <span class="cf">if</span> (auth<span class="sc">$</span>authenticated) {</span>
+<span id="cb1-25"><a href="#cb1-25" tabindex="-1"></a>      user_info <span class="ot">&lt;-</span> auth<span class="sc">$</span>token<span class="sc">@</span>userinfo</span>
+<span id="cb1-26"><a href="#cb1-26" tabindex="-1"></a>      <span class="fu">tagList</span>(</span>
+<span id="cb1-27"><a href="#cb1-27" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">p</span>(<span class="st">&quot;You are logged in!&quot;</span>),</span>
+<span id="cb1-28"><a href="#cb1-28" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">pre</span>(<span class="fu">paste</span>(<span class="fu">capture.output</span>(<span class="fu">str</span>(user_info)), <span class="at">collapse =</span> <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span>))</span>
+<span id="cb1-29"><a href="#cb1-29" tabindex="-1"></a>      )</span>
+<span id="cb1-30"><a href="#cb1-30" tabindex="-1"></a>    } <span class="cf">else</span> {</span>
+<span id="cb1-31"><a href="#cb1-31" tabindex="-1"></a>      tags<span class="sc">$</span><span class="fu">p</span>(<span class="st">&quot;You are not logged in.&quot;</span>)</span>
+<span id="cb1-32"><a href="#cb1-32" tabindex="-1"></a>    }</span>
+<span id="cb1-33"><a href="#cb1-33" tabindex="-1"></a>  })</span>
+<span id="cb1-34"><a href="#cb1-34" tabindex="-1"></a>}</span>
+<span id="cb1-35"><a href="#cb1-35" tabindex="-1"></a></span>
+<span id="cb1-36"><a href="#cb1-36" tabindex="-1"></a><span class="fu">runApp</span>(<span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>)</span></code></pre></div>
+<p>Note that <code>ui</code> includes <code>use_shinyOAuth()</code> to
+load the necessary JavaScript dependency. Always place
+<code>use_shinyOAuth()</code> in your UI; otherwise, the module will not
+function. You may place it near the top-level of your UI (e.g., inside
+<code>fluidPage()</code>, <code>tagList()</code>, or
+<code>bslib::page()</code>).</p>
+</div>
+<div id="manual-login-button-variant" class="section level2">
+<h2>Manual login button variant</h2>
+<p>Below is an example where the user clicks a button to start the login
+process instead of being redirected immediately on page load.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">library</span>(shiny)</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="fu">library</span>(shinyOAuth)</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider_github</span>()</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a></span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;GITHUB_OAUTH_CLIENT_ID&quot;</span>),</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;GITHUB_OAUTH_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;http://127.0.0.1:8100&quot;</span>,</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;read:user&quot;</span>, <span class="st">&quot;user:email&quot;</span>)</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>)</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a></span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">fluidPage</span>(</span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>  <span class="fu">use_shinyOAuth</span>(),</span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;login_btn&quot;</span>, <span class="st">&quot;Login&quot;</span>),</span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>  <span class="fu">uiOutput</span>(<span class="st">&quot;login&quot;</span>)</span>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>)</span>
+<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a></span>
+<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb2-22"><a href="#cb2-22" tabindex="-1"></a>    <span class="st">&quot;auth&quot;</span>,</span>
+<span id="cb2-23"><a href="#cb2-23" tabindex="-1"></a>    client,</span>
+<span id="cb2-24"><a href="#cb2-24" tabindex="-1"></a>    <span class="at">auto_redirect =</span> <span class="cn">FALSE</span></span>
+<span id="cb2-25"><a href="#cb2-25" tabindex="-1"></a>  )</span>
+<span id="cb2-26"><a href="#cb2-26" tabindex="-1"></a></span>
+<span id="cb2-27"><a href="#cb2-27" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input<span class="sc">$</span>login_btn, {</span>
+<span id="cb2-28"><a href="#cb2-28" tabindex="-1"></a>    auth<span class="sc">$</span><span class="fu">request_login</span>()</span>
+<span id="cb2-29"><a href="#cb2-29" tabindex="-1"></a>  })</span>
+<span id="cb2-30"><a href="#cb2-30" tabindex="-1"></a></span>
+<span id="cb2-31"><a href="#cb2-31" tabindex="-1"></a>  output<span class="sc">$</span>login <span class="ot">&lt;-</span> <span class="fu">renderUI</span>({</span>
+<span id="cb2-32"><a href="#cb2-32" tabindex="-1"></a>    <span class="cf">if</span> (auth<span class="sc">$</span>authenticated) {</span>
+<span id="cb2-33"><a href="#cb2-33" tabindex="-1"></a>      user_info <span class="ot">&lt;-</span> auth<span class="sc">$</span>token<span class="sc">@</span>userinfo</span>
+<span id="cb2-34"><a href="#cb2-34" tabindex="-1"></a>      <span class="fu">tagList</span>(</span>
+<span id="cb2-35"><a href="#cb2-35" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">p</span>(<span class="st">&quot;You are logged in!&quot;</span>),</span>
+<span id="cb2-36"><a href="#cb2-36" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">pre</span>(<span class="fu">paste</span>(<span class="fu">capture.output</span>(<span class="fu">str</span>(user_info)), <span class="at">collapse =</span> <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span>))</span>
+<span id="cb2-37"><a href="#cb2-37" tabindex="-1"></a>      )</span>
+<span id="cb2-38"><a href="#cb2-38" tabindex="-1"></a>    } <span class="cf">else</span> {</span>
+<span id="cb2-39"><a href="#cb2-39" tabindex="-1"></a>      tags<span class="sc">$</span><span class="fu">p</span>(<span class="st">&quot;You are not logged in.&quot;</span>)</span>
+<span id="cb2-40"><a href="#cb2-40" tabindex="-1"></a>    }</span>
+<span id="cb2-41"><a href="#cb2-41" tabindex="-1"></a>  })</span>
+<span id="cb2-42"><a href="#cb2-42" tabindex="-1"></a>}</span>
+<span id="cb2-43"><a href="#cb2-43" tabindex="-1"></a></span>
+<span id="cb2-44"><a href="#cb2-44" tabindex="-1"></a><span class="fu">runApp</span>(<span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>)</span></code></pre></div>
+</div>
+<div id="making-authenticated-api-calls" class="section level2">
+<h2>Making authenticated API calls</h2>
+<p>Once authenticated, you may want to call an API on behalf of the user
+using the access token. Use <code>client_bearer_req()</code> to quickly
+build an authorized ‘httr2’ request with the correct Bearer token. See
+the example app below; it calls the GitHub API to obtain the user’s
+repositories.</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">library</span>(shiny)</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a><span class="fu">library</span>(shinyOAuth)</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a></span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider_github</span>()</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a></span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;GITHUB_OAUTH_CLIENT_ID&quot;</span>),</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;GITHUB_OAUTH_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;http://127.0.0.1:8100&quot;</span>,</span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;read:user&quot;</span>, <span class="st">&quot;user:email&quot;</span>)</span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>)</span>
+<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a></span>
+<span id="cb3-14"><a href="#cb3-14" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">fluidPage</span>(</span>
+<span id="cb3-15"><a href="#cb3-15" tabindex="-1"></a>  <span class="fu">use_shinyOAuth</span>(),</span>
+<span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a>  <span class="fu">uiOutput</span>(<span class="st">&quot;ui&quot;</span>)</span>
+<span id="cb3-17"><a href="#cb3-17" tabindex="-1"></a>)</span>
+<span id="cb3-18"><a href="#cb3-18" tabindex="-1"></a></span>
+<span id="cb3-19"><a href="#cb3-19" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb3-20"><a href="#cb3-20" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb3-21"><a href="#cb3-21" tabindex="-1"></a>    <span class="st">&quot;auth&quot;</span>,</span>
+<span id="cb3-22"><a href="#cb3-22" tabindex="-1"></a>    client,</span>
+<span id="cb3-23"><a href="#cb3-23" tabindex="-1"></a>    <span class="at">auto_redirect =</span> <span class="cn">TRUE</span></span>
+<span id="cb3-24"><a href="#cb3-24" tabindex="-1"></a>  )</span>
+<span id="cb3-25"><a href="#cb3-25" tabindex="-1"></a>  </span>
+<span id="cb3-26"><a href="#cb3-26" tabindex="-1"></a>  repositories <span class="ot">&lt;-</span> <span class="fu">reactiveVal</span>(<span class="cn">NULL</span>)</span>
+<span id="cb3-27"><a href="#cb3-27" tabindex="-1"></a>  </span>
+<span id="cb3-28"><a href="#cb3-28" tabindex="-1"></a>  <span class="fu">observe</span>({</span>
+<span id="cb3-29"><a href="#cb3-29" tabindex="-1"></a>    <span class="fu">req</span>(auth<span class="sc">$</span>authenticated)</span>
+<span id="cb3-30"><a href="#cb3-30" tabindex="-1"></a>    </span>
+<span id="cb3-31"><a href="#cb3-31" tabindex="-1"></a>    <span class="co"># Example additional API request using the access token</span></span>
+<span id="cb3-32"><a href="#cb3-32" tabindex="-1"></a>    <span class="co"># (e.g., fetch user repositories from GitHub)</span></span>
+<span id="cb3-33"><a href="#cb3-33" tabindex="-1"></a>    req <span class="ot">&lt;-</span> <span class="fu">client_bearer_req</span>(auth<span class="sc">$</span>token, <span class="st">&quot;https://api.github.com/user/repos&quot;</span>)</span>
+<span id="cb3-34"><a href="#cb3-34" tabindex="-1"></a>    resp <span class="ot">&lt;-</span> httr2<span class="sc">::</span><span class="fu">req_perform</span>(req)</span>
+<span id="cb3-35"><a href="#cb3-35" tabindex="-1"></a>    </span>
+<span id="cb3-36"><a href="#cb3-36" tabindex="-1"></a>    <span class="cf">if</span> (httr2<span class="sc">::</span><span class="fu">resp_is_error</span>(resp)) {</span>
+<span id="cb3-37"><a href="#cb3-37" tabindex="-1"></a>      <span class="fu">repositories</span>(<span class="cn">NULL</span>)</span>
+<span id="cb3-38"><a href="#cb3-38" tabindex="-1"></a>    } <span class="cf">else</span> {</span>
+<span id="cb3-39"><a href="#cb3-39" tabindex="-1"></a>      repos_data <span class="ot">&lt;-</span> httr2<span class="sc">::</span><span class="fu">resp_body_json</span>(resp, <span class="at">simplifyVector =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb3-40"><a href="#cb3-40" tabindex="-1"></a>      <span class="fu">repositories</span>(repos_data)</span>
+<span id="cb3-41"><a href="#cb3-41" tabindex="-1"></a>    }</span>
+<span id="cb3-42"><a href="#cb3-42" tabindex="-1"></a>  })</span>
+<span id="cb3-43"><a href="#cb3-43" tabindex="-1"></a>  </span>
+<span id="cb3-44"><a href="#cb3-44" tabindex="-1"></a>  <span class="co"># Render username + their repositories</span></span>
+<span id="cb3-45"><a href="#cb3-45" tabindex="-1"></a>  output<span class="sc">$</span>ui <span class="ot">&lt;-</span> <span class="fu">renderUI</span>({</span>
+<span id="cb3-46"><a href="#cb3-46" tabindex="-1"></a>    <span class="cf">if</span> (<span class="fu">isTRUE</span>(auth<span class="sc">$</span>authenticated)) {</span>
+<span id="cb3-47"><a href="#cb3-47" tabindex="-1"></a>      user_info <span class="ot">&lt;-</span> auth<span class="sc">$</span>token<span class="sc">@</span>userinfo</span>
+<span id="cb3-48"><a href="#cb3-48" tabindex="-1"></a>      repos <span class="ot">&lt;-</span> <span class="fu">repositories</span>()</span>
+<span id="cb3-49"><a href="#cb3-49" tabindex="-1"></a>      </span>
+<span id="cb3-50"><a href="#cb3-50" tabindex="-1"></a>      <span class="fu">return</span>(<span class="fu">tagList</span>(</span>
+<span id="cb3-51"><a href="#cb3-51" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">p</span>(<span class="fu">paste</span>(<span class="st">&quot;You are logged in as:&quot;</span>, user_info<span class="sc">$</span>login)),</span>
+<span id="cb3-52"><a href="#cb3-52" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">h4</span>(<span class="st">&quot;Your repositories:&quot;</span>),</span>
+<span id="cb3-53"><a href="#cb3-53" tabindex="-1"></a>        <span class="cf">if</span> (<span class="sc">!</span><span class="fu">is.null</span>(repos)) {</span>
+<span id="cb3-54"><a href="#cb3-54" tabindex="-1"></a>          tags<span class="sc">$</span><span class="fu">ul</span>(</span>
+<span id="cb3-55"><a href="#cb3-55" tabindex="-1"></a>            <span class="fu">Map</span>(<span class="cf">function</span>(url, name) {</span>
+<span id="cb3-56"><a href="#cb3-56" tabindex="-1"></a>              tags<span class="sc">$</span><span class="fu">li</span>(tags<span class="sc">$</span><span class="fu">a</span>(<span class="at">href =</span> url, <span class="at">target =</span> <span class="st">&quot;_blank&quot;</span>, name))</span>
+<span id="cb3-57"><a href="#cb3-57" tabindex="-1"></a>            }, repos<span class="sc">$</span>html_url, repos<span class="sc">$</span>full_name)</span>
+<span id="cb3-58"><a href="#cb3-58" tabindex="-1"></a>          )</span>
+<span id="cb3-59"><a href="#cb3-59" tabindex="-1"></a>        } <span class="cf">else</span> {</span>
+<span id="cb3-60"><a href="#cb3-60" tabindex="-1"></a>          tags<span class="sc">$</span><span class="fu">p</span>(<span class="st">&quot;Loading repositories...&quot;</span>)</span>
+<span id="cb3-61"><a href="#cb3-61" tabindex="-1"></a>        }</span>
+<span id="cb3-62"><a href="#cb3-62" tabindex="-1"></a>      ))</span>
+<span id="cb3-63"><a href="#cb3-63" tabindex="-1"></a>    }</span>
+<span id="cb3-64"><a href="#cb3-64" tabindex="-1"></a>    </span>
+<span id="cb3-65"><a href="#cb3-65" tabindex="-1"></a>    <span class="fu">return</span>(tags<span class="sc">$</span><span class="fu">p</span>(<span class="st">&quot;You are not logged in.&quot;</span>))</span>
+<span id="cb3-66"><a href="#cb3-66" tabindex="-1"></a>  })</span>
+<span id="cb3-67"><a href="#cb3-67" tabindex="-1"></a>}</span>
+<span id="cb3-68"><a href="#cb3-68" tabindex="-1"></a></span>
+<span id="cb3-69"><a href="#cb3-69" tabindex="-1"></a><span class="fu">runApp</span>(<span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>)</span></code></pre></div>
+<p>For an example application which fetches data from the Spotify web
+API, see:
+<code>vignette(&quot;example-spotify&quot;, package = &quot;shinyOAuth&quot;)</code>.</p>
+</div>
+<div id="async-mode-to-keep-ui-responsive" class="section level2">
+<h2>Async mode to keep UI responsive</h2>
+<p>By default, <code>oauth_module_server()</code> performs network
+operations (authorization code exchange, refresh, userinfo) on the main
+R thread. During transient network errors the package retries with
+backoff, and sleeping on the main thread can block the Shiny event loop
+for the worker process.</p>
+<p>To avoid blocking, enable async mode and configure a future
+backend:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>future<span class="sc">::</span><span class="fu">plan</span>(future<span class="sc">::</span>multisession)</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a></span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>    <span class="st">&quot;auth&quot;</span>,</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>    client,</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>    <span class="at">auto_redirect =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>    <span class="at">async =</span> <span class="cn">TRUE</span> <span class="co"># Run token exchange &amp; refresh off the main thread</span></span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  )</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>  </span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>  <span class="co"># ...</span></span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a>}</span></code></pre></div>
+<p>If you need to keep <code>async = FALSE</code>, you may consider
+reducing retry behaviour to limit blocking during provider incidents.
+See ‘Global options’ and then ‘HTTP timeout/retries’.</p>
+</div>
+<div id="global-options" class="section level2">
+<h2>Global options</h2>
+<p>The package provides several global options to customize behavior.
+Below is a list of all available options.</p>
+<div id="observabilitylogging" class="section level3">
+<h3>Observability/logging</h3>
+<ul>
+<li><code>options(shinyOAuth.print_errors = TRUE)</code> – concise error
+lines (interactive / tests only)</li>
+<li><code>options(shinyOAuth.print_traceback = TRUE)</code> – include
+backtraces (interactive / tests only)</li>
+<li><code>options(shinyOAuth.expose_error_body = TRUE)</code> – include
+sanitized HTTP bodies (may reveal details)</li>
+<li><code>options(shinyOAuth.trace_hook = function(event){ ... })</code>
+– structured events (errors, http, etc.)</li>
+<li><code>options(shinyOAuth.audit_hook = function(event){ ... })</code>
+– separate audit stream</li>
+</ul>
+<p>See <code>vignette(&quot;audit-logging&quot;, package = &quot;shinyOAuth&quot;)</code>
+for details about audit and trace hooks.</p>
+</div>
+<div id="networkingsecurity" class="section level3">
+<h3>Networking/security</h3>
+<ul>
+<li><code>options(shinyOAuth.leeway = 30)</code> – default ID token
+exp/iat leeway seconds</li>
+<li><code>options(shinyOAuth.allowed_non_https_hosts = c(&quot;localhost&quot;, &quot;127.0.0.1&quot;, &quot;::1&quot;))</code>
+- allows hosts to use <code>http://</code> scheme instead of
+<code>https://</code></li>
+<li><code>options(shinyOAuth.allowed_hosts = c())</code> – when
+non‑empty, restricts accepted hosts to this whitelist</li>
+<li><code>options(shinyOAuth.allow_hs = TRUE)</code> – opt‑in HMAC
+validation for ID tokens (HS256/HS384/HS512). Requires a strictly
+server‑side <code>client_secret</code></li>
+<li><code>options(shinyOAuth.client_assertion_ttl = 300L)</code> –
+lifetime in seconds for JWT client assertions used with
+<code>client_secret_jwt</code> or <code>private_key_jwt</code> token
+endpoint authentication. Values below 60 seconds are coerced up to a
+safe minimum; default is 300 seconds</li>
+<li><code>options(shinyOAuth.state_fail_delay_ms = c(10, 30))</code> –
+adds a small randomized delay (in milliseconds) before any state
+validation failure (e.g., malformed token, IV/tag/ciphertext issues, or
+GCM authentication failure). This helps reduce timing side‑channels
+between different failure modes</li>
+</ul>
+<p>Note on <code>allowed_hosts</code>: patterns support globs
+(<code>*</code>, <code>?</code>). Using a catch‑all like
+<code>&quot;*&quot;</code> matches any host and effectively disables endpoint host
+restrictions (scheme rules still apply). Avoid this unless you truly
+intend to accept any host; prefer pinning to your domain(s), e.g.,
+<code>c(&quot;.example.com&quot;)</code>.</p>
+</div>
+<div id="http-settings-timeout-retries-user-agent" class="section level3">
+<h3>HTTP settings (timeout, retries, user agent)</h3>
+<ul>
+<li><code>options(shinyOAuth.timeout = 5)</code> – default HTTP timeout
+(seconds) applied to all outbound requests (discovery, JWKS, token
+exchange, userinfo). Increase if your provider/network is slow</li>
+<li><code>options(shinyOAuth.retry_max_tries = 3L)</code> – maximum
+attempts for transient failures (network errors, 408, 429, 5xx)</li>
+<li><code>options(shinyOAuth.retry_backoff_base = 0.5)</code> – base
+backoff in seconds used for exponential backoff with jitter</li>
+<li><code>options(shinyOAuth.retry_backoff_cap = 5)</code> – per‑attempt
+cap on backoff seconds (before jitter)</li>
+<li><code>options(shinyOAuth.retry_status = c(408L, 429L, 500:599))</code>
+– HTTP statuses considered transient and retried</li>
+<li><code>options(shinyOAuth.user_agent = &quot;shinyOAuth/&lt;version&gt; R/&lt;version&gt; httr2/&lt;version&gt;&quot;)</code>
+– override the default User‑Agent header applied to all outbound
+requests. By default this string is built dynamically from the installed
+package/runtime versions; set a custom string here if your organization
+requires a specific format</li>
+</ul>
+</div>
+<div id="development-softening" class="section level3">
+<h3>Development softening</h3>
+<ul>
+<li><code>options(shinyOAuth.skip_browser_token = TRUE)</code> – skip
+browser cookie binding</li>
+<li><code>options(shinyOAuth.skip_id_sig = TRUE)</code> – skip ID token
+signature verification</li>
+</ul>
+<p>Don’t enable these in production. They disable key security checks
+and are intended for local testing only. Use
+<code>error_on_softened()</code> at startup to fail fast if softening
+flags are enabled in an environment where they should not be.</p>
+</div>
+<div id="state-envelope-size-caps" class="section level3">
+<h3>State envelope size caps</h3>
+<ul>
+<li><code>options(shinyOAuth.state_max_token_chars = 8192)</code> –
+maximum allowed length of the base64url-encoded <code>state</code> query
+parameter</li>
+<li><code>options(shinyOAuth.state_max_wrapper_bytes = 8192)</code> –
+maximum decoded byte size of the outer JSON wrapper (before
+parsing)</li>
+<li><code>options(shinyOAuth.state_max_ct_b64_chars = 8192)</code> –
+maximum allowed length of the base64url-encoded ciphertext inside the
+wrapper</li>
+<li><code>options(shinyOAuth.state_max_ct_bytes = 8192)</code> – maximum
+decoded byte size of the ciphertext before attempting AES-GCM
+decrypt</li>
+</ul>
+<p>These prevent maliciously large state parameters from causing
+excessive CPU or memory usage during decoding and decryption.</p>
+</div>
+</div>
+<div id="browser-cookie-preventing-xss" class="section level2">
+<h2>Browser cookie &amp; preventing XSS</h2>
+<p><code>oauth_module_server()</code> binds the browser and server
+session with a short‑lived cookie that must be readable from client‑side
+JavaScript to bridge values into Shiny.</p>
+<p>The cookie ensures that the same browser which initiated login is the
+one receiving the callback. This specifically prevents an attack where
+an attacker tricks a user into clicking a link which initiates login for
+the attacker’s account, confusing the user into logging in as the
+attacker (login confusion).</p>
+<p>The cookie is set with the <code>HttpOnly</code> flag disabled so
+that it can be read by JavaScript. This is necessary to bridge the
+cookie value into Shiny. However, this means that if your app has XSS
+vulnerabilities, an attacker could read the cookie too.</p>
+<p>While this is a relatively limited attack vector, you should still
+take care to prevent XSS vulnerabilities in your app. An important
+mitigation is to sanitize user inputs before rendering them in the UI
+(e.g., using <code>htmltools::htmlEscape()</code>).</p>
+</div>
+<div id="multiprocess-deployments-share-state-store-key" class="section level2">
+<h2>Multi‑process deployments: share state store &amp; key</h2>
+<p>When you run multiple Shiny R processes (e.g., multiple workers,
+Shiny Server Pro, RStudio Connect, Docker/Kubernetes replicas, or any
+non‑sticky load balancer), you must ensure that:</p>
+<ul>
+<li>All workers share the same state store (e.g.,
+<code>cachem::cache_disk()</code> pointing at a shared directory, or a
+custom cachem backend; the default <code>cachem::cache_mem()</code> is
+per‑process only and is then not shared)</li>
+<li>All workers share the same state key (e.g., read from environment
+variable; by default, a random key is generated per client instance
+which is then not shared)</li>
+</ul>
+<p>This is because during the authorization code + PKCE flow,
+‘shinyOAuth’ creates an encrypted “state envelope” which is stored in a
+cache (the state_store) and echoed back via the <code>state</code> query
+parameter. The envelope is sealed with AES‑GCM using your state_key. If
+the callback lands on a different worker than the one that initiated
+login, that worker must be able to both read the cached entry and
+decrypt the envelope using the same key. If workers have different keys,
+decryption will fail and the login flow will abort with a state
+error.</p>
+<p>When providing a custom state key, please ensure it has high entropy
+(minimum 32 characters or 32 raw bytes; recommended 64–128 characters)
+to prevent offline guessing attacks against the encrypted state. Do not
+use short or human‑memorable passphrases.</p>
+</div>
+<div id="security-checklist" class="section level2">
+<h2>Security checklist</h2>
+<p>Below is a checklist of things you may want to think about when
+bringing your app to production:</p>
+<ul>
+<li>Use HTTPS everywhere in production</li>
+<li>Verify issuer used in your provider is correct</li>
+<li>In your <code>OAuthProvider</code>, set as many of the security
+options as possible; for instance, set
+<code>jwks_host_issuer_match</code>/<code>jwks_host_allow_only</code>
+(if your provider uses a different host for JWKS)</li>
+<li>Have your <code>OAuthClient</code> request the minimum scopes
+necessary; give your app registration only the permissions it needs</li>
+<li>Do not show <code>$error_description</code> to your users; never
+expose tokens in UI or logs</li>
+<li>Keep secrets safe in environment variables (e.g.,
+<code>OAUTH_CLIENT_ID</code>, <code>OAUTH_CLIENT_SECRET</code>)</li>
+<li>Sanitize user inputs before rendering them in the UI (e.g., using
+<code>htmltools::htmlEscape()</code>)</li>
+<li>Make use of audit logging (see
+<code>vignette(&quot;audit-logging&quot;, package = &quot;shinyOAuth&quot;)</code>) and
+monitor these logs</li>
+<li>Use a provider which enforces strong authentication (e.g.,
+multi-factor authentication)</li>
+<li>Set Content Security Policy (CSP) headers to restrict resource
+loading and mitigate XSS attacks; (requires middleware; can’t be done in
+Shiny)</li>
+<li>Log IP addresses of those accessing your app (requires middleware;
+can’t be done in Shiny)</li>
+</ul>
+<p>While this R package has been developed with care and the OAuth
+2.0/OIDC protocols contain many security features, no guarantees can be
+made in the realm of cybersecurity. For highly sensitive applications,
+consider a layered (‘defense-in-depth’) approach to security (for
+example, adding an IP whitelist as an additional safeguard).</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>
