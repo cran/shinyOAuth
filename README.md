@@ -29,7 +29,7 @@ and works with various OAuth 2.0/OIDC providers and protocol features.
 
 ## Features
 
-- Shiny module: `oauth_module_server()` gives you a ready‑to‑use OAuth authentication flow
+- Shiny module: `oauth_module_server()` gives you a ready‑to‑use OAuth 2.0/OIDC authentication flow
   with secure defaults. Easily read authentication status, token details, & user info as reactive values
   in your Shiny server logic
 
@@ -83,7 +83,7 @@ this example yourself, you can register an app at your [GitHub Developer Setting
 library(shiny)
 library(shinyOAuth)
 
-# GitHub OAuth provider has been preconfigured in the package
+# GitHub OAuth 2.0 provider has been preconfigured in the package
 #  - You can quickly configure OIDC providers with `oauth_provider_oidc_discover()`
 #  - You can manually configure every other provider with `oauth_provider()`
 provider <- oauth_provider_github()
@@ -127,7 +127,13 @@ server <- function(input, output, session) {
   })
 }
 
-runApp(shinyApp(ui, server), port = 8100)
+runApp(
+  shinyApp(ui, server), port = 8100, 
+  launch.browser = FALSE
+)
+
+# Open the app in your regular browser at http://127.0.01:8100
+# (viewers in RStudio/Positron/etc. cannot perform necessary redirects)
 ```
 
 ### Logging/auditing
@@ -147,3 +153,10 @@ For an in-depth step-by-step explanation of what happens during the authenticati
 
 For a checklist of security considerations and best practices for production use, see:
 `vignette("usage", package = "shinyOAuth")` ([link](https://lukakoning.github.io/shinyOAuth/articles/usage.html#security-checklist)).
+
+### For developers: tests & integration tests
+
+The package has a standard 'testthat' test suite under `tests/testthat/`.
+An additional set of integration tests against a local Keycloak instance (in Docker/Podman) is provided under `integration/keycloak/`.
+These integration tests also include browser-driven end-to-end tests using 'shinytest2' and 'chromote'.
+Finally, a minimal demo app deployment is provided under `integration/gcp/` for Google Cloud Run using a GitHub OAuth 2.0 app.

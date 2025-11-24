@@ -1422,7 +1422,13 @@ features, see:
 <span id="cb1-1062"><a href="#cb1-1062" tabindex="-1"></a></span>
 <span id="cb1-1063"><a href="#cb1-1063" tabindex="-1"></a><span class="co"># Run app ----------------------------------------------------------------------</span></span>
 <span id="cb1-1064"><a href="#cb1-1064" tabindex="-1"></a></span>
-<span id="cb1-1065"><a href="#cb1-1065" tabindex="-1"></a>shiny<span class="sc">::</span><span class="fu">runApp</span>(<span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>)</span></code></pre></div>
+<span id="cb1-1065"><a href="#cb1-1065" tabindex="-1"></a>shiny<span class="sc">::</span><span class="fu">runApp</span>(</span>
+<span id="cb1-1066"><a href="#cb1-1066" tabindex="-1"></a>  <span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>,</span>
+<span id="cb1-1067"><a href="#cb1-1067" tabindex="-1"></a>  <span class="at">launch.browser =</span> <span class="cn">FALSE</span></span>
+<span id="cb1-1068"><a href="#cb1-1068" tabindex="-1"></a>)</span>
+<span id="cb1-1069"><a href="#cb1-1069" tabindex="-1"></a></span>
+<span id="cb1-1070"><a href="#cb1-1070" tabindex="-1"></a><span class="co"># Open the app in your regular browser at http://127.0.01:8100</span></span>
+<span id="cb1-1071"><a href="#cb1-1071" tabindex="-1"></a><span class="co"># (viewers in RStudio/Positron/etc. cannot perform necessary redirects)</span></span></code></pre></div>
 </div>
 
 
