@@ -8,7 +8,8 @@ introspect_token(
   oauth_client,
   oauth_token,
   which = c("access", "refresh"),
-  async = FALSE
+  async = FALSE,
+  shiny_session = NULL
 )
 }
 \arguments{
@@ -20,6 +21,10 @@ introspect_token(
 
 \item{async}{Logical, default FALSE. If TRUE and promises is available, run
 in background and return a promise resolving to the result list}
+
+\item{shiny_session}{Optional pre-captured Shiny session context (from
+\code{capture_shiny_session_context()}) to include in audit events. Used when
+calling from async workers that lack access to the reactive domain.}
 }
 \value{
 A list with fields: supported, active, raw, status
@@ -37,8 +42,9 @@ Authentication to the introspection endpoint mirrors the provider's
 \item "body": form fields \code{client_id} and (when available) \code{client_secret}.
 \item "client_secret_jwt" / "private_key_jwt": a signed JWT client assertion
 is generated (RFC 7523) and sent via \code{client_assertion_type} and
-\code{client_assertion}, with \code{aud} set to the provider's
-\code{introspection_url}.
+\code{client_assertion}, with \code{aud} resolved via
+\code{resolve_client_assertion_audience()} (so \code{client_assertion_audience}
+overrides are honored).
 }
 }
 \details{
@@ -49,7 +55,8 @@ returns \code{supported = FALSE}, \code{active = NA}, and \code{status = "intros
 \item If the endpoint responds with an HTTP error (e.g., 404/500) or the body
 cannot be parsed or does not include a usable \code{active} field, the function
 does not throw. It returns \code{supported = TRUE}, \code{active = NA}, and a
-descriptive \code{status} (for example, \code{"http_404"}). In this context, \code{NA}
+descriptive \code{status} (for example, \code{"http_404"}, \code{"invalid_json"},
+\code{"missing_active"}). In this context, \code{NA}
 means "unknown" and will not break flows unless your code explicitly
 requires a definitive result (i.e., \code{isTRUE(result$active)}).
 \item Providers vary in how they encode the RFC 7662 \code{active} field (logical,

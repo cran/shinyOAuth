@@ -14,6 +14,7 @@ oauth_module_server(
   refresh_proactively = FALSE,
   refresh_lead_seconds = 60,
   refresh_check_interval = 10000,
+  revoke_on_session_end = FALSE,
   tab_title_cleaning = TRUE,
   tab_title_replacement = NULL,
   browser_cookie_path = NULL,
@@ -66,6 +67,16 @@ proactive refresh (default: 60)}
 expiry/refresh (default: 10000 ms). When expiry is known, the module uses
 adaptive scheduling to wake up exactly when needed; this interval is used
 as a safety net or when expiry is unknown/infinite}
+
+\item{revoke_on_session_end}{If TRUE, automatically revokes provider tokens
+when the Shiny session ends (e.g., browser tab closed, session timeout).
+This is a best-effort operation. Revocation runs asynchronously only when
+the module is configured with \code{async = TRUE} (otherwise it runs
+synchronously).
+Requires the provider to have a \code{revocation_url} configured. Default is
+FALSE. Note that session-end revocation may not always succeed (e.g.,
+network issues, provider unavailable), so combine with appropriate token
+lifetimes on the provider side.}
 
 \item{tab_title_cleaning}{If TRUE (default), removes any query string suffix
 from the browser tab title after the OAuth callback, so titles like
@@ -124,6 +135,9 @@ contain even more sensitive information which could aid an attacker.
 double-submit protection; NULL if not yet set
 \item \code{pending_callback}: internal list(code, state); used to defer token
 exchange until \code{browser_token} is available; NULL otherwise.
+\item \code{pending_error}: internal list(error, error_description, state); used to
+defer error-response state consumption until \code{browser_token} is available;
+NULL otherwise.
 \item \code{pending_login}: internal logical; TRUE when a login was requested but must
 wait for \code{browser_token} to be set, FALSE otherwise.
 \item \code{auto_redirected}: internal logical; TRUE once the module has initiated an
@@ -219,29 +233,22 @@ client's \code{state_store} TTL. Internally, the module reads
 \code{client@state_store$info()$max_age} and uses that value for the cookie's
 \code{Max-Age}/\code{Expires}. When the cache does not expose a finite \code{max_age}, a
 conservative default of 5 minutes (300 seconds) is used to align with the
-built-in \code{cachem::cache_mem(max_age = 300)} default and the state payload's
-\code{issued_at} validation window.
-\item Watchdog for missing browser token: to catch misconfiguration early during
-development, the module includes a short watchdog. If the browser token
-cookie is not set within 1500ms of module initialization, a warning
-is emitted to the R console. This likely means you forgot to include
-\code{use_shinyOAuth()} in your UI, but it may also indicate that a user
-of your app is using a browser with JavaScript disabled. The watchdog
-prints a warning only once per R session, but if you want to suppress it
-permanently, you can set \code{options(shinyOAuth.disable_watchdog_warning = TRUE)}.
+built-in \code{cachem::cache_mem(max_age = 300)} default. Separately, the state
+payload \code{issued_at} freshness window is controlled by the client's
+\code{state_payload_max_age} (default 300 seconds).
 }
 }
 \examples{
 if (
   # Example requires configured GitHub OAuth 2.0 app
   # (go to https://github.com/settings/developers to create one):
-  nzchar(Sys.getenv("GITHUB_OAUTH_CLIENT_ID")) 
-  && nzchar(Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"))
-  && interactive()
+  nzchar(Sys.getenv("GITHUB_OAUTH_CLIENT_ID")) &&
+    nzchar(Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET")) &&
+    interactive()
 ) {
   library(shiny)
   library(shinyOAuth)
-  
+
   # Define client
   client <- oauth_client(
     provider = oauth_provider_github(),
@@ -249,7 +256,7 @@ if (
     client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
     redirect_uri = "http://127.0.0.1:8100"
   )
-  
+
   # Choose which app you want to run
   app_to_run <- NULL
   while (!isTRUE(app_to_run \%in\% c(1:4))) {
@@ -264,7 +271,7 @@ if (
       )
     )
   }
-  
+
   if (app_to_run \%in\% c(1:3)) {
     cli::cli_alert_info(paste0(
       "Will run example app {app_to_run} on {.url http://127.0.0.1:8100}\n",
@@ -272,14 +279,14 @@ if (
       "cannot perform necessary redirects)"
     ))
   }
-  
+
   # Example app with auto-redirect (1) -----------------------------------------
-  
+
   ui_1 <- fluidPage(
     use_shinyOAuth(),
     uiOutput("login")
   )
-  
+
   server_1 <- function(input, output, session) {
     # Auto-redirect (default):
     auth <- oauth_module_server(
@@ -287,7 +294,7 @@ if (
       client,
       auto_redirect = TRUE
     )
-    
+
     output$login <- renderUI({
       if (auth$authenticated) {
         user_info <- auth$token@userinfo
@@ -300,35 +307,35 @@ if (
       }
     })
   }
-  
+
   app_1 <- shinyApp(ui_1, server_1)
   if (app_to_run == "1") {
     runApp(
-      app_1, port = 8100,
+      app_1,
+      port = 8100,
       launch.browser = FALSE
     )
   }
-  
-  
+
   # Example app with manual login button (2) -----------------------------------
-  
+
   ui_2 <- fluidPage(
     use_shinyOAuth(),
     actionButton("login_btn", "Login"),
     uiOutput("login")
   )
-  
+
   server_2 <- function(input, output, session) {
     auth <- oauth_module_server(
       "auth",
       client,
       auto_redirect = FALSE
     )
-    
+
     observeEvent(input$login_btn, {
       auth$request_login()
     })
-    
+
     output$login <- renderUI({
       if (auth$authenticated) {
         user_info <- auth$token@userinfo
@@ -341,43 +348,43 @@ if (
       }
     })
   }
-  
+
   app_2 <- shinyApp(ui_2, server_2)
   if (app_to_run == "2") {
     runApp(
-      app_2, port = 8100,
+      app_2,
+      port = 8100,
       launch.browser = FALSE
     )
   }
-  
 
   # Example app requesting additional resource with access token (3) -----------
-  
+
   # Below app shows the authenticated username + their GitHub repositories,
   # fetched via GitHub API using the access token obtained during login
-  
+
   ui_3 <- fluidPage(
     use_shinyOAuth(),
     uiOutput("ui")
   )
-  
+
   server_3 <- function(input, output, session) {
     auth <- oauth_module_server(
       "auth",
       client,
       auto_redirect = TRUE
     )
-    
+
     repositories <- reactiveVal(NULL)
-    
+
     observe({
       req(auth$authenticated)
-      
+
       # Example additional API request using the access token
       # (e.g., fetch user repositories from GitHub)
       req <- client_bearer_req(auth$token, "https://api.github.com/user/repos")
       resp <- httr2::req_perform(req)
-      
+
       if (httr2::resp_is_error(resp)) {
         repositories(NULL)
       } else {
@@ -385,36 +392,41 @@ if (
         repositories(repos_data)
       }
     })
-    
+
     # Render username + their repositories
     output$ui <- renderUI({
       if (isTRUE(auth$authenticated)) {
         user_info <- auth$token@userinfo
         repos <- repositories()
-        
+
         return(tagList(
           tags$p(paste("You are logged in as:", user_info$login)),
           tags$h4("Your repositories:"),
           if (!is.null(repos)) {
             tags$ul(
-              Map(function(url, name) {
-                tags$li(tags$a(href = url, target = "_blank", name))
-              }, repos$html_url, repos$full_name)
+              Map(
+                function(url, name) {
+                  tags$li(tags$a(href = url, target = "_blank", name))
+                },
+                repos$html_url,
+                repos$full_name
+              )
             )
           } else {
             tags$p("Loading repositories...")
           }
         ))
       }
-      
+
       return(tags$p("You are not logged in."))
     })
   }
-  
+
   app_3 <- shinyApp(ui_3, server_3)
   if (app_to_run == "3") {
     runApp(
-      app_3, port = 8100,
+      app_3,
+      port = 8100,
       launch.browser = FALSE
     )
   }

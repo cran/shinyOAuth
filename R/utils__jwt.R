@@ -46,9 +46,18 @@ parse_jwt_header <- function(jwt) {
 #'
 #' This function validates an ID token, by checking its signature and claims.
 #'
+#' @param expected_sub If provided, the `sub` claim MUST match this value.
+#'   Used during refresh to ensure the new ID token is for the same user
+#'   (OIDC Core Section 12.2 requirement).
+#'
 #' @keywords internal
 #' @noRd
-validate_id_token <- function(client, id_token, expected_nonce = NULL) {
+validate_id_token <- function(
+  client,
+  id_token,
+  expected_nonce = NULL,
+  expected_sub = NULL
+) {
   S7::check_is_S7(client, class = OAuthClient)
   stopifnot(is_valid_string(id_token))
 
@@ -71,6 +80,8 @@ validate_id_token <- function(client, id_token, expected_nonce = NULL) {
   )
   leeway <- prov@leeway %||% getOption("shinyOAuth.leeway", 30)
   jwks_cache <- prov@jwks_cache
+  pins <- prov@jwks_pins %||% character()
+  pin_mode <- prov@jwks_pin_mode %||% "any"
   client_id <- client@client_id
   client_secret <- client@client_secret
   skip_signature <- isTRUE(allow_skip_signature())
@@ -130,33 +141,64 @@ validate_id_token <- function(client, id_token, expected_nonce = NULL) {
       jwks <- fetch_jwks(
         issuer,
         jwks_cache,
-        pins = prov@jwks_pins %||% character(),
-        pin_mode = prov@jwks_pin_mode %||% "any",
+        pins = pins,
+        pin_mode = pin_mode,
         provider = prov
       )
       verified <- FALSE
       # Determine candidate keys with safer kid handling
       if (!is.null(kid)) {
         # If header has kid, try only matching keys. If none match, refresh JWKS once and try again.
-        kid_keys <- select_candidate_jwks(jwks, header_alg = alg, kid = kid)
+        kid_keys <- select_candidate_jwks(
+          jwks,
+          header_alg = alg,
+          kid = kid,
+          pins = pins
+        )
         if (length(kid_keys) == 0L) {
-          jwks <- fetch_jwks(
-            issuer,
-            jwks_cache,
-            force_refresh = TRUE,
-            pins = prov@jwks_pins %||% character(),
-            pin_mode = prov@jwks_pin_mode %||% "any",
-            provider = prov
-          )
-          kid_keys <- select_candidate_jwks(jwks, header_alg = alg, kid = kid)
+          did_force_refresh <- FALSE
+          if (
+            isTRUE(jwks_force_refresh_allowed(
+              issuer,
+              jwks_cache,
+              pins = pins,
+              pin_mode = pin_mode,
+              min_interval = 30
+            ))
+          ) {
+            did_force_refresh <- TRUE
+            jwks <- fetch_jwks(
+              issuer,
+              jwks_cache,
+              force_refresh = TRUE,
+              pins = pins,
+              pin_mode = pin_mode,
+              provider = prov
+            )
+            kid_keys <- select_candidate_jwks(
+              jwks,
+              header_alg = alg,
+              kid = kid,
+              pins = pins
+            )
+          }
         }
         if (length(kid_keys) == 0L) {
-          err_id_token("No JWKS key matches kid")
+          if (isTRUE(did_force_refresh)) {
+            err_id_token("No JWKS key matches kid")
+          } else {
+            err_id_token("No JWKS key matches kid (JWKS refresh rate-limited)")
+          }
         }
         keys <- kid_keys
       } else {
         # No kid: use usual candidate filtering (use='sig', alg preference)
-        keys <- select_candidate_jwks(jwks, header_alg = alg, kid = NULL)
+        keys <- select_candidate_jwks(
+          jwks,
+          header_alg = alg,
+          kid = NULL,
+          pins = pins
+        )
       }
 
       # Defense-in-depth: filter by key type/curve compatibility with alg
@@ -279,6 +321,10 @@ validate_id_token <- function(client, id_token, expected_nonce = NULL) {
   if (!is_valid_string(payload$sub)) {
     err_id_token("ID token missing sub claim")
   }
+  # OIDC Core 12.2: During refresh, sub MUST match the original ID token's sub
+  if (is_valid_string(expected_sub) && !identical(payload$sub, expected_sub)) {
+    err_id_token("ID token sub claim does not match original (OIDC 12.2)")
+  }
   if (is.null(payload$exp)) {
     err_id_token("ID token missing exp claim")
   }
@@ -308,7 +354,7 @@ validate_id_token <- function(client, id_token, expected_nonce = NULL) {
     err_id_token("iat claim must be a single finite number when present")
   }
   iat_val <- as.numeric(payload$iat)
-  if ((iat_val - lwe) >= now) {
+  if (iat_val > (now + lwe)) {
     err_id_token("ID token issued in the future")
   }
   if (!is.null(payload$nbf)) {
@@ -317,8 +363,8 @@ validate_id_token <- function(client, id_token, expected_nonce = NULL) {
     }
     nbf_val <- as.numeric(payload$nbf)
     # Token is not yet valid when the not-before time is beyond allowed clock skew.
-    # Use a >= comparison to avoid test flakiness around second boundaries.
-    if (nbf_val >= (now + lwe)) {
+    # Use a > comparison for consistency with exp/iat boundary handling.
+    if (nbf_val > (now + lwe)) {
       err_id_token("ID token not yet valid (nbf)")
     }
   }
@@ -355,7 +401,7 @@ validate_id_token <- function(client, id_token, expected_nonce = NULL) {
 #'  - sub: client_id
 #'  - aud: token endpoint URL (passed as `aud`)
 #'  - iat: current epoch seconds
-#'  - exp: iat + ttl (default 300s; override with options(shinyOAuth.client_assertion_ttl))
+#'  - exp: iat + ttl (default 120s; override with options(shinyOAuth.client_assertion_ttl))
 #'  - jti: random unique identifier
 #'
 #' @keywords internal
@@ -379,13 +425,13 @@ build_client_assertion <- function(client, aud) {
       alg <- choose_default_alg_for_private_key(key0)
     }
   }
-  # TTL (seconds) for client assertion; default 5 minutes
+  # TTL (seconds) for client assertion; default 2 minutes
   ttl <- suppressWarnings(as.integer(getOption(
     "shinyOAuth.client_assertion_ttl",
-    300L
+    120L
   )))
   if (!is.finite(ttl) || is.na(ttl) || ttl < 60L) {
-    ttl <- 300L
+    ttl <- 120L
   }
   now <- floor(as.numeric(Sys.time()))
   claims <- list(
@@ -423,7 +469,11 @@ build_client_assertion <- function(client, aud) {
           "!" = paste0("Got alg: ", as.character(alg)),
           "i" = "Supported values are HS256, HS384, HS512"
         ),
-        context = list(phase = "build_client_assertion", style = "client_secret_jwt", alg = as.character(alg))
+        context = list(
+          phase = "build_client_assertion",
+          style = "client_secret_jwt",
+          alg = as.character(alg)
+        )
       )
     )
     secret <- client@client_secret %||%
@@ -471,6 +521,35 @@ build_client_assertion <- function(client, aud) {
     c("x" = "build_client_assertion called for non-JWT auth style"),
     context = list(style = as.character(style))
   )
+}
+
+#' Resolve the audience (`aud`) value for a JWT client assertion.
+#'
+#' Uses an explicit client override when present, otherwise uses the exact URL
+#' on the httr2 request (so any URL normalization/modification stays consistent
+#' with the audience claim). Falls back to the provider token_url for non-httr2
+#' request doubles used in tests.
+#'
+#' @keywords internal
+#' @noRd
+resolve_client_assertion_audience <- function(client, req) {
+  S7::check_is_S7(client, class = OAuthClient)
+
+  override <- client@client_assertion_audience %||% NA_character_
+  override_chr <- as.character(override[[1]])
+  if (!is.na(override_chr) && nzchar(override_chr)) {
+    return(override_chr)
+  }
+
+  if (inherits(req, "httr2_request")) {
+    url0 <- req$url %||% NA_character_
+    url_chr <- as.character(url0[[1]])
+    if (!is.na(url_chr) && nzchar(url_chr)) {
+      return(url_chr)
+    }
+  }
+
+  client@provider@token_url
 }
 
 #' Normalize a client private key input to an openssl::key

@@ -1,3 +1,95 @@
+#' Internal: Disable HTTP redirect following
+#'
+#' Security-hardened helper that prevents httr2 from automatically following
+#' redirect responses (3xx). This is critical for sensitive requests (token
+#' exchange, refresh, introspection, revocation, userinfo, OIDC discovery,
+#' JWKS) to prevent:
+#'
+#' - Leaking authorization codes, tokens, client secrets, PKCE verifiers, or
+#'   other credentials to malicious or misconfigured redirect targets.
+#' - Bypassing host validation (is_ok_host) since initial URL is validated but
+#'   the redirected URL would not be.
+#' - HTTPS downgrade attacks (HTTPS -> HTTP redirects would expose secrets).
+#'
+#' When a 3xx response is received, the request will return the redirect
+#' response itself rather than following it, allowing callers to fail with a
+#' clear error rather than silently leaking secrets.
+#'
+#' Behavior can be overridden via `options(shinyOAuth.allow_redirect = TRUE)`,
+#' but this is strongly discouraged in production as it undermines security.
+#'
+#' @keywords internal
+#' @noRd
+req_no_redirect <- function(req) {
+  if (!inherits(req, "httr2_request")) {
+    return(req)
+  }
+  # Allow redirects only if explicitly enabled (default: FALSE for security)
+  if (isTRUE(getOption("shinyOAuth.allow_redirect", FALSE))) {
+    return(req)
+  }
+  httr2::req_options(req, followlocation = FALSE)
+}
+
+#' Internal: Check if response is a redirect and reject it
+#'
+#' Security check to ensure 3xx redirect responses are treated as errors for
+#' sensitive endpoints. Since `req_no_redirect()` prevents following redirects,
+#' a 3xx response indicates the endpoint tried to redirect us (misconfig,
+#' attack, or proxy behavior). We should fail rather than parse an empty/wrong
+#' response body.
+#'
+#' Skipped when `options(shinyOAuth.allow_redirect = TRUE)` is set.
+#'
+#' @param resp httr2 response object
+#' @param context Character string describing the operation for error messages
+#'
+#' @return TRUE if the response is NOT a redirect; throws an error if it is
+#'
+#' @keywords internal
+#' @noRd
+reject_redirect_response <- function(resp, context = "request") {
+  # Skip rejection if redirects are explicitly allowed
+  if (isTRUE(getOption("shinyOAuth.allow_redirect", FALSE))) {
+    return(TRUE)
+  }
+  if (!inherits(resp, "httr2_response")) {
+    return(TRUE)
+  }
+  status <- try(httr2::resp_status(resp), silent = TRUE)
+  if (inherits(status, "try-error") || is.na(status)) {
+    return(TRUE)
+  }
+  # 3xx status codes are redirects
+
+  if (status >= 300 && status < 400) {
+    location <- try(httr2::resp_header(resp, "location"), silent = TRUE)
+    if (inherits(location, "try-error")) {
+      location <- NA_character_
+    }
+    err_http(
+      c(
+        "x" = paste0(
+          "Unexpected redirect response during ",
+          context,
+          " (status ",
+          status,
+          ")"
+        ),
+        "!" = "Redirects are disabled for security; endpoint may be misconfigured",
+        "i" = if (!is.na(location)) {
+          paste0("Would have redirected to: ", location)
+        } else {
+          NULL
+        }
+      ),
+      resp,
+      context = list(phase = context, redirect_blocked = TRUE)
+    )
+  }
+  TRUE
+}
+
 #' Internal: HTTP defaults (timeout and User-Agent)
 #'
 #' Applies a modest timeout and a descriptive User-Agent to an httr2 request.
@@ -71,6 +163,13 @@ req_with_retry <- function(req) {
     return(httr2::req_perform(req))
   }
 
+  # Note: httr2 throws on HTTP error statuses (4xx/5xx) by default
+  # We disable that behavior so we can distinguish transport errors (network
+  # failures, timeouts) from HTTP errors (server returned a response with
+  # error status). This lets us retry only on transient HTTP statuses while
+  # immediately returning non-retryable error responses to the caller.
+  req <- httr2::req_error(req, is_error = \(resp) FALSE)
+
   max_tries <- suppressWarnings(as.integer(getOption(
     "shinyOAuth.retry_max_tries",
     3L
@@ -103,7 +202,7 @@ req_with_retry <- function(req) {
 
   parse_retry_after <- function(resp) {
     ra <- try(httr2::resp_header(resp, "retry-after"), silent = TRUE)
-    if (inherits(ra, "try-error") || is.null(ra) || !nzchar(ra)) {
+    if (inherits(ra, "try-error") || !is_valid_string(ra)) {
       return(NA_real_)
     }
     ra <- trimws(as.character(ra))
@@ -207,6 +306,8 @@ req_with_retry <- function(req) {
 #' @description
 #' Internal helper to parse OAuth token endpoint responses. Supports JSON
 #' (application/json) and form-encoded (application/x-www-form-urlencoded).
+#' Errors on unsupported content types to avoid silently parsing garbage
+#' (e.g., HTML error pages from misconfigured proxies).
 #'
 #' @param resp httr2 response
 #'
@@ -239,28 +340,51 @@ parse_token_response <- function(resp) {
   }
 
   # GitHub historically returns form-encoded unless header Accept: application/json
-  # Handle application/x-www-form-urlencoded or unknown types by form parsing
-  if (
-    grepl("application/x-www-form-urlencoded", ct, fixed = TRUE) ||
-      ct == "" ||
-      grepl("text/plain", ct, fixed = TRUE)
-  ) {
+  # Handle application/x-www-form-urlencoded explicitly
+  if (grepl("application/x-www-form-urlencoded", ct, fixed = TRUE)) {
     # httr2::url_query_parse handles form-encoded strings
     return(httr2::url_query_parse(body))
   }
 
-  # Last resort: try JSON then form
-  out <- try(jsonlite::fromJSON(body, simplifyVector = TRUE), silent = TRUE)
-  if (!inherits(out, "try-error")) {
-    if (is.data.frame(out)) {
-      out <- as.list(out)
+  # Empty content-type or text/plain: legacy providers may omit or mis-set headers.
+
+  # Try JSON first (many providers respond with JSON but wrong content-type),
+  # then fall back to form parsing.
+  if (ct == "" || grepl("text/plain", ct, fixed = TRUE)) {
+    # Try JSON first
+    out <- try(jsonlite::fromJSON(body, simplifyVector = TRUE), silent = TRUE)
+    if (!inherits(out, "try-error")) {
+      if (is.data.frame(out)) {
+        out <- as.list(out)
+      }
+      return(out)
     }
-    return(out)
+    # Fall back to form parsing
+    return(httr2::url_query_parse(body))
   }
-  httr2::url_query_parse(body)
+
+  # Unsupported content type - fail explicitly rather than guessing
+
+  # This catches text/html (proxy error pages), XML, or other unexpected types
+  err_parse(
+    c(
+      "x" = "Unsupported content type in token response",
+      "i" = paste0("Content-Type: ", ct),
+      "i" = "Expected application/json or application/x-www-form-urlencoded"
+    ),
+    context = list(content_type = ct)
+  )
 }
 
 # Internal: derive a compact, JSON-serializable HTTP summary from a request
+#
+# The returned summary is sanitized by default to prevent secret leakage in
+# audit logs. Sensitive OAuth query params (code, state, access_token, etc.)
+# and headers (Cookie, Authorization, x-* proxy headers) are redacted.
+#
+# Control via: options(shinyOAuth.audit_redact_http = FALSE) to disable.
+#
+# See sanitize_http_summary() for the redaction logic.
 build_http_summary <- function(req) {
   if (is.null(req)) {
     return(NULL)
@@ -279,7 +403,7 @@ build_http_summary <- function(req) {
     req$HTTP_X_FORWARDED_PROTO,
     error = function(...) NULL
   ))
-  if (is.na(scheme) || !nzchar(scheme)) {
+  if (!is_valid_string(scheme)) {
     # Try rook scheme when not behind proxy
     scheme <- .scalar_chr(tryCatch(
       req[["rook.url_scheme"]],
@@ -291,7 +415,7 @@ build_http_summary <- function(req) {
   xff <- .scalar_chr(tryCatch(req$HTTP_X_FORWARDED_FOR, error = function(...) {
     NULL
   }))
-  if (!is.na(xff) && nzchar(xff)) {
+  if (is_valid_string(xff)) {
     # If multiple comma-separated IPs, take the first hop
     ra <- strsplit(xff, ",", fixed = TRUE)[[1]]
     ra <- .scalar_chr(if (length(ra)) trimws(ra[[1]]) else NULL)
@@ -305,13 +429,13 @@ build_http_summary <- function(req) {
     for (nm in nms[hdr_idx]) {
       key <- tolower(sub("^HTTP_", "", nm))
       val <- .scalar_chr(tryCatch(req[[nm]], error = function(...) NULL))
-      hdrs[[key]] <- if (!is.na(val) && nzchar(val)) val else NULL
+      hdrs[[key]] <- if (is_valid_string(val)) val else NULL
     }
     # Remove NULLs to keep JSON clean
     hdrs <- Filter(Negate(is.null), hdrs)
   }
 
-  list(
+  raw <- list(
     method = if (!is.na(method) && nzchar(method)) method else NULL,
     path = if (!is.na(path) && nzchar(path)) path else NULL,
     query_string = if (!is.na(query_string) && nzchar(query_string)) {
@@ -324,4 +448,160 @@ build_http_summary <- function(req) {
     remote_addr = if (!is.na(ra) && nzchar(ra)) ra else NULL,
     headers = if (length(hdrs)) hdrs else NULL
   )
+
+  # Sanitize by default to prevent secret leakage in audit logs
+  # Controlled by options(shinyOAuth.audit_redact_http = TRUE/FALSE)
+  if (isTRUE(getOption("shinyOAuth.audit_redact_http", TRUE))) {
+    sanitize_http_summary(raw)
+  } else {
+    raw
+  }
+}
+
+# Internal: redact sensitive data from HTTP summary for safe audit logging
+#
+# This function removes or redacts:
+# - OAuth-related query params: code, state, access_token, refresh_token, id_token
+# - Sensitive headers: cookie, authorization, set_cookie, x_* (proxy headers)
+#
+# Called automatically by build_http_summary() to make audit logging safe by default.
+sanitize_http_summary <- function(summary) {
+  if (is.null(summary)) {
+    return(NULL)
+  }
+
+  # Redact sensitive query params from query_string
+  if (!is.null(summary$query_string) && nzchar(summary$query_string)) {
+    summary$query_string <- redact_query_string(summary$query_string)
+  }
+
+  # Redact sensitive headers
+  if (!is.null(summary$headers) && length(summary$headers) > 0) {
+    summary$headers <- redact_headers(summary$headers)
+  }
+
+  summary
+}
+
+# Internal: redact sensitive OAuth params from a query string
+# Returns the redacted query string
+redact_query_string <- function(qs) {
+  if (is.null(qs) || !nzchar(qs)) {
+    return(qs)
+  }
+
+  # OAuth-related params that may contain secrets or single-use tokens
+  sensitive_params <- c(
+    "code",
+    "state",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "session_state",
+    "code_verifier",
+    "nonce"
+  )
+
+  # Parse query string into named list
+  parsed <- tryCatch(
+    httr2::url_query_parse(qs),
+    error = function(...) NULL
+  )
+
+  if (is.null(parsed) || length(parsed) == 0) {
+    return(qs)
+  }
+
+  # Redact sensitive params (case-insensitive matching)
+  param_names_lower <- tolower(names(parsed))
+  for (i in seq_along(parsed)) {
+    if (param_names_lower[[i]] %in% sensitive_params) {
+      n <- length(parsed[[i]])
+      parsed[[i]] <- if (is.null(n) || n == 0) {
+        "[REDACTED]"
+      } else {
+        rep("[REDACTED]", n)
+      }
+    }
+  }
+
+  # Rebuild query string
+  # Use paste manually to preserve format (httr2 doesn't have a rebuild function)
+  if (length(parsed) == 0) {
+    return("")
+  }
+  nms <- names(parsed)
+  parts <- unlist(
+    lapply(seq_along(parsed), function(i) {
+      nm <- nms[[i]]
+      val <- parsed[[i]]
+
+      if (is.null(val) || length(val) == 0) {
+        return(nm)
+      }
+
+      val_chr <- as.character(val)
+      val_chr[is.na(val_chr)] <- ""
+      paste0(nm, "=", utils::URLencode(val_chr, reserved = TRUE))
+    }),
+    use.names = FALSE
+  )
+  paste(parts, collapse = "&")
+}
+
+# Internal: redact sensitive headers from a headers list
+# Returns the redacted headers list
+redact_headers <- function(hdrs) {
+  if (is.null(hdrs) || length(hdrs) == 0) {
+    return(hdrs)
+  }
+
+  # Headers to completely remove (contain secrets or tokens)
+  remove_headers <- c(
+    "cookie",
+    "set_cookie",
+    "authorization",
+    "proxy_authorization",
+    "proxy_authenticate",
+    "www_authenticate"
+  )
+
+  # Headers to redact (contain potentially sensitive routing/client info)
+  # x_* headers often contain internal infrastructure details
+  redact_prefixes <- c(
+    "x_"
+  )
+
+  nms <- names(hdrs)
+  nms_lower <- tolower(nms)
+
+  # Build a new list to avoid modifying during iteration
+  result <- list()
+  for (i in seq_along(hdrs)) {
+    nm <- nms[[i]]
+    nm_lower <- nms_lower[[i]]
+
+    # Skip headers that should be removed
+    if (nm_lower %in% remove_headers) {
+      next
+    }
+
+    # Check if header should be redacted by prefix
+    should_redact <- FALSE
+    for (prefix in redact_prefixes) {
+      if (startsWith(nm_lower, prefix)) {
+        should_redact <- TRUE
+        break
+      }
+    }
+
+    if (should_redact) {
+      result[[nm]] <- "[REDACTED]"
+    } else {
+      result[[nm]] <- hdrs[[i]]
+    }
+  }
+
+  result
 }

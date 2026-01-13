@@ -47,6 +47,8 @@ make_test_provider <- function(use_pkce = TRUE, use_nonce = FALSE) {
     jwks_pins = character(),
     jwks_pin_mode = "any",
     allowed_algs = c("RS256", "ES256"),
+    # Disable token_type enforcement in test helper; tested separately in test-token-type-policy.R
+    allowed_token_types = character(),
     leeway = 60
   )
 }
@@ -54,7 +56,11 @@ make_test_provider <- function(use_pkce = TRUE, use_nonce = FALSE) {
 make_test_client <- function(
   use_pkce = TRUE,
   use_nonce = FALSE,
-  state_max_age = 600
+  state_max_age = 600,
+  state_payload_max_age = 300,
+  scopes = character(0),
+  introspect = FALSE,
+  introspect_elements = character(0)
 ) {
   prov <- make_test_provider(use_pkce = use_pkce, use_nonce = use_nonce)
   oauth_client(
@@ -62,12 +68,15 @@ make_test_client <- function(
     client_id = "abc",
     client_secret = "", # public client
     redirect_uri = "http://localhost:8100",
-    scopes = character(0),
+    scopes = scopes,
     state_store = cachem::cache_mem(max_age = state_max_age),
+    state_payload_max_age = state_payload_max_age,
     state_entropy = 64,
     state_key = paste0(
       "0123456789abcdefghijklmnopqrstuvwxyz",
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    )
+    ),
+    introspect = introspect,
+    introspect_elements = introspect_elements
   )
 }

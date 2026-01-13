@@ -18,6 +18,7 @@
 #' @param token_url Token endpoint URL
 #' @param userinfo_url User info endpoint URL (optional)
 #' @param introspection_url Token introspection endpoint URL (optional; RFC 7662)
+#' @param revocation_url Token revocation endpoint URL (optional; RFC 7009)
 #'
 #' @param issuer OIDC issuer URL (optional; required for ID token validation).
 #' This is the base URL that identifies the OpenID Provider (OP). It is used
@@ -121,7 +122,7 @@
 #'   Use to reduce key substitution risks by pre-authorizing expected keys
 #' @param jwks_pin_mode Pinning policy when `jwks_pins` is provided. Either
 #'   "any" (default; at least one key in JWKS must match) or "all" (every
-#'   RSA/EC public key in JWKS must match one of the configured pins)
+#'   RSA/EC/OKP public key in JWKS must match one of the configured pins)
 #' @param jwks_host_issuer_match When TRUE, enforce that the discovery `jwks_uri` host
 #'   matches the issuer host (or a subdomain). Defaults to FALSE at the class
 #'   level, but helper constructors for OIDC (e.g., [oauth_provider_oidc()] and
@@ -135,7 +136,10 @@
 #' @param jwks_host_allow_only Optional explicit hostname that the jwks_uri must match.
 #'   When provided, jwks_uri host must equal this value (exact match). You can
 #'   pass either just the host (e.g., "www.googleapis.com") or a full URL; only
-#'   the host component will be used. Takes precedence over `jwks_host_issuer_match`
+#'   the host component will be used. If you need to include a port or an IPv6
+#'   literal, pass a full URL (e.g., \verb{https://[::1]:8443}) — the port is ignored
+#'   and only the hostname part is used for matching. Takes precedence over
+#'   `jwks_host_issuer_match`
 #'
 #' @param allowed_algs Optional vector of allowed JWT algorithms for ID tokens.
 #'   Use to restrict acceptable `alg` values on a per-provider basis. Supported
@@ -154,14 +158,16 @@
 #'   token response MUST include `token_type` and it must be one of the allowed
 #'   values; otherwise the flow fails fast with a `shinyOAuth_token_error`.
 #'   When empty, no check is performed and `token_type` may be omitted by the
-#'   provider. Helper constructors default this more strictly: for
-#'   [oauth_provider()] when an `issuer` is supplied or OIDC flags are enabled,
-#'   `allowed_token_types` defaults to `c("Bearer")` to enforce Bearer by
-#'   default; otherwise it remains empty. You can override to widen or disable
-#'   enforcement by setting it explicitly
+#'   provider. The [oauth_provider()] helper defaults to `c("Bearer")` for all
+#'   providers because the package only supports Bearer tokens (i.e.,
+#'   [client_bearer_req()] sends `Authorization: Bearer`). This ensures that if
+#'   a provider returns a non-Bearer token type (e.g., DPoP, MAC), the flow
+#'   fails fast rather than misusing the token. Set `allowed_token_types =
+#'   character()` explicitly to opt out of enforcement.
 #'
-#' @param leeway Clock skew leeway (seconds) applied to ID token `exp`/`iat` checks.
-#'   Default 30. Can be globally overridden via option `shinyOAuth.leeway`
+#' @param leeway Clock skew leeway (seconds) applied to ID token `exp`/`iat`/`nbf` checks
+#'   and state payload `issued_at` future check. Default 30. Can be globally
+#'   overridden via option `shinyOAuth.leeway`
 #'
 #' @example inst/examples/oauth_provider.R
 #'
@@ -171,10 +177,8 @@ OAuthProvider <- S7::new_class(
   package = "shinyOAuth",
   properties = list(
     name = S7::class_character,
-
     auth_url = S7::class_character,
     token_url = S7::class_character,
-
     userinfo_url = S7::new_property(
       S7::class_character,
       default = NA_character_
@@ -183,13 +187,14 @@ OAuthProvider <- S7::new_class(
       S7::class_character,
       default = NA_character_
     ),
-
+    revocation_url = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
     issuer = S7::new_property(S7::class_character, default = NA_character_),
-
     use_nonce = S7::new_property(S7::class_logical, default = FALSE),
     use_pkce = S7::new_property(S7::class_logical, default = TRUE),
     pkce_method = S7::new_property(S7::class_character, default = "S256"),
-
     userinfo_required = S7::new_property(S7::class_logical, default = FALSE),
     userinfo_id_selector = S7::new_property(
       S7::class_any,
@@ -199,22 +204,18 @@ OAuthProvider <- S7::new_class(
       S7::class_logical,
       default = FALSE
     ),
-
     id_token_required = S7::new_property(S7::class_logical, default = FALSE),
     id_token_validation = S7::new_property(S7::class_logical, default = FALSE),
-
     extra_auth_params = S7::class_list,
     extra_token_params = S7::class_list,
     extra_token_headers = S7::new_property(
       S7::class_character,
       default = character()
     ),
-
     token_auth_style = S7::new_property(
       S7::class_character,
       default = "header"
     ),
-
     jwks_cache = S7::new_property(
       S7::class_any,
       default = quote(cachem::cache_mem(max_age = 3600))
@@ -231,7 +232,6 @@ OAuthProvider <- S7::new_class(
       S7::class_character,
       default = NA_character_
     ),
-
     allowed_algs = S7::new_property(
       S7::class_character,
       default = c(
@@ -249,9 +249,8 @@ OAuthProvider <- S7::new_class(
     ),
     allowed_token_types = S7::new_property(
       S7::class_character,
-      default = character()
+      default = c("Bearer")
     ),
-
     leeway = S7::new_property(
       S7::class_numeric,
       default = quote(getOption(
@@ -260,7 +259,6 @@ OAuthProvider <- S7::new_class(
       ))
     )
   ),
-
   validator = function(self) {
     # Small helper to validate a single field
     .check_host_field <- function(value, name, required = FALSE) {
@@ -270,7 +268,23 @@ OAuthProvider <- S7::new_class(
           name
         ))
       }
-      if (is_valid_string(value) && !is_ok_host(value)) {
+      if (!is_valid_string(value)) {
+        return(NULL)
+      }
+
+      parsed <- try(httr2::url_parse(value), silent = TRUE)
+      if (
+        inherits(parsed, "try-error") ||
+          !nzchar((parsed$scheme %||% "")) ||
+          !nzchar((parsed$hostname %||% ""))
+      ) {
+        return(sprintf(
+          "OAuthProvider: %s must be an absolute URL (including scheme and hostname)",
+          name
+        ))
+      }
+
+      if (!is_ok_host(value)) {
         return(sprintf(
           "OAuthProvider: %s provided but not accepted as a host (see `?is_ok_host` for details)",
           name
@@ -285,12 +299,15 @@ OAuthProvider <- S7::new_class(
       token_url = list(val = self@token_url, required = TRUE),
       userinfo_url = list(val = self@userinfo_url, required = FALSE),
       introspection_url = list(val = self@introspection_url, required = FALSE),
+      revocation_url = list(val = self@revocation_url, required = FALSE),
       issuer = list(val = self@issuer, required = FALSE)
     )
     for (nm in names(fields)) {
       f <- fields[[nm]]
       msg <- .check_host_field(f$val, nm, f$required)
-      if (!is.null(msg)) return(msg) # early exit on first violation
+      if (!is.null(msg)) {
+        return(msg)
+      } # early exit on first violation
     }
 
     # Validate extra_token_headers: must be named character vector of length n
@@ -309,6 +326,27 @@ OAuthProvider <- S7::new_class(
           "OAuthProvider: extra_token_headers must have non-empty names for all headers"
         )
       }
+
+      # Block reserved headers that could break/override client auth in surprising
+      # ways during token exchange. Header names are case-insensitive in HTTP.
+      # Users can unblock specific headers via shinyOAuth.unblock_token_headers.
+      default_reserved_headers <- c("authorization", "cookie")
+      unblocked <- tolower(getOption(
+        "shinyOAuth.unblock_token_headers",
+        character()
+      ))
+      reserved_header_names <- setdiff(default_reserved_headers, unblocked)
+      bad_headers <- intersect(tolower(trimws(nms)), reserved_header_names)
+      if (length(bad_headers) > 0) {
+        return(sprintf(
+          paste0(
+            "OAuthProvider: extra_token_headers must not contain reserved headers: %s. ",
+            "To unblock, set options(shinyOAuth.unblock_token_headers = c(...))"
+          ),
+          paste(sQuote(bad_headers), collapse = ", ")
+        ))
+      }
+
       # Ensure each entry is a single string (not vector)
       bad_len <- lengths(eth) != 1L
       if (any(bad_len)) {
@@ -319,6 +357,91 @@ OAuthProvider <- S7::new_class(
         return(
           "OAuthProvider: extra_token_headers values must be non-empty strings"
         )
+      }
+    }
+
+    # Validate extra_auth_params: must be a named list if non-empty.
+    # Unnamed elements would cause httr2::url_modify() to fail with an unhelpful
+    # error, so we catch this early with a clearer message.
+    if (length(self@extra_auth_params) > 0) {
+      nms <- names(self@extra_auth_params)
+      if (is.null(nms) || !all(nzchar(nms))) {
+        return(
+          "OAuthProvider: extra_auth_params must be a named list (all elements must have names)"
+        )
+      }
+    }
+
+    # Validate extra_auth_params: block reserved keys that could desync state,
+    # bypass PKCE, or corrupt the authorization request.
+    # These fields are managed internally by shinyOAuth and must not be overridden.
+    # Users can unblock specific keys via shinyOAuth.unblock_auth_params.
+    default_reserved_auth_keys <- c(
+      "response_type",
+      "client_id",
+      "redirect_uri",
+      "state",
+      "scope",
+      "code_challenge",
+      "code_challenge_method",
+      "nonce"
+    )
+    unblocked_auth <- getOption("shinyOAuth.unblock_auth_params", character())
+    reserved_auth_keys <- setdiff(default_reserved_auth_keys, unblocked_auth)
+    if (length(self@extra_auth_params) > 0) {
+      nms <- names(self@extra_auth_params)
+      bad <- intersect(nms, reserved_auth_keys)
+      if (length(bad) > 0) {
+        return(sprintf(
+          paste0(
+            "OAuthProvider: extra_auth_params must not contain reserved keys ",
+            "managed by shinyOAuth: %s. ",
+            "To unblock, set options(shinyOAuth.unblock_auth_params = c(...))"
+          ),
+          paste(sQuote(bad), collapse = ", ")
+        ))
+      }
+    }
+
+    # Validate extra_token_params: must be a named list if non-empty.
+    # Unnamed elements would cause httr2::req_body_form() to fail with an
+    # unhelpful error, so we catch this early with a clearer message.
+    if (length(self@extra_token_params) > 0) {
+      nms <- names(self@extra_token_params)
+      if (is.null(nms) || !all(nzchar(nms))) {
+        return(
+          "OAuthProvider: extra_token_params must be a named list (all elements must have names)"
+        )
+      }
+    }
+
+    # Validate extra_token_params: block reserved keys that could corrupt the
+    # token request, bypass PKCE verification, or interfere with client auth.
+    # Users can unblock specific keys via shinyOAuth.unblock_token_params.
+    default_reserved_token_keys <- c(
+      "grant_type",
+      "code",
+      "redirect_uri",
+      "code_verifier",
+      "client_id",
+      "client_secret",
+      "client_assertion",
+      "client_assertion_type"
+    )
+    unblocked_token <- getOption("shinyOAuth.unblock_token_params", character())
+    reserved_token_keys <- setdiff(default_reserved_token_keys, unblocked_token)
+    if (length(self@extra_token_params) > 0) {
+      nms <- names(self@extra_token_params)
+      bad <- intersect(nms, reserved_token_keys)
+      if (length(bad) > 0) {
+        return(sprintf(
+          paste0(
+            "OAuthProvider: extra_token_params must not contain reserved keys ",
+            "managed by shinyOAuth: %s. ",
+            "To unblock, set options(shinyOAuth.unblock_token_params = c(...))"
+          ),
+          paste(sQuote(bad), collapse = ", ")
+        ))
       }
     }
 
@@ -451,18 +574,31 @@ OAuthProvider <- S7::new_class(
         "HS384",
         "HS512"
       )
-      bad <- setdiff(toupper(self@allowed_algs), supported)
+      aa <- toupper(self@allowed_algs)
+      bad <- setdiff(aa, supported)
       if (length(bad) > 0) {
         return(paste0(
           "OAuthProvider: allowed_algs contains unsupported entries: ",
           paste(bad, collapse = ", ")
         ))
       }
+
+      # Fail fast: HS* algs are supported but gated behind an opt-in option.
+      # Without the option, validation would fail later at ID token validation
+      # time, which is confusing for users who configured allowed_algs.
+      if (any(aa %in% c("HS256", "HS384", "HS512"))) {
+        allow_hs <- isTRUE(getOption("shinyOAuth.allow_hs", FALSE))
+        if (!allow_hs) {
+          return(
+            "OAuthProvider: allowed_algs includes HS* but `options(shinyOAuth.allow_hs = TRUE)` is not enabled"
+          )
+        }
+      }
     }
 
     # Fail fast: cannot enable nonce without a configured issuer
     if (isTRUE(self@use_nonce)) {
-      if (is.null(self@issuer) || is.na(self@issuer) || !nzchar(self@issuer)) {
+      if (!is_valid_string(self@issuer)) {
         return(
           "OAuthProvider: use_nonce = TRUE requires a non-empty provider issuer"
         )
@@ -485,7 +621,7 @@ OAuthProvider <- S7::new_class(
 
     # Fail fast: cannot enable ID token validation without a configured issuer
     if (isTRUE(self@id_token_validation)) {
-      if (is.null(self@issuer) || is.na(self@issuer) || !nzchar(self@issuer)) {
+      if (!is_valid_string(self@issuer)) {
         return(
           "OAuthProvider: id_token_validation = TRUE requires a non-empty provider issuer"
         )
@@ -562,7 +698,8 @@ OAuthProvider <- S7::new_class(
           return("OAuthProvider: jwks_host_allow_only URL could not be parsed")
         }
       } else {
-        # Validate host characters roughly: letters, digits, hyphen, dot, colon (IPv6 bracket variants handled elsewhere)
+        # Validate host characters roughly: letters, digits, hyphen, dot.
+        # Note: bare-host form does not support ports or IPv6 literals; use URL form instead.
         if (!grepl("^[A-Za-z0-9.-]+$", host_only)) {
           return(
             "OAuthProvider: jwks_host_allow_only must be a hostname or a URL containing a hostname"
@@ -593,36 +730,29 @@ OAuthProvider <- S7::new_class(
 #' @export
 oauth_provider <- function(
   name,
-
   auth_url,
   token_url,
   userinfo_url = NA_character_,
   introspection_url = NA_character_,
-
+  revocation_url = NA_character_,
   issuer = NA_character_,
-
   use_nonce = NULL,
   use_pkce = TRUE,
   pkce_method = "S256",
-
   userinfo_required = NULL,
   userinfo_id_token_match = NULL,
   userinfo_id_selector = function(userinfo) userinfo$sub,
-
   id_token_required = NULL,
   id_token_validation = NULL,
-
   extra_auth_params = list(),
   extra_token_params = list(),
   extra_token_headers = character(),
   token_auth_style = "header",
-
   jwks_cache = NULL,
   jwks_pins = character(),
   jwks_pin_mode = "any",
   jwks_host_issuer_match = NULL,
   jwks_host_allow_only = NULL,
-
   allowed_algs = c(
     "RS256",
     "RS384",
@@ -635,8 +765,7 @@ oauth_provider <- function(
     "ES512",
     "EdDSA"
   ),
-  allowed_token_types = NULL,
-
+  allowed_token_types = c("Bearer"),
   leeway = getOption("shinyOAuth.leeway", 30)
 ) {
   # Use shared internal helper to normalize only the path component
@@ -644,6 +773,7 @@ oauth_provider <- function(
   token_url <- normalize_url(token_url)
   userinfo_url <- normalize_url(userinfo_url)
   introspection_url <- normalize_url(introspection_url)
+  revocation_url <- normalize_url(revocation_url)
 
   if (is.null(jwks_cache)) {
     jwks_cache <- cachem::cache_mem(max_age = 3600)
@@ -703,18 +833,12 @@ oauth_provider <- function(
       (isTRUE(id_token_validation) || isTRUE(id_token_required))
   }
 
-  # Normalize allowed_token_types:
-  # - When NULL and provider looks OIDC-like (issuer present or OIDC flags on),
-  #   default to strict Bearer enforcement.
-  # - Otherwise, leave as empty (no enforcement).
+  # Default to Bearer for all providers. The package only supports Bearer tokens
+  # (client_bearer_req sends Authorization: Bearer). If a provider returns a
+  # non-Bearer token_type (e.g., DPoP, MAC), we fail fast rather than misusing
+  # it. Set allowed_token_types = character() to opt out of enforcement.
   if (is.null(allowed_token_types)) {
-    if (
-      has_issuer || isTRUE(id_token_required) || isTRUE(id_token_validation)
-    ) {
-      allowed_token_types <- c("Bearer")
-    } else {
-      allowed_token_types <- character()
-    }
+    allowed_token_types <- c("Bearer")
   }
 
   # Gentle host configuration reminder:
@@ -757,39 +881,31 @@ oauth_provider <- function(
 
   OAuthProvider(
     name = name,
-
     auth_url = auth_url,
     token_url = token_url,
     userinfo_url = userinfo_url,
     introspection_url = introspection_url,
-
+    revocation_url = revocation_url,
     issuer = issuer,
-
     use_nonce = use_nonce,
-
     use_pkce = use_pkce,
     pkce_method = pkce_method,
-
     userinfo_required = userinfo_required,
     id_token_required = id_token_required,
     id_token_validation = id_token_validation,
     userinfo_id_token_match = userinfo_id_token_match,
     userinfo_id_selector = userinfo_id_selector,
-
     extra_auth_params = extra_auth_params,
     extra_token_params = extra_token_params,
     extra_token_headers = extra_token_headers,
     token_auth_style = token_auth_style,
-
     jwks_cache = jwks_cache,
     jwks_pins = jwks_pins,
     jwks_pin_mode = jwks_pin_mode,
     jwks_host_issuer_match = isTRUE(jwks_host_issuer_match),
     jwks_host_allow_only = jwks_host_allow_only,
-
     allowed_algs = allowed_algs,
     allowed_token_types = allowed_token_types,
-
     leeway = leeway
   )
 }

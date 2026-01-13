@@ -74,10 +74,16 @@
 #'  `jwks_host_allow_only` to the exact hostname instead of disabling this.
 #'  Disabling (`FALSE`) is not recommended unless you also pin JWKS via
 #'  `jwks_host_allow_only` or `jwks_pins`
-#' @param issuer_match Logical, default TRUE. When TRUE, requires the discovery
-#'  issuer's scheme/host to match the input `issuer`. When FALSE, host mismatch
-#'  is allowed. Prefer tightening hosts via `options(shinyOAuth.allowed_hosts)`
-#'  when feasible
+#' @param issuer_match Character scalar controlling how strictly to validate the
+#'  discovery document's `issuer` against the input `issuer`.
+#'
+#'  - `"url"` (default): require the full issuer URL to match after
+#'    trailing-slash normalization (recommended).
+#'  - `"host"`: compare only scheme + host (explicit opt-out; not recommended).
+#'  - `"none"`: do not validate issuer consistency.
+#'
+#'  Prefer `"url"` and tighten hosts via `options(shinyOAuth.allowed_hosts)`
+#'  when feasible.
 #' @param ... Additional fields passed to [oauth_provider()]
 #'
 #' @return [OAuthProvider] object configured from discovery
@@ -106,9 +112,11 @@ oauth_provider_oidc_discover <- function(
   ),
   allowed_token_types = c('Bearer'),
   jwks_host_issuer_match = TRUE,
-  issuer_match = TRUE,
+  issuer_match = c("url", "host", "none"),
   ...
 ) {
+  issuer_match <- match.arg(issuer_match)
+
   # 1) Validate issuer input
   .discover_assert_valid_issuer(issuer)
 
@@ -166,6 +174,7 @@ oauth_provider_oidc_discover <- function(
     token_url = endpoints$token_url,
     userinfo_url = endpoints$userinfo_url,
     introspection_url = endpoints$introspection_url,
+    revocation_url = endpoints$revocation_url,
     issuer = iss,
     use_nonce = use_nonce,
     id_token_validation = id_token_validation,
@@ -187,6 +196,20 @@ oauth_provider_oidc_discover <- function(
 .discover_assert_valid_issuer <- function(issuer) {
   if (!is_valid_string(issuer)) {
     err_input("issuer must be a non-empty URL")
+  }
+
+  parsed <- try(httr2::url_parse(issuer), silent = TRUE)
+  if (
+    inherits(parsed, "try-error") ||
+      !nzchar((parsed$scheme %||% "")) ||
+      !nzchar((parsed$hostname %||% ""))
+  ) {
+    err_input(
+      c(
+        "x" = "issuer must be an absolute URL (including scheme and hostname)",
+        "i" = paste0("Got issuer: ", as.character(issuer))
+      )
+    )
   }
 
   if (!is_ok_host(issuer)) {
@@ -212,7 +235,8 @@ oauth_provider_oidc_discover <- function(
   req <- httr2::request(disco_url) |>
     httr2::req_error(is_error = function(resp) FALSE) |>
     httr2::req_headers(Accept = "application/json") |>
-    add_req_defaults()
+    add_req_defaults() |>
+    req_no_redirect()
 
   req
 }
@@ -239,6 +263,9 @@ oauth_provider_oidc_discover <- function(
       )
     )
   }
+
+  # Security: reject redirect responses to prevent bypassing host validation
+  reject_redirect_response(resp, context = "oidc_discovery")
 
   if (httr2::resp_is_error(resp)) {
     err_http(
@@ -297,11 +324,14 @@ oauth_provider_oidc_discover <- function(
 
   introspection_url <- disc[["introspection_endpoint"]] %||% NA_character_
 
+  revocation_url <- disc[["revocation_endpoint"]] %||% NA_character_
+
   list(
     auth_url = auth_url,
     token_url = token_url,
     userinfo_url = userinfo_url,
-    introspection_url = introspection_url
+    introspection_url = introspection_url,
+    revocation_url = revocation_url
   )
 }
 
@@ -337,6 +367,7 @@ oauth_provider_oidc_discover <- function(
   validate_endpoint(endpoints$token_url, allowed_hosts_vec)
   validate_endpoint(endpoints$userinfo_url, allowed_hosts_vec)
   validate_endpoint(endpoints$introspection_url, allowed_hosts_vec)
+  validate_endpoint(endpoints$revocation_url, allowed_hosts_vec)
 
   invisible(TRUE)
 }
@@ -373,13 +404,15 @@ oauth_provider_oidc_discover <- function(
   jwks_ok <- if (!is.null(opt_allowed) && length(opt_allowed) > 0) {
     is_ok_host(paste0("https://", jwks_host, "/"), allowed_hosts = opt_allowed)
   } else {
-    identical(jwks_host, iss_host)
+    # Allow exact match or subdomain of issuer host
+    identical(jwks_host, iss_host) ||
+      (nzchar(iss_host) && endsWith(jwks_host, paste0(".", iss_host)))
   }
 
   if (!jwks_ok) {
     err_config(
       c(
-        "x" = "JWKS host must match issuer host (or allowed host)",
+        "x" = "JWKS host must match issuer host or subdomain (or allowed host)",
         "i" = paste0("Issuer host: ", iss_host),
         "i" = paste0("JWKS host: ", jwks_host),
         "i" = paste0(
@@ -541,7 +574,7 @@ oauth_provider_oidc_discover <- function(
   parsed <- try(httr2::url_parse(iss), silent = TRUE)
   host <- if (!inherits(parsed, "try-error")) parsed$hostname else NA_character_
 
-  if (!is.null(host) && nzchar(host)) {
+  if (is_valid_string(host)) {
     return(host)
   }
 

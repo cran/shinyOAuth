@@ -131,6 +131,7 @@ oauth_provider_google <- function(name = "google") {
 
     auth_url = "https://accounts.google.com/o/oauth2/v2/auth",
     token_url = "https://oauth2.googleapis.com/token",
+    revocation_url = "https://oauth2.googleapis.com/revoke",
     userinfo_url = "https://openidconnect.googleapis.com/v1/userinfo",
     issuer = "https://accounts.google.com",
 
@@ -168,6 +169,10 @@ oauth_provider_google <- function(name = "google") {
 #' signs in and therefore ID token validation is disabled by default to avoid
 #' false negatives. You can override this via `id_token_validation` if you know
 #' the environment guarantees a fixed issuer.
+#'
+#' Note: ID token validation requires a stable issuer. For multi-tenant aliases,
+#' this provider sets `issuer = NA` and therefore also disables `use_nonce` by
+#' default (nonce validation relies on validating the ID token).
 #'
 #' Microsoft issues RS256 ID tokens; `allowed_algs` is restricted accordingly.
 #' The userinfo endpoint is provided by Microsoft Graph
@@ -228,7 +233,7 @@ oauth_provider_microsoft <- function(
 
     issuer = issuer,
 
-    use_nonce = TRUE,
+    use_nonce = isTRUE(id_token_validation),
     use_pkce = TRUE,
     pkce_method = "S256",
 
@@ -255,20 +260,20 @@ oauth_provider_microsoft <- function(
 #' Uses /v1/me as "userinfo". No ID token (not OIDC).
 #'
 #' @param name Optional provider name (default "spotify")
-#' @param scope Optional space-separated scope string (default
-#'   "user-read-email user-read-private")
+#' @details
+#' Spotify requires scopes to be included in the authorization request.
+#' Set requested scopes on the client with `oauth_client(..., scopes = ...)`.
 #'
 #' @return [OAuthProvider] object for use with a Spotify OAuth 2.0 app
 #'
 #' @example inst/examples/oauth_provider.R
-#' @seealso 
+#' @seealso
 #' For an example application which using Spotify OAuth 2.0 login to
-#' display the user's listening data, see `vignette("example-spotify")`. 
-#' 
+#' display the user's listening data, see `vignette("example-spotify")`.
+#'
 #' @export
 oauth_provider_spotify <- function(
-  name = "spotify",
-  scope = "user-read-email user-read-private"
+  name = "spotify"
 ) {
   oauth_provider(
     name = name,
@@ -283,7 +288,7 @@ oauth_provider_spotify <- function(
     use_pkce = TRUE,
     pkce_method = "S256",
 
-    extra_auth_params = list(scope = scope),
+    extra_auth_params = list(),
     extra_token_params = list(),
     extra_token_headers = character(),
     token_auth_style = "header",
@@ -313,7 +318,7 @@ oauth_provider_slack <- function(name = "slack") {
 #' Create a Keycloak [OAuthProvider] (via OIDC discovery)
 #'
 #' @param base_url Base URL of the Keycloak server, e.g.,
-#'  "localhost:8080"
+#'  "http://localhost:8080"
 #' @param realm Keycloak realm name, e.g., "myrealm"
 #' @param name Optional provider name. Defaults to `paste0('keycloak-', realm)`
 #' @param token_auth_style Optional override for token endpoint authentication

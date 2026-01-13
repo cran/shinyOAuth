@@ -26,6 +26,149 @@ is_valid_string <- function(x, min_char = 1) {
     nchar(x) >= min_char
 }
 
+#' Internal: validate untrusted scalar query param sizes
+#'
+#' This helper is used for values that originate from URL query strings.
+#' It is intentionally strict about scalar-ness to avoid vector amplification.
+#'
+#' @keywords internal
+#' @noRd
+validate_untrusted_query_param <- function(
+  name,
+  value,
+  max_bytes,
+  allow_empty = FALSE
+) {
+  if (is.null(value)) {
+    return(invisible(NULL))
+  }
+
+  if (!is.character(value) || length(value) != 1L || is.na(value)) {
+    err_invalid_state(
+      sprintf("Callback query parameter '%s' must be a single string", name),
+      context = list(param = name)
+    )
+  }
+
+  if (!isTRUE(allow_empty) && !nzchar(value)) {
+    err_invalid_state(
+      sprintf("Callback query parameter '%s' must be non-empty", name),
+      context = list(param = name)
+    )
+  }
+
+  max_bytes <- as.numeric(max_bytes)
+  if (!is.finite(max_bytes) || is.na(max_bytes) || max_bytes <= 0) {
+    err_invalid_state(
+      "Internal error: invalid max_bytes in query param validator",
+      context = list(param = name)
+    )
+  }
+
+  actual_bytes <- nchar(value, type = "bytes")
+  if (!is.finite(actual_bytes) || is.na(actual_bytes)) {
+    err_invalid_state(
+      sprintf("Callback query parameter '%s' had invalid length", name),
+      context = list(param = name)
+    )
+  }
+
+  if (actual_bytes > max_bytes) {
+    err_invalid_state(
+      sprintf(
+        "Callback query parameter '%s' exceeded maximum length (%s bytes)",
+        name,
+        format(max_bytes, scientific = FALSE, trim = TRUE)
+      ),
+      context = list(
+        param = name,
+        max_bytes = max_bytes,
+        actual_bytes = actual_bytes
+      )
+    )
+  }
+
+  invisible(NULL)
+}
+
+#' Internal: validate untrusted callback query string sizes
+#'
+#' This helper guards against extremely large callback query strings causing
+#' substantial allocation during parsing.
+#'
+#' @keywords internal
+#' @noRd
+validate_untrusted_query_string <- function(query_string, max_bytes) {
+  if (is.null(query_string)) {
+    return(invisible(NULL))
+  }
+
+  if (
+    !is.character(query_string) ||
+      length(query_string) != 1L ||
+      is.na(query_string)
+  ) {
+    err_invalid_state(
+      "Callback query string must be a single string",
+      context = list(component = "query_string")
+    )
+  }
+
+  max_bytes <- as.numeric(max_bytes)
+  if (!is.finite(max_bytes) || is.na(max_bytes) || max_bytes <= 0) {
+    err_invalid_state(
+      "Internal error: invalid max_bytes in query string validator",
+      context = list(component = "query_string")
+    )
+  }
+
+  actual_bytes <- nchar(query_string, type = "bytes")
+  if (!is.finite(actual_bytes) || is.na(actual_bytes)) {
+    err_invalid_state(
+      "Callback query string had invalid length",
+      context = list(component = "query_string")
+    )
+  }
+
+  if (actual_bytes > max_bytes) {
+    err_invalid_state(
+      sprintf(
+        "Callback query string exceeded maximum length (%s bytes)",
+        format(max_bytes, scientific = FALSE, trim = TRUE)
+      ),
+      context = list(
+        component = "query_string",
+        max_bytes = max_bytes,
+        actual_bytes = actual_bytes
+      )
+    )
+  }
+
+  invisible(NULL)
+}
+
+#' Internal: read a positive numeric scalar option
+#'
+#' Returns `default` when the option is unset or invalid.
+#'
+#' @keywords internal
+#' @noRd
+get_option_positive_number <- function(name, default) {
+  val <- getOption(name, NULL)
+  if (is.null(val)) {
+    return(as.numeric(default))
+  }
+
+  val <- suppressWarnings(as.numeric(val))
+  if (!is.numeric(val) || length(val) != 1L || is.na(val) || !is.finite(val)) {
+    return(as.numeric(default))
+  }
+  if (val <= 0) {
+    return(as.numeric(default))
+  }
+  val
+}
+
 # Internal: safely coerce to scalar character or NA
 .scalar_chr <- function(x) {
   if (is.null(x) || length(x) == 0) {
@@ -134,8 +277,84 @@ client_state_store_max_age <- function(client, default = 300) {
   max_age
 }
 
+#' Internal: warn when expires_in is non-positive
+#'
+#' `expires_in <= 0` is technically valid (meaning "expires now"), but is often
+#' surprising and can indicate a provider/configuration issue.
+#'
+#' @keywords internal
+#' @noRd
+warn_about_nonpositive_expires_in <- function(expires_in, phase = NULL) {
+  if (is.null(expires_in)) {
+    return(invisible(FALSE))
+  }
+
+  if (
+    !is.numeric(expires_in) ||
+      length(expires_in) != 1L ||
+      !is.finite(expires_in)
+  ) {
+    return(invisible(FALSE))
+  }
+
+  if (expires_in > 0) {
+    return(invisible(FALSE))
+  }
+
+  phase_msg <- if (is_valid_string(phase)) {
+    paste0(" (phase: ", phase, ")")
+  } else {
+    ""
+  }
+
+  rlang::warn(
+    c(
+      format_header("Token expires immediately"),
+      "!" = paste0(
+        "Token response returned expires_in = ",
+        expires_in,
+        ", so the token is immediately expired",
+        phase_msg
+      ),
+      "i" = "This is unusual and may indicate provider misconfiguration"
+    ),
+    .frequency = "once",
+    .frequency_id = paste0(
+      "expires_in_nonpositive",
+      if (is_valid_string(phase)) paste0("-", phase) else ""
+    )
+  )
+
+  invisible(TRUE)
+}
+
+#' Internal: normalize state payload freshness window (issued_at) to seconds
+#'
+#' This is intentionally independent of the state store TTL. The state store TTL
+#' controls server-side single-use state caching and browser cookie max-age;
+#' this value controls how old the decrypted state payload's `issued_at` is
+#' allowed to be.
+#'
+#' @keywords internal
+#' @noRd
+client_state_payload_max_age <- function(client, default = 300) {
+  max_age <- suppressWarnings(as.numeric(client@state_payload_max_age))
+
+  if (length(max_age) != 1L || !is.finite(max_age) || max_age <= 0) {
+    fallback <- suppressWarnings(as.numeric(default))
+    if (length(fallback) != 1L || !is.finite(fallback) || fallback <= 0) {
+      fallback <- 300
+    }
+    return(fallback)
+  }
+
+  max_age
+}
+
 # Helpers to compute non-reversible digests for sensitive strings (tokens, ids)
-string_digest <- function(x) {
+# By default uses HMAC-SHA256 with a per-process key to prevent correlation
+# if audit logs leak. Set shinyOAuth.audit_digest_key = FALSE to disable keying.
+string_digest <- function(x, key = get_audit_digest_key()) {
   # Normalize to a length-1 character scalar for consistent hashing
   if (is.null(x) || length(x) == 0) {
     return(NA_character_)
@@ -144,12 +363,63 @@ string_digest <- function(x) {
   x1 <- x[[1L]]
   # Coerce to character before nzchar to avoid type errors (e.g., numeric ids)
   x_chr <- tryCatch(as.character(x1), error = function(...) NA_character_)
-  if (length(x_chr) != 1L || is.na(x_chr) || !nzchar(x_chr)) {
+  if (!is_valid_string(x_chr)) {
     return(NA_character_)
   }
-  dig <- try(openssl::sha256(charToRaw(x_chr)), silent = TRUE)
-  if (inherits(dig, "try-error")) {
+  raw_x <- charToRaw(x_chr)
+  dig <- if (!is.null(key) && length(key) > 0) {
+    # Keyed HMAC-SHA256: prevents correlation if logs leak
+    tryCatch(
+      openssl::sha256(raw_x, key = key),
+      error = function(...) NULL
+    )
+  } else {
+    # Unkeyed SHA-256: deterministic across processes (legacy behavior)
+    tryCatch(openssl::sha256(raw_x), error = function(...) NULL)
+  }
+
+  if (is.null(dig)) {
     return(NA_character_)
   }
   paste0(sprintf("%02x", as.integer(dig)), collapse = "")
+}
+
+# Per-process key for audit digests. Auto-generated on first access.
+# Set options(shinyOAuth.audit_digest_key = FALSE) to disable keying.
+# Set to a fixed raw/character value to correlate digests across processes.
+audit_digest_key_env <- new.env(parent = emptyenv())
+
+get_audit_digest_key <- function() {
+  opt <- getOption("shinyOAuth.audit_digest_key")
+
+  # Explicitly disable keying
+  if (identical(opt, FALSE)) {
+    return(NULL)
+  }
+
+  # Check for explicit user-supplied key
+  if (!is.null(opt)) {
+    # User supplied a key; coerce to raw if character
+    if (is.character(opt)) {
+      return(charToRaw(paste(opt, collapse = "")))
+    }
+    if (is.raw(opt)) {
+      return(opt)
+    }
+    # Invalid type: fall through to auto-generate with warning
+    rlang::warn(
+      c(
+        "Invalid `shinyOAuth.audit_digest_key` type; must be character or raw.",
+        i = "Falling back to auto-generated per-process key."
+      ),
+      .frequency = "once",
+      .frequency_id = "shinyOAuth.audit_digest_key_invalid"
+    )
+  }
+
+  # Auto-generate per-process key on first call
+  if (is.null(audit_digest_key_env$key)) {
+    audit_digest_key_env$key <- openssl::rand_bytes(32L)
+  }
+  audit_digest_key_env$key
 }

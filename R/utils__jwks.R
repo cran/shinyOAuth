@@ -18,7 +18,7 @@
 #' @param pins Optional character vector of JWK thumbprints (base64url, RFC 7638)
 #'  to pin against
 #' @param pin_mode Either "any" (at least one key matches a pin) or "all"
-#'  (every RSA/EC key must match a pin)
+#'  (every RSA/EC/OKP key must match a pin)
 #'
 #' @return The JWKS as a list
 #'
@@ -73,7 +73,10 @@ fetch_jwks <- function(
   disco_url <- paste0(rtrim_slash(issuer), "/.well-known/openid-configuration")
   resp <- httr2::request(disco_url) |>
     add_req_defaults() |>
+    req_no_redirect() |>
     req_with_retry()
+  # Security: reject redirect responses to prevent bypassing host validation
+  reject_redirect_response(resp, context = "jwks_discovery")
   if (httr2::resp_is_error(resp)) {
     err_http(
       c("x" = "Failed to fetch OIDC discovery document"),
@@ -97,7 +100,10 @@ fetch_jwks <- function(
 
   jresp <- httr2::request(jwks_uri) |>
     add_req_defaults() |>
+    req_no_redirect() |>
     req_with_retry()
+  # Security: reject redirect responses to prevent bypassing host validation
+  reject_redirect_response(jresp, context = "jwks_fetch")
   if (httr2::resp_is_error(jresp)) {
     err_http(
       c("x" = "Failed to fetch JWKS"),
@@ -113,6 +119,51 @@ fetch_jwks <- function(
   jwks
 }
 
+#' Internal: Rate-limit forced JWKS refresh attempts
+#'
+#' This is used as a defense-in-depth measure against attackers sending tokens
+#' with random `kid` values to trigger repeated forced JWKS refreshes.
+#'
+#' Implementation notes:
+#' - The rate-limit state is stored in the existing `jwks_cache` backend so it
+#'   can be shared when users provide a shared cache (e.g., Redis) and so tests
+#'   naturally isolate by using fresh caches.
+#' - The key is derived from `jwks_cache_key()` (issuer + pinning policy).
+#'
+#' @keywords internal
+#' @noRd
+jwks_force_refresh_allowed <- function(
+  issuer,
+  jwks_cache,
+  pins = NULL,
+  pin_mode = c("any", "all"),
+  min_interval = 30,
+  now = as.numeric(Sys.time())
+) {
+  pin_mode <- match.arg(pin_mode)
+  stopifnot(
+    is.numeric(min_interval),
+    length(min_interval) == 1L,
+    !is.na(min_interval),
+    min_interval >= 0
+  )
+
+  # Derive a stable, cache-safe key for the throttle entry
+  base_key <- jwks_cache_key(issuer, pins = pins, pin_mode = pin_mode)
+  throttle_key <- paste0(base_key, "xfr")
+
+  last <- jwks_cache$get(throttle_key, missing = NULL)
+  if (is.numeric(last) && length(last) == 1L && !is.na(last)) {
+    if ((now - last) < min_interval) {
+      return(FALSE)
+    }
+  }
+
+  # Record the attempt time before any network work happens.
+  jwks_cache$set(throttle_key, now)
+  TRUE
+}
+
 #' Internal: Select candidate JWKs for signature verification
 #'
 #' Filters keys that declare use != "sig" while retaining keys that omit `use`.
@@ -122,12 +173,20 @@ fetch_jwks <- function(
 #' @param jwks_or_keys A JWKS list (with $keys) or a normalized list of JWKs
 #' @param header_alg Optional JWT header alg (character)
 #' @param kid Optional key id to restrict candidates to
+#' @param pins Optional character vector of JWK thumbprints (base64url, RFC 7638)
+#'   to restrict candidate keys to. Only keys with matching thumbprints are
+#'   returned.
 #'
 #' @return A list of JWKs, filtered and ordered by preference
 #'
 #' @keywords internal
 #' @noRd
-select_candidate_jwks <- function(jwks_or_keys, header_alg = NULL, kid = NULL) {
+select_candidate_jwks <- function(
+  jwks_or_keys,
+  header_alg = NULL,
+  kid = NULL,
+  pins = NULL
+) {
   # Normalize input to a list of key objects
   keys <- jwks_or_keys
   if (is.list(jwks_or_keys) && !is.null(jwks_or_keys$keys)) {
@@ -153,7 +212,7 @@ select_candidate_jwks <- function(jwks_or_keys, header_alg = NULL, kid = NULL) {
   }
 
   # Keep keys where use is missing or explicitly 'sig'
-  keep <- vapply(
+  keep_use <- vapply(
     keys,
     function(k) {
       u <- try(k$use, silent = TRUE)
@@ -164,7 +223,26 @@ select_candidate_jwks <- function(jwks_or_keys, header_alg = NULL, kid = NULL) {
     },
     logical(1)
   )
-  keys <- keys[keep]
+  keys <- keys[keep_use]
+
+  # Honor key_ops: keep keys where key_ops is missing or includes "verify"
+  # (RFC 7517 Section 4.3: key_ops restricts permitted operations)
+  keep_ops <- vapply(
+    keys,
+    function(k) {
+      ops <- try(k$key_ops, silent = TRUE)
+      if (inherits(ops, "try-error") || is.null(ops)) {
+        return(TRUE)
+      }
+      if (!is.character(ops) || length(ops) == 0L) {
+        return(TRUE)
+      }
+      # For signature verification, the key must support "verify"
+      tolower("verify") %in% tolower(ops)
+    },
+    logical(1)
+  )
+  keys <- keys[keep_ops]
 
   # If a kid is provided, restrict to matching keys
   if (!is.null(kid)) {
@@ -201,6 +279,23 @@ select_candidate_jwks <- function(jwks_or_keys, header_alg = NULL, kid = NULL) {
     )
     idx <- order(ord_score)
     keys <- keys[idx]
+  }
+
+  # Filter by pins: only return keys whose thumbprint is in the pin list.
+  # This ensures signature verification uses only pinned keys, not merely
+  # that the JWKS passes a presence check.
+  if (!is.null(pins) && length(pins) > 0 && length(keys) > 0) {
+    pins <- unique(as.character(pins))
+    keys <- Filter(
+      function(k) {
+        tp <- try(compute_jwk_thumbprint(k), silent = TRUE)
+        if (inherits(tp, "try-error")) {
+          return(FALSE)
+        }
+        tp %in% pins
+      },
+      keys
+    )
   }
 
   keys
@@ -308,7 +403,7 @@ compute_jwk_thumbprint <- function(jwk) {
 #' @param pins Optional character vector of JWK thumbprints (base64url, RFC 7638)
 #'   to pin against.
 #' @param pin_mode Either "any" (at least one key matches a pin) or "all"
-#'   (every RSA/EC key must match a pin).
+#'   (every RSA/EC/OKP key must match a pin).
 #'
 #' @keywords internal
 #' @noRd

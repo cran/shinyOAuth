@@ -11,7 +11,6 @@
 # - We use a minimal, inert OAuthProvider and OAuthClient; no network calls occur
 # - document.cookie only exposes name=value; we validate presence and value shape
 
-
 local_skip_env <- function() {
   testthat::skip_on_cran()
   testthat::skip_if_not_installed("shinytest2")
@@ -57,8 +56,12 @@ make_test_app <- function(samesite = "Strict", id = "auth") {
     )
 
     # Wire buttons to the module's helpers
-    shiny::observeEvent(input$set, { mod$set_browser_token() })
-    shiny::observeEvent(input$clear, { mod$clear_browser_token() })
+    shiny::observeEvent(input$set, {
+      mod$set_browser_token()
+    })
+    shiny::observeEvent(input$clear, {
+      mod$clear_browser_token()
+    })
 
     # Special: directly invoke the client message with maxAgeMs = 0 to
     # verify zero TTL is honored by the browser helper (nullish coalescing fix)
@@ -66,7 +69,12 @@ make_test_app <- function(samesite = "Strict", id = "auth") {
       # Build the instance suffix similar to the module's logic
       ns_prefix <- tryCatch(session$ns(""), error = function(...) id)
       instance <- sub("-$", "", ns_prefix)
+
+      ns_hash <- substr(as.character(openssl::sha256(ns_prefix)), 1, 8)
+
       instance <- gsub("[^A-Za-z0-9_\\-]", "-", instance)
+      instance <- paste0(instance, "-", ns_hash)
+
       session$sendCustomMessage(
         type = "shinyOAuth:setBrowserToken",
         message = list(
@@ -105,7 +113,8 @@ testthat::test_that("browser token cookie is set, cleared, and re-set with new v
   on.exit(app$stop(), add = TRUE)
 
   # The cookie name includes the module instance suffix derived from id "auth"
-  cookie_name <- "shinyOAuth_sid-auth"
+  ns_hash <- substr(as.character(openssl::sha256("auth-")), 1, 8)
+  cookie_name <- paste0("shinyOAuth_sid-auth-", ns_hash)
 
   # Wait until the JS dependency is loaded and the module had a chance to set the cookie
   app$wait_for_js(cookie_value_js(cookie_name), timeout = 8000)
@@ -117,7 +126,10 @@ testthat::test_that("browser token cookie is set, cleared, and re-set with new v
 
   # Clear the cookie via UI and wait until it disappears
   app$click("clear")
-  app$wait_for_js(sprintf("(function(){return %s===null;})()", cookie_value_js(cookie_name)), timeout = 8000)
+  app$wait_for_js(
+    sprintf("(function(){return %s===null;})()", cookie_value_js(cookie_name)),
+    timeout = 8000
+  )
   v_cleared <- app$get_js(cookie_value_js(cookie_name))
   testthat::expect_true(is.null(v_cleared))
 
@@ -144,7 +156,8 @@ testthat::test_that("SameSite=None does not set cookie on non-HTTPS origins", {
   on.exit(app$stop(), add = TRUE)
 
   # The cookie should not be created under HTTP when SameSite=None
-  cookie_name <- "shinyOAuth_sid-authnone"
+  ns_hash <- substr(as.character(openssl::sha256("authnone-")), 1, 8)
+  cookie_name <- paste0("shinyOAuth_sid-authnone-", ns_hash)
   # Wait a bit for the attempted set + error path to run
   app$wait_for_idle(timeout = 8000)
   # Poll briefly to ensure it never appears
@@ -152,8 +165,13 @@ testthat::test_that("SameSite=None does not set cookie on non-HTTPS origins", {
   ever_set <- FALSE
   repeat {
     val <- app$get_js(cookie_value_js(cookie_name))
-    if (!is.null(val)) { ever_set <- TRUE; break }
-    if (Sys.time() > deadline) break
+    if (!is.null(val)) {
+      ever_set <- TRUE
+      break
+    }
+    if (Sys.time() > deadline) {
+      break
+    }
     app$wait_for_idle(200)
   }
   testthat::expect_false(ever_set)
@@ -171,17 +189,24 @@ testthat::test_that("Zero TTL cookie is not persisted (maxAgeMs = 0)", {
   )
   on.exit(app$stop(), add = TRUE)
 
-  cookie_name <- "shinyOAuth_sid-authzero"
+  ns_hash <- substr(as.character(openssl::sha256("authzero-")), 1, 8)
+  cookie_name <- paste0("shinyOAuth_sid-authzero-", ns_hash)
 
   # Ensure a clean start: clear any existing cookie
   app$click("clear")
-  app$wait_for_js(sprintf("(function(){return %s===null;})()", cookie_value_js(cookie_name)), timeout = 8000)
+  app$wait_for_js(
+    sprintf("(function(){return %s===null;})()", cookie_value_js(cookie_name)),
+    timeout = 8000
+  )
 
   # Click the special button that sets cookie with maxAgeMs=0
   app$click("set_zero")
 
   # It should become (or remain) absent very quickly
-  app$wait_for_js(sprintf("(function(){return %s===null;})()", cookie_value_js(cookie_name)), timeout = 8000)
+  app$wait_for_js(
+    sprintf("(function(){return %s===null;})()", cookie_value_js(cookie_name)),
+    timeout = 8000
+  )
   v <- app$get_js(cookie_value_js(cookie_name))
   testthat::expect_true(is.null(v))
 })

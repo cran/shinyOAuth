@@ -40,6 +40,10 @@ signs in and therefore ID token validation is disabled by default to avoid
 false negatives. You can override this via \code{id_token_validation} if you know
 the environment guarantees a fixed issuer.
 
+Note: ID token validation requires a stable issuer. For multi-tenant aliases,
+this provider sets \code{issuer = NA} and therefore also disables \code{use_nonce} by
+default (nonce validation relies on validating the ID token).
+
 Microsoft issues RS256 ID tokens; \code{allowed_algs} is restricted accordingly.
 The userinfo endpoint is provided by Microsoft Graph
 (https://graph.microsoft.com/oidc/userinfo).
@@ -53,13 +57,11 @@ to use the default Azure CLI public app, with \code{client_id}
 \examples{
 if (
   # Example requires configured Microsoft Entra ID (Azure AD) tenant:
-  nzchar(Sys.getenv("MS_TENANT"))
-  && interactive()
-  && requireNamespace("later")
+  nzchar(Sys.getenv("MS_TENANT")) && interactive() && requireNamespace("later")
 ) {
   library(shiny)
   library(shinyOAuth)
-  
+
   # Configure provider and client (Microsoft Entra ID with your tenant
   client <- oauth_client(
     provider = oauth_provider_microsoft(
@@ -67,11 +69,11 @@ if (
       tenant = Sys.getenv("MS_TENANT")
     ),
     # Default Azure CLI app ID (public client; activated in many tenants):
-    client_id = "04b07795-8ddb-461a-bbee-02f9e1bf7b46", 
+    client_id = "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
     redirect_uri = "http://localhost:8100",
     scopes = c("openid", "profile", "email")
   )
-  
+
   # UI
   ui <- fluidPage(
     use_shinyOAuth(),
@@ -84,16 +86,16 @@ if (
     h4("User info"),
     verbatimTextOutput("user_info")
   )
-  
+
   # Server
   server <- function(input, output, session) {
     auth <- oauth_module_server("auth", client)
-    
+
     output$auth_print <- renderText({
       authenticated <- auth$authenticated
       tok <- auth$token
       err <- auth$error
-      
+
       paste0(
         "Authenticated?",
         if (isTRUE(authenticated)) " YES" else " NO",
@@ -108,12 +110,12 @@ if (
         paste(capture.output(str(tok)), collapse = "\n")
       )
     })
-    
+
     output$user_info <- renderPrint({
       req(auth$token)
       auth$token@userinfo
     })
-    
+
     output$oauth_error <- renderUI({
       if (!is.null(auth$error)) {
         msg <- auth$error
@@ -124,7 +126,7 @@ if (
       }
     })
   }
-  
+
   # Need to open app in 'localhost:8100' to match with redirect_uri
   # of the public Azure CLI app (above). Browser must use 'localhost'
   # too to properly set the browser cookie. But Shiny only redirects to
@@ -137,7 +139,7 @@ if (
     },
     delay = 0.25
   )
-  
+
   # Run app
   runApp(shinyApp(ui, server), port = 8100, launch.browser = FALSE)
 }

@@ -6,7 +6,7 @@ normalize_key32 <- function(key, min_chars = 32L) {
     err_config("state key is NULL", context = list(phase = "key_derivation"))
   }
   if (is.character(key)) {
-    if (length(key) != 1L || !nzchar(key)) {
+    if (!is_valid_string(key)) {
       err_config(
         "state key must be a non-empty single string",
         context = list(phase = "key_derivation")
@@ -73,7 +73,7 @@ state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
     digits = NA,
     null = "null"
   )
-  if (!nzchar(json)) {
+  if (!is_valid_string(json)) {
     err_input(
       c("x" = "payload serialized to empty JSON string"),
       context = list(phase = "encrypt")
@@ -405,7 +405,13 @@ state_decrypt_gcm <- function(
   )
   if (inherits(res, "try-error")) {
     audit_fail("gcm_auth_failed")
-    state_fail("GCM authentication failed", context = list(phase = "decrypt"))
+    state_fail(
+      c(
+        "x" = "GCM authentication failed",
+        "!" = "This often indicates the state key/secret does not match the one used to encrypt the state (e.g., OAuthClient created inside a Shiny session so the key changes on redirect/new session, different Shiny worker, or rotated secret)."
+      ),
+      context = list(phase = "decrypt")
+    )
   }
   parsed <- try(
     jsonlite::fromJSON(rawToChar(res), simplifyVector = FALSE),
@@ -416,7 +422,10 @@ state_decrypt_gcm <- function(
   ) {
     audit_fail("decrypted_json_invalid")
     state_fail(
-      "state token decrypted payload is not valid JSON",
+      c(
+        "x" = "state token decrypted payload is not valid JSON",
+        "!" = "This can happen if the state key/secret is wrong (e.g., OAuthClient created inside a Shiny session so the key changes on redirect/new session, different Shiny worker, or rotated secret); the decrypted bytes won't decode as JSON."
+      ),
       context = list(phase = "decrypt")
     )
   }

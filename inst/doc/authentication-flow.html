@@ -39,6 +39,108 @@ ul.task-list{list-style: none;}
 
 
 
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
 
 
 
@@ -349,8 +451,8 @@ configured state store
 <li>If the entry is missing, malformed, or deletion fails, the flow
 aborts with a <code>shinyOAuth_state_error</code></li>
 <li>Audit events are emitted on failures (e.g.,
-<code>audit_state_store_lookup_failed</code>,
-<code>audit_state_store_removal_failed</code>)</li>
+<code>state_store_lookup_failed</code>,
+<code>state_store_removal_failed</code>)</li>
 </ul></li>
 <li>Verify that user’s browser token matches the previously stored
 browser token</li>
@@ -377,14 +479,14 @@ configured. The response must include at least
 flow.</p>
 <p>When successful, the package also applies two safety rails:</p>
 <ul>
-<li>If the token response includes <code>scope</code>, all scopes
-requested by the client must be present in the granted set; otherwise
-the flow fails fast to avoid downstream surprises</li>
-<li>If the token response includes <code>token_type</code>, and the
-provider was configured with <code>allowed_token_types</code>, the
-<code>token_type</code> must be present in the response and be one of
-the allowed types (e.g., <code>Bearer</code>). Failure aborts the
-flow</li>
+<li>If the token response includes <code>scope</code>, shinyOAuth can
+reconcile it against the requested scopes (defaults to strict
+enforcement; configurable via the client <code>scope_validation</code>
+setting)</li>
+<li>If the provider was configured with a non-empty
+<code>allowed_token_types</code>, the token response must include
+<code>token_type</code> and its value must be one of the allowed types
+(case-insensitive, e.g., <code>Bearer</code>)</li>
 </ul>
 </div>
 <div id="fetch-userinfo-optional" class="section level3">
@@ -400,15 +502,20 @@ If this request fails, the flow aborts with an error.</p>
 <p>When using <code>oauth_provider(id_token_validation = TRUE)</code>,
 the following verifications are performed:</p>
 <ul>
-<li>Signature: verified against provider JWKS (with optional thumbprint
-pinning) for RS256/ES256; HS256 only with explicit opt-in and
-server-held secret</li>
+<li>Signature: verified against provider JWKS (with optional pinning)
+for standard asymmetric algorithms (RSA-PKCS1, RSA-PSS, ECDSA, EdDSA).
+HMAC algorithms (HS256/384/512) are only allowed with explicit opt-in
+(<code>options(shinyOAuth.allow_hs = TRUE)</code>) and a sufficiently
+strong server-held secret</li>
 <li>Claims: <code>iss</code> matches expected issuer; <code>aud</code>
 vector contains <code>client_id</code>; <code>sub</code> present;
 <code>iat</code> is required and must be a single finite numeric;
 time-based claims (<code>exp</code> is required, <code>nbf</code>
 optional) are evaluated with a small configurable leeway; tokens issued
 in the future are rejected</li>
+<li>Header <code>typ</code> (when present): must indicate a JWT
+(<code>JWT</code>, case-insensitive). Other values (e.g.,
+<code>at+jwt</code>) are rejected for ID tokens</li>
 <li>Nonce: must match the previously stored value (if configured)</li>
 <li>Subject match: if
 <code>oauth_provider(userinfo_id_token_match = TRUE)</code>, it is
@@ -416,15 +523,42 @@ checked that <code>sub</code> in userinfo equals <code>sub</code> in the
 ID token</li>
 </ul>
 </div>
+<div id="token-introspection-optional" class="section level3">
+<h3>11. Token introspection (optional)</h3>
+<p>Some providers support RFC 7662 token introspection (an additional
+endpoint where the server can ask the provider whether an access token
+is currently active and retrieve related metadata).</p>
+<p>If you enable <code>introspect = TRUE</code> when creating your
+<code>oauth_client()</code>, the module calls the provider’s
+introspection endpoint during callback processing and requires the
+response to indicate <code>active = TRUE</code>. If introspection is
+unsupported by the provider or the introspection request fails, the
+login is aborted and <code>$authenticated</code> is not set to
+<code>TRUE</code>.</p>
+<p>You can optionally enforce additional provider-dependent fields via
+<code>oauth_client(introspect_elements = ...)</code>:</p>
+<ul>
+<li><code>&quot;sub&quot;</code> – require introspection <code>sub</code> to match
+the session subject</li>
+<li><code>&quot;client_id&quot;</code> – require introspection
+<code>client_id</code> to match your OAuth client id</li>
+<li><code>&quot;scope&quot;</code> – validate introspection <code>scope</code>
+against requested scopes (respects the client’s
+<code>scope_validation</code> mode)</li>
+</ul>
+<p>(Note that not all providers may return each of these fields in
+introspection responses.)</p>
+</div>
 <div id="build-the-oauthtoken-object" class="section level3">
-<h3>11. Build the <code>OAuthToken</code> object</h3>
+<h3>12. Build the <code>OAuthToken</code> object</h3>
 <p>Now that all verifications have passed, the module builds the final
 token object. This is an S7 <code>OAuthToken</code> object which
 contains:</p>
 <ul>
 <li><code>access_token</code> (string)</li>
 <li><code>refresh_token</code> (optional string)</li>
-<li><code>expires_at</code> (POSIXct; optional)</li>
+<li><code>expires_at</code> (numeric timestamp, seconds since epoch;
+<code>Inf</code> for non-expiring tokens)</li>
 <li><code>id_token</code> (optional string)</li>
 <li><code>userinfo</code> (optional list)</li>
 </ul>
@@ -433,18 +567,19 @@ contains:</p>
 requested verifications have passed.</p>
 </div>
 <div id="clean-url-tidy-ui-clear-browser-token" class="section level3">
-<h3>12. Clean URL &amp; tidy UI; clear browser token</h3>
+<h3>13. Clean URL &amp; tidy UI; clear browser token</h3>
 <p>The user’s browser was redirected to your app with OAuth 2.0 query
 parameters (<code>code</code>, <code>state</code>, etc.). To improve UX
 and avoid leaking sensitive data, these values are removed from the
 address bar with JavaScript. Optionally, the page title may also be
 adjusted (see the <code>tab_title_</code> arguments in
 <code>oauth_module_server()</code>).</p>
-<p>The browser token cookie is also cleared to allow a fresh future
-flow.</p>
+<p>The browser token cookie is also cleared and immediately re-issued
+with a fresh value, so a future flow can start with a new per-session
+token.</p>
 </div>
 <div id="post-flow-session-management" class="section level3">
-<h3>13. Post-flow session management</h3>
+<h3>14. Post-flow session management</h3>
 <p>Now that the flow is complete, the module will manage the token
 lifetime during the active session. This may consist of:</p>
 <ul>
@@ -456,6 +591,81 @@ token is refreshed before expiry</li>
 <code>oauth_module_server(reauth_after_seconds = ...)</code> can force
 periodic re-authentication</li>
 </ul>
+<div id="refresh-behavior-refresh_token" class="section level4">
+<h4>Refresh behavior (<code>refresh_token()</code>)</h4>
+<p>When the module refreshes a session (or when you call
+<code>refresh_token()</code> directly), it performs an OAuth 2.0 refresh
+token grant against the provider’s token endpoint and updates the
+<code>OAuthToken</code> object. This works as follows:</p>
+<ul>
+<li>A token request is sent with <code>grant_type=refresh_token</code>
+and the current <code>refresh_token</code></li>
+<li>The response must include a new <code>access_token</code>.
+<code>expires_at</code> is updated from <code>expires_in</code> when
+present; otherwise it is set to <code>Inf</code></li>
+<li>If the provider rotates the refresh token (returns a new
+<code>refresh_token</code>), it is stored; otherwise the original is
+preserved</li>
+<li>If <code>oauth_provider(userinfo_required = TRUE)</code>, userinfo
+is re-fetched using the fresh access token</li>
+</ul>
+<p>With respect to OIDC ID token handling:</p>
+<ul>
+<li>Per OIDC Core Section 12.2, refresh responses may omit
+<code>id_token</code>. When omitted, the original <code>id_token</code>
+from the initial login is preserved. Thus, a refresh does not
+necessarily revalidate identity</li>
+<li>If the provider does return an <code>id_token</code> during refresh,
+shinyOAuth enforces OIDC 12.2 subject continuity: the refresh-returned
+<code>id_token</code> must have the same <code>sub</code> as the
+original <code>id_token</code> from login
+<ul>
+<li>If an original <code>id_token</code> did not exist in the session,
+and the refresh does return one, the refresh fails (cannot establish
+subject claim match with no baseline)</li>
+<li>If <code>id_token_validation = TRUE</code>, the refresh-returned
+<code>id_token</code> is fully validated (signature + claims); the
+<code>sub</code> claim match is enforced as part of validation</li>
+<li>If <code>id_token_validation = FALSE</code>, shinyOAuth still
+enforces the <code>sub</code> match by parsing the JWT payload (ensuring
+that the <code>sub</code> claim still matches but without full
+validation)</li>
+</ul></li>
+</ul>
+<p>If refresh fails inside <code>oauth_module_server()</code>, the
+module exposes the failure via its reactive state (for example,
+<code>token_refresh_error</code>). By default it also clears the current
+session token; if
+<code>oauth_module_server(indefinite_session = TRUE)</code>, the token
+is kept but marked stale. In all cases, the <code>$authenticated</code>
+flag becomes <code>FALSE</code> while the error is present.</p>
+</div>
+</div>
+<div id="logout-and-token-revocation" class="section level3">
+<h3>15. Logout and token revocation</h3>
+<p>When <code>auth$logout()</code> is called, the module:</p>
+<ol style="list-style-type: decimal">
+<li>Attempts to revoke both refresh and access tokens at the provider
+(RFC 7009) if a <code>revocation_url</code> is configured. This runs
+asynchronously only when
+<code>oauth_module_server(async = TRUE)</code></li>
+<li>Clears the local session (<code>OAuthToken</code>, browser
+cookie)</li>
+<li>Emits a <code>&quot;logout&quot;</code> audit event</li>
+<li>Re-issues a fresh browser token for subsequent logins</li>
+</ol>
+<p>You can also revoke tokens directly via
+<code>revoke_token(client, token, which = &quot;refresh&quot;)</code>.</p>
+<p>To automatically attempt revocation when a Shiny session ends (for
+example, a tab close or session timeout), set
+<code>revoke_on_session_end = TRUE</code>:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  <span class="st">&quot;auth&quot;</span>,</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">client =</span> client,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">revoke_on_session_end =</span> <span class="cn">TRUE</span></span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>)</span></code></pre></div>
+<p>This is best-effort: the session may end while the provider is
+unavailable, and revocation failures do not block session cleanup.</p>
 </div>
 </div>
 

@@ -35,11 +35,12 @@
 # }
 # 
 # runApp(
-#   shinyApp(ui, server), port = 8100,
+#   shinyApp(ui, server),
+#   port = 8100,
 #   launch.browser = FALSE
 # )
 # 
-# # Open the app in your regular browser at http://127.0.01:8100
+# # Open the app in your regular browser at http://127.0.0.1:8100
 # # (viewers in RStudio/Positron/etc. cannot perform necessary redirects)
 
 ## ----eval = FALSE-------------------------------------------------------------
@@ -87,11 +88,12 @@
 # }
 # 
 # runApp(
-#   shinyApp(ui, server), port = 8100,
+#   shinyApp(ui, server),
+#   port = 8100,
 #   launch.browser = FALSE
 # )
 # 
-# # Open the app in your regular browser at http://127.0.01:8100
+# # Open the app in your regular browser at http://127.0.0.1:8100
 # # (viewers in RStudio/Positron/etc. cannot perform necessary redirects)
 
 ## ----eval = FALSE-------------------------------------------------------------
@@ -164,10 +166,11 @@
 # }
 # 
 # runApp(
-#   shinyApp(ui, server), port = 8100,
+#   shinyApp(ui, server),
+#   port = 8100,
 #   launch.browser = FALSE
 # )
 # 
-# # Open the app in your regular browser at http://127.0.01:8100
+# # Open the app in your regular browser at http://127.0.0.1:8100
 # # (viewers in RStudio/Positron/etc. cannot perform necessary redirects)
 

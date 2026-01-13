@@ -43,3 +43,244 @@ test_that("OAuthProvider default jwks_host_issuer_match is FALSE", {
   )
   expect_identical(p@jwks_host_issuer_match, FALSE)
 })
+
+test_that("OAuthProvider HS* algs require allow_hs opt-in", {
+  base_args <- list(
+    name = "t",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    issuer = "https://issuer.example.com",
+    id_token_validation = TRUE,
+    id_token_required = TRUE,
+    allowed_algs = c("HS256")
+  )
+
+  withr::with_options(list(shinyOAuth.allow_hs = FALSE), {
+    expect_error(
+      do.call(oauth_provider, base_args),
+      regexp = "allow_hs|HS\\*",
+      fixed = FALSE
+    )
+  })
+
+  withr::with_options(list(shinyOAuth.allow_hs = TRUE), {
+    expect_no_error(do.call(oauth_provider, base_args))
+  })
+})
+
+test_that("oauth_provider_microsoft defaults are compatible with multi-tenant aliases", {
+  p <- oauth_provider_microsoft(tenant = "common")
+
+  # Multi-tenant issuer varies by signing tenant; default disables validation.
+  expect_true(is.na(p@issuer))
+  expect_identical(p@id_token_validation, FALSE)
+  expect_identical(p@id_token_required, FALSE)
+  expect_identical(p@use_nonce, FALSE)
+  expect_identical(p@allowed_algs, c("RS256"))
+})
+
+test_that("oauth_provider_microsoft enables issuer+nonce for GUID tenant", {
+  tenant_guid <- "00000000-0000-0000-0000-000000000000"
+  p <- oauth_provider_microsoft(tenant = tenant_guid)
+
+  expect_true(is.character(p@issuer) && nzchar(p@issuer))
+  expect_match(p@issuer, tenant_guid, fixed = TRUE)
+
+  expect_identical(p@id_token_validation, TRUE)
+  expect_identical(p@id_token_required, TRUE)
+  expect_identical(p@use_nonce, TRUE)
+  expect_identical(p@allowed_algs, c("RS256"))
+})
+
+test_that("OAuthProvider rejects reserved keys in extra_auth_params", {
+  reserved <- c(
+    "response_type",
+    "client_id",
+    "redirect_uri",
+    "state",
+    "scope",
+    "code_challenge",
+    "code_challenge_method",
+    "nonce"
+  )
+
+  for (key in reserved) {
+    expect_error(
+      OAuthProvider(
+        name = "test",
+        auth_url = "https://example.com/authorize",
+        token_url = "https://example.com/token",
+        extra_auth_params = setNames(list("bad"), key)
+      ),
+      regexp = "extra_auth_params must not contain reserved keys",
+      info = paste("should reject reserved auth param:", key)
+    )
+  }
+
+  # Non-reserved keys should be accepted
+  expect_no_error(OAuthProvider(
+    name = "test",
+    auth_url = "https://example.com/authorize",
+    token_url = "https://example.com/token",
+    extra_auth_params = list(
+      prompt = "consent",
+      login_hint = "user@example.com"
+    )
+  ))
+})
+
+test_that("shinyOAuth.unblock_auth_params allows reserved keys when configured", {
+  # By default, 'state' is blocked
+  expect_error(
+    OAuthProvider(
+      name = "test",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      extra_auth_params = list(state = "custom")
+    ),
+    regexp = "extra_auth_params must not contain reserved keys"
+  )
+
+  # With unblock option, 'state' is allowed
+  withr::with_options(list(shinyOAuth.unblock_auth_params = "state"), {
+    expect_no_error(OAuthProvider(
+      name = "test",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      extra_auth_params = list(state = "custom")
+    ))
+  })
+
+  # Other params still blocked
+
+  withr::with_options(list(shinyOAuth.unblock_auth_params = "state"), {
+    expect_error(
+      OAuthProvider(
+        name = "test",
+        auth_url = "https://example.com/authorize",
+        token_url = "https://example.com/token",
+        extra_auth_params = list(nonce = "bad")
+      ),
+      regexp = "extra_auth_params must not contain reserved keys"
+    )
+  })
+})
+
+test_that("OAuthProvider rejects unnamed extra_auth_params", {
+  # Fully unnamed list
+
+  expect_error(
+    OAuthProvider(
+      name = "test",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      extra_auth_params = list("foo", "bar")
+    ),
+    regexp = "extra_auth_params must be a named list"
+  )
+
+  # Partially named list (some elements unnamed)
+  expect_error(
+    OAuthProvider(
+      name = "test",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      extra_auth_params = list(a = 1, "bar")
+    ),
+    regexp = "extra_auth_params must be a named list"
+  )
+
+  # Empty names (name = "")
+  expect_error(
+    OAuthProvider(
+      name = "test",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      extra_auth_params = setNames(list(1, 2), c("a", ""))
+    ),
+    regexp = "extra_auth_params must be a named list"
+  )
+})
+
+test_that("OAuthProvider rejects unnamed extra_token_params", {
+  # Fully unnamed list
+  expect_error(
+    OAuthProvider(
+      name = "test",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      extra_token_params = list("foo", "bar")
+    ),
+    regexp = "extra_token_params must be a named list"
+  )
+
+  # Partially named list
+  expect_error(
+    OAuthProvider(
+      name = "test",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      extra_token_params = list(audience = "https://api.example.com", "oops")
+    ),
+    regexp = "extra_token_params must be a named list"
+  )
+})
+
+test_that("OAuthProvider rejects reserved keys in extra_token_params", {
+  reserved <- c(
+    "grant_type",
+    "code",
+    "redirect_uri",
+    "code_verifier",
+    "client_id",
+    "client_secret",
+    "client_assertion",
+    "client_assertion_type"
+  )
+
+  for (key in reserved) {
+    expect_error(
+      OAuthProvider(
+        name = "test",
+        auth_url = "https://example.com/authorize",
+        token_url = "https://example.com/token",
+        extra_token_params = setNames(list("bad"), key)
+      ),
+      regexp = "extra_token_params must not contain reserved keys",
+      info = paste("should reject reserved token param:", key)
+    )
+  }
+
+  # Non-reserved keys should be accepted
+  expect_no_error(OAuthProvider(
+    name = "test",
+    auth_url = "https://example.com/authorize",
+    token_url = "https://example.com/token",
+    extra_token_params = list(audience = "https://api.example.com")
+  ))
+})
+
+test_that("OAuthProvider rejects reserved headers in extra_token_headers", {
+  reserved <- c("Authorization", "Cookie", "AUTHORIZATION")
+
+  for (hdr in reserved) {
+    expect_error(
+      OAuthProvider(
+        name = "test",
+        auth_url = "https://example.com/authorize",
+        token_url = "https://example.com/token",
+        extra_token_headers = setNames("bad", hdr)
+      ),
+      regexp = "extra_token_headers must not contain reserved headers",
+      info = paste("should reject reserved token header:", hdr)
+    )
+  }
+
+  # Non-reserved headers should be accepted
+  expect_no_error(OAuthProvider(
+    name = "test",
+    auth_url = "https://example.com/authorize",
+    token_url = "https://example.com/token",
+    extra_token_headers = c(Accept = "application/json")
+  ))
+})

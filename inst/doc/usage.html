@@ -405,12 +405,13 @@ environment variables <code>GITHUB_OAUTH_CLIENT_ID</code> and
 <span id="cb1-34"><a href="#cb1-34" tabindex="-1"></a>}</span>
 <span id="cb1-35"><a href="#cb1-35" tabindex="-1"></a></span>
 <span id="cb1-36"><a href="#cb1-36" tabindex="-1"></a><span class="fu">runApp</span>(</span>
-<span id="cb1-37"><a href="#cb1-37" tabindex="-1"></a>  <span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>,</span>
-<span id="cb1-38"><a href="#cb1-38" tabindex="-1"></a>  <span class="at">launch.browser =</span> <span class="cn">FALSE</span></span>
-<span id="cb1-39"><a href="#cb1-39" tabindex="-1"></a>)</span>
-<span id="cb1-40"><a href="#cb1-40" tabindex="-1"></a></span>
-<span id="cb1-41"><a href="#cb1-41" tabindex="-1"></a><span class="co"># Open the app in your regular browser at http://127.0.01:8100</span></span>
-<span id="cb1-42"><a href="#cb1-42" tabindex="-1"></a><span class="co"># (viewers in RStudio/Positron/etc. cannot perform necessary redirects)</span></span></code></pre></div>
+<span id="cb1-37"><a href="#cb1-37" tabindex="-1"></a>  <span class="fu">shinyApp</span>(ui, server),</span>
+<span id="cb1-38"><a href="#cb1-38" tabindex="-1"></a>  <span class="at">port =</span> <span class="dv">8100</span>,</span>
+<span id="cb1-39"><a href="#cb1-39" tabindex="-1"></a>  <span class="at">launch.browser =</span> <span class="cn">FALSE</span></span>
+<span id="cb1-40"><a href="#cb1-40" tabindex="-1"></a>)</span>
+<span id="cb1-41"><a href="#cb1-41" tabindex="-1"></a></span>
+<span id="cb1-42"><a href="#cb1-42" tabindex="-1"></a><span class="co"># Open the app in your regular browser at http://127.0.0.1:8100</span></span>
+<span id="cb1-43"><a href="#cb1-43" tabindex="-1"></a><span class="co"># (viewers in RStudio/Positron/etc. cannot perform necessary redirects)</span></span></code></pre></div>
 <p>Note that <code>ui</code> includes <code>use_shinyOAuth()</code> to
 load the necessary JavaScript dependency. Always place
 <code>use_shinyOAuth()</code> in your UI; otherwise, the module will not
@@ -470,12 +471,13 @@ process instead of being redirected immediately on page load.</p>
 <span id="cb2-42"><a href="#cb2-42" tabindex="-1"></a>}</span>
 <span id="cb2-43"><a href="#cb2-43" tabindex="-1"></a></span>
 <span id="cb2-44"><a href="#cb2-44" tabindex="-1"></a><span class="fu">runApp</span>(</span>
-<span id="cb2-45"><a href="#cb2-45" tabindex="-1"></a>  <span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>,</span>
-<span id="cb2-46"><a href="#cb2-46" tabindex="-1"></a>  <span class="at">launch.browser =</span> <span class="cn">FALSE</span></span>
-<span id="cb2-47"><a href="#cb2-47" tabindex="-1"></a>)</span>
-<span id="cb2-48"><a href="#cb2-48" tabindex="-1"></a></span>
-<span id="cb2-49"><a href="#cb2-49" tabindex="-1"></a><span class="co"># Open the app in your regular browser at http://127.0.01:8100</span></span>
-<span id="cb2-50"><a href="#cb2-50" tabindex="-1"></a><span class="co"># (viewers in RStudio/Positron/etc. cannot perform necessary redirects)</span></span></code></pre></div>
+<span id="cb2-45"><a href="#cb2-45" tabindex="-1"></a>  <span class="fu">shinyApp</span>(ui, server),</span>
+<span id="cb2-46"><a href="#cb2-46" tabindex="-1"></a>  <span class="at">port =</span> <span class="dv">8100</span>,</span>
+<span id="cb2-47"><a href="#cb2-47" tabindex="-1"></a>  <span class="at">launch.browser =</span> <span class="cn">FALSE</span></span>
+<span id="cb2-48"><a href="#cb2-48" tabindex="-1"></a>)</span>
+<span id="cb2-49"><a href="#cb2-49" tabindex="-1"></a></span>
+<span id="cb2-50"><a href="#cb2-50" tabindex="-1"></a><span class="co"># Open the app in your regular browser at http://127.0.0.1:8100</span></span>
+<span id="cb2-51"><a href="#cb2-51" tabindex="-1"></a><span class="co"># (viewers in RStudio/Positron/etc. cannot perform necessary redirects)</span></span></code></pre></div>
 </div>
 <div id="making-authenticated-api-calls" class="section level2">
 <h2>Making authenticated API calls</h2>
@@ -508,17 +510,17 @@ repositories.</p>
 <span id="cb3-22"><a href="#cb3-22" tabindex="-1"></a>    client,</span>
 <span id="cb3-23"><a href="#cb3-23" tabindex="-1"></a>    <span class="at">auto_redirect =</span> <span class="cn">TRUE</span></span>
 <span id="cb3-24"><a href="#cb3-24" tabindex="-1"></a>  )</span>
-<span id="cb3-25"><a href="#cb3-25" tabindex="-1"></a>  </span>
+<span id="cb3-25"><a href="#cb3-25" tabindex="-1"></a></span>
 <span id="cb3-26"><a href="#cb3-26" tabindex="-1"></a>  repositories <span class="ot">&lt;-</span> <span class="fu">reactiveVal</span>(<span class="cn">NULL</span>)</span>
-<span id="cb3-27"><a href="#cb3-27" tabindex="-1"></a>  </span>
+<span id="cb3-27"><a href="#cb3-27" tabindex="-1"></a></span>
 <span id="cb3-28"><a href="#cb3-28" tabindex="-1"></a>  <span class="fu">observe</span>({</span>
 <span id="cb3-29"><a href="#cb3-29" tabindex="-1"></a>    <span class="fu">req</span>(auth<span class="sc">$</span>authenticated)</span>
-<span id="cb3-30"><a href="#cb3-30" tabindex="-1"></a>    </span>
+<span id="cb3-30"><a href="#cb3-30" tabindex="-1"></a></span>
 <span id="cb3-31"><a href="#cb3-31" tabindex="-1"></a>    <span class="co"># Example additional API request using the access token</span></span>
 <span id="cb3-32"><a href="#cb3-32" tabindex="-1"></a>    <span class="co"># (e.g., fetch user repositories from GitHub)</span></span>
 <span id="cb3-33"><a href="#cb3-33" tabindex="-1"></a>    req <span class="ot">&lt;-</span> <span class="fu">client_bearer_req</span>(auth<span class="sc">$</span>token, <span class="st">&quot;https://api.github.com/user/repos&quot;</span>)</span>
 <span id="cb3-34"><a href="#cb3-34" tabindex="-1"></a>    resp <span class="ot">&lt;-</span> httr2<span class="sc">::</span><span class="fu">req_perform</span>(req)</span>
-<span id="cb3-35"><a href="#cb3-35" tabindex="-1"></a>    </span>
+<span id="cb3-35"><a href="#cb3-35" tabindex="-1"></a></span>
 <span id="cb3-36"><a href="#cb3-36" tabindex="-1"></a>    <span class="cf">if</span> (httr2<span class="sc">::</span><span class="fu">resp_is_error</span>(resp)) {</span>
 <span id="cb3-37"><a href="#cb3-37" tabindex="-1"></a>      <span class="fu">repositories</span>(<span class="cn">NULL</span>)</span>
 <span id="cb3-38"><a href="#cb3-38" tabindex="-1"></a>    } <span class="cf">else</span> {</span>
@@ -526,13 +528,13 @@ repositories.</p>
 <span id="cb3-40"><a href="#cb3-40" tabindex="-1"></a>      <span class="fu">repositories</span>(repos_data)</span>
 <span id="cb3-41"><a href="#cb3-41" tabindex="-1"></a>    }</span>
 <span id="cb3-42"><a href="#cb3-42" tabindex="-1"></a>  })</span>
-<span id="cb3-43"><a href="#cb3-43" tabindex="-1"></a>  </span>
+<span id="cb3-43"><a href="#cb3-43" tabindex="-1"></a></span>
 <span id="cb3-44"><a href="#cb3-44" tabindex="-1"></a>  <span class="co"># Render username + their repositories</span></span>
 <span id="cb3-45"><a href="#cb3-45" tabindex="-1"></a>  output<span class="sc">$</span>ui <span class="ot">&lt;-</span> <span class="fu">renderUI</span>({</span>
 <span id="cb3-46"><a href="#cb3-46" tabindex="-1"></a>    <span class="cf">if</span> (<span class="fu">isTRUE</span>(auth<span class="sc">$</span>authenticated)) {</span>
 <span id="cb3-47"><a href="#cb3-47" tabindex="-1"></a>      user_info <span class="ot">&lt;-</span> auth<span class="sc">$</span>token<span class="sc">@</span>userinfo</span>
 <span id="cb3-48"><a href="#cb3-48" tabindex="-1"></a>      repos <span class="ot">&lt;-</span> <span class="fu">repositories</span>()</span>
-<span id="cb3-49"><a href="#cb3-49" tabindex="-1"></a>      </span>
+<span id="cb3-49"><a href="#cb3-49" tabindex="-1"></a></span>
 <span id="cb3-50"><a href="#cb3-50" tabindex="-1"></a>      <span class="fu">return</span>(<span class="fu">tagList</span>(</span>
 <span id="cb3-51"><a href="#cb3-51" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">p</span>(<span class="fu">paste</span>(<span class="st">&quot;You are logged in as:&quot;</span>, user_info<span class="sc">$</span>login)),</span>
 <span id="cb3-52"><a href="#cb3-52" tabindex="-1"></a>        tags<span class="sc">$</span><span class="fu">h4</span>(<span class="st">&quot;Your repositories:&quot;</span>),</span>
@@ -547,21 +549,63 @@ repositories.</p>
 <span id="cb3-61"><a href="#cb3-61" tabindex="-1"></a>        }</span>
 <span id="cb3-62"><a href="#cb3-62" tabindex="-1"></a>      ))</span>
 <span id="cb3-63"><a href="#cb3-63" tabindex="-1"></a>    }</span>
-<span id="cb3-64"><a href="#cb3-64" tabindex="-1"></a>    </span>
+<span id="cb3-64"><a href="#cb3-64" tabindex="-1"></a></span>
 <span id="cb3-65"><a href="#cb3-65" tabindex="-1"></a>    <span class="fu">return</span>(tags<span class="sc">$</span><span class="fu">p</span>(<span class="st">&quot;You are not logged in.&quot;</span>))</span>
 <span id="cb3-66"><a href="#cb3-66" tabindex="-1"></a>  })</span>
 <span id="cb3-67"><a href="#cb3-67" tabindex="-1"></a>}</span>
 <span id="cb3-68"><a href="#cb3-68" tabindex="-1"></a></span>
 <span id="cb3-69"><a href="#cb3-69" tabindex="-1"></a><span class="fu">runApp</span>(</span>
-<span id="cb3-70"><a href="#cb3-70" tabindex="-1"></a>  <span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>,</span>
-<span id="cb3-71"><a href="#cb3-71" tabindex="-1"></a>  <span class="at">launch.browser =</span> <span class="cn">FALSE</span></span>
-<span id="cb3-72"><a href="#cb3-72" tabindex="-1"></a>)</span>
-<span id="cb3-73"><a href="#cb3-73" tabindex="-1"></a></span>
-<span id="cb3-74"><a href="#cb3-74" tabindex="-1"></a><span class="co"># Open the app in your regular browser at http://127.0.01:8100</span></span>
-<span id="cb3-75"><a href="#cb3-75" tabindex="-1"></a><span class="co"># (viewers in RStudio/Positron/etc. cannot perform necessary redirects)</span></span></code></pre></div>
+<span id="cb3-70"><a href="#cb3-70" tabindex="-1"></a>  <span class="fu">shinyApp</span>(ui, server),</span>
+<span id="cb3-71"><a href="#cb3-71" tabindex="-1"></a>  <span class="at">port =</span> <span class="dv">8100</span>,</span>
+<span id="cb3-72"><a href="#cb3-72" tabindex="-1"></a>  <span class="at">launch.browser =</span> <span class="cn">FALSE</span></span>
+<span id="cb3-73"><a href="#cb3-73" tabindex="-1"></a>)</span>
+<span id="cb3-74"><a href="#cb3-74" tabindex="-1"></a></span>
+<span id="cb3-75"><a href="#cb3-75" tabindex="-1"></a><span class="co"># Open the app in your regular browser at http://127.0.0.1:8100</span></span>
+<span id="cb3-76"><a href="#cb3-76" tabindex="-1"></a><span class="co"># (viewers in RStudio/Positron/etc. cannot perform necessary redirects)</span></span></code></pre></div>
 <p>For an example application which fetches data from the Spotify web
 API, see:
 <code>vignette(&quot;example-spotify&quot;, package = &quot;shinyOAuth&quot;)</code>.</p>
+</div>
+<div id="token-introspection-optional" class="section level2">
+<h2>Token introspection (optional)</h2>
+<p>By default, <code>oauth_module_server()</code> considers a login
+complete once the callback has been validated and token retrieval plus
+any configured OIDC checks have succeeded.</p>
+<p>If your provider supports RFC 7662 token introspection, you can
+optionally add an extra login-time validation step by enabling
+<code>introspect = TRUE</code> when creating your
+<code>oauth_client()</code>.</p>
+<p>When enabled, the module calls the provider introspection endpoint
+during callback processing and requires the response to indicate
+<code>active = TRUE</code>. If introspection is unsupported by the
+provider or the introspection request fails, the login is aborted and
+<code>$authenticated</code> is not set to <code>TRUE</code>.</p>
+<p>You can optionally request additional checks via
+<code>introspect_elements</code>:</p>
+<ul>
+<li><code>&quot;sub&quot;</code> – require the introspected <code>sub</code> to
+match the session subject (from ID token <code>sub</code> when
+available; otherwise userinfo <code>sub</code> when available)</li>
+<li><code>&quot;client_id&quot;</code> – require the introspected
+<code>client_id</code> to match your OAuth client id</li>
+<li><code>&quot;scope&quot;</code> – validate returned scopes against requested
+scopes; this follows the client’s <code>scope_validation</code> mode
+(<code>&quot;strict&quot;</code> errors, <code>&quot;warn&quot;</code> warns,
+<code>&quot;none&quot;</code> skips scope checks)</li>
+</ul>
+<p>(Note that not all providers may return each of these fields in
+introspection responses.)</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="co"># Example with introspection enabled</span></span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_ID&quot;</span>),</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;http://127.0.0.1:8100&quot;</span>,</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  <span class="at">introspect =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>  <span class="at">introspect_elements =</span> <span class="fu">c</span>(<span class="st">&quot;sub&quot;</span>, <span class="st">&quot;client_id&quot;</span>, <span class="st">&quot;scope&quot;</span>)</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>)</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a></span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(<span class="st">&quot;auth&quot;</span>, client, <span class="at">auto_redirect =</span> <span class="cn">TRUE</span>)</span></code></pre></div>
 </div>
 <div id="async-mode-to-keep-ui-responsive" class="section level2">
 <h2>Async mode to keep UI responsive</h2>
@@ -572,21 +616,46 @@ backoff, and sleeping on the main thread can block the Shiny event loop
 for the worker process.</p>
 <p>To avoid blocking, enable async mode and configure a future
 backend:</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>future<span class="sc">::</span><span class="fu">plan</span>(future<span class="sc">::</span>multisession)</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a></span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>    <span class="st">&quot;auth&quot;</span>,</span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>    client,</span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>    <span class="at">auto_redirect =</span> <span class="cn">TRUE</span>,</span>
-<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>    <span class="at">async =</span> <span class="cn">TRUE</span> <span class="co"># Run token exchange &amp; refresh off the main thread</span></span>
-<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  )</span>
-<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>  </span>
-<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>  <span class="co"># ...</span></span>
-<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a>}</span></code></pre></div>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>future<span class="sc">::</span><span class="fu">plan</span>(future<span class="sc">::</span>multisession)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a></span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>    <span class="st">&quot;auth&quot;</span>,</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>    client,</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>    <span class="at">auto_redirect =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>    <span class="at">async =</span> <span class="cn">TRUE</span> <span class="co"># Run token exchange &amp; refresh off the main thread</span></span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>  )</span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a>  </span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a>  <span class="co"># ...</span></span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>}</span></code></pre></div>
 <p>If you need to keep <code>async = FALSE</code>, you may consider
 reducing retry behaviour to limit blocking during provider incidents.
 See ‘Global options’ and then ‘HTTP timeout/retries’.</p>
+</div>
+<div id="logout" class="section level2">
+<h2>Logout</h2>
+<p>To log out the user, call <code>auth$logout()</code>. This clears the
+local session and attempts to revoke tokens at the provider (if a
+revocation endpoint is available):</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">observeEvent</span>(input<span class="sc">$</span>logout_btn, {</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  auth<span class="sc">$</span><span class="fu">logout</span>()</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>})</span></code></pre></div>
+<p>Revocation uses RFC 7009 and runs asynchronously when
+<code>oauth_module_server(async = TRUE)</code>. See
+<code>?revoke_token</code> for programmatic use outside the module.</p>
+<div id="automatic-revocation-on-session-end" class="section level3">
+<h3>Automatic revocation on session end</h3>
+<p>To revoke tokens when the Shiny session ends (e.g., browser tab
+closed, timeout), set <code>revoke_on_session_end = TRUE</code>:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="st">&quot;auth&quot;</span>,</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">client =</span> client,</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">revoke_on_session_end =</span> <span class="cn">TRUE</span></span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>)</span></code></pre></div>
+<p>Note: this is a best-effort operation; network failures or provider
+unavailability may prevent revocation. Combine with appropriate token
+lifetimes on the provider side for defense in depth.</p>
+</div>
 </div>
 <div id="global-options" class="section level2">
 <h2>Global options</h2>
@@ -605,6 +674,14 @@ sanitized HTTP bodies (may reveal details)</li>
 – structured events (errors, http, etc.)</li>
 <li><code>options(shinyOAuth.audit_hook = function(event){ ... })</code>
 – separate audit stream</li>
+<li><code>options(shinyOAuth.audit_include_http = FALSE)</code> –
+exclude HTTP request details from audit events (default:
+<code>TRUE</code>)</li>
+<li><code>options(shinyOAuth.audit_redact_http = FALSE)</code> – disable
+automatic redaction of sensitive data in audit events (default:
+<code>TRUE</code>)</li>
+<li><code>options(shinyOAuth.audit_digest_key = ...)</code> – key for
+HMAC-SHA256 audit digests</li>
 </ul>
 <p>See <code>vignette(&quot;audit-logging&quot;, package = &quot;shinyOAuth&quot;)</code>
 for details about audit and trace hooks.</p>
@@ -612,8 +689,10 @@ for details about audit and trace hooks.</p>
 <div id="networkingsecurity" class="section level3">
 <h3>Networking/security</h3>
 <ul>
-<li><code>options(shinyOAuth.leeway = 30)</code> – default ID token
-exp/iat leeway seconds</li>
+<li><code>options(shinyOAuth.leeway = 30)</code> – default clock skew
+leeway (seconds) for ID token
+<code>exp</code>/<code>iat</code>/<code>nbf</code> checks and state
+payload <code>issued_at</code> future check</li>
 <li><code>options(shinyOAuth.allowed_non_https_hosts = c(&quot;localhost&quot;, &quot;127.0.0.1&quot;, &quot;::1&quot;))</code>
 - allows hosts to use <code>http://</code> scheme instead of
 <code>https://</code></li>
@@ -622,11 +701,11 @@ non‑empty, restricts accepted hosts to this whitelist</li>
 <li><code>options(shinyOAuth.allow_hs = TRUE)</code> – opt‑in HMAC
 validation for ID tokens (HS256/HS384/HS512). Requires a strictly
 server‑side <code>client_secret</code></li>
-<li><code>options(shinyOAuth.client_assertion_ttl = 300L)</code> –
+<li><code>options(shinyOAuth.client_assertion_ttl = 120L)</code> –
 lifetime in seconds for JWT client assertions used with
 <code>client_secret_jwt</code> or <code>private_key_jwt</code> token
 endpoint authentication. Values below 60 seconds are coerced up to a
-safe minimum; default is 300 seconds</li>
+safe minimum; default is 120 seconds</li>
 <li><code>options(shinyOAuth.state_fail_delay_ms = c(10, 30))</code> –
 adds a small randomized delay (in milliseconds) before any state
 validation failure (e.g., malformed token, IV/tag/ciphertext issues, or
@@ -639,6 +718,35 @@ between different failure modes</li>
 restrictions (scheme rules still apply). Avoid this unless you truly
 intend to accept any host; prefer pinning to your domain(s), e.g.,
 <code>c(&quot;.example.com&quot;)</code>.</p>
+</div>
+<div id="extra-parameter-overrides" class="section level3">
+<h3>Extra parameter overrides</h3>
+<p>By default, shinyOAuth blocks certain security‑critical parameters
+from being passed via <code>extra_auth_params</code>,
+<code>extra_token_params</code>, and <code>extra_token_headers</code>.
+This prevents accidental misconfiguration that could break state
+binding, PKCE integrity, or client authentication.</p>
+<p>If you have a specific, advanced use case where you need to override
+one of these blocked parameters, you can unblock them using the
+following options:</p>
+<ul>
+<li><code>options(shinyOAuth.unblock_auth_params = c(&quot;redirect_uri&quot;))</code>
+– allows overriding the specified authorization URL parameters. Default
+blocked: <code>response_type</code>, <code>client_id</code>,
+<code>redirect_uri</code>, <code>state</code>, <code>scope</code>,
+<code>code_challenge</code>, <code>code_challenge_method</code>,
+<code>nonce</code></li>
+<li><code>options(shinyOAuth.unblock_token_params = c(...))</code> –
+allows overriding the specified token exchange parameters. Default
+blocked: <code>grant_type</code>, <code>code</code>,
+<code>redirect_uri</code>, <code>code_verifier</code>,
+<code>client_id</code>, <code>client_secret</code>,
+<code>client_assertion</code>, <code>client_assertion_type</code></li>
+<li><code>options(shinyOAuth.unblock_token_headers = c(&quot;authorization&quot;))</code>
+– allows overriding the specified token exchange headers
+(case-insensitive). Default blocked: <code>Authorization</code>,
+<code>Cookie</code></li>
+</ul>
 </div>
 <div id="http-settings-timeout-retries-user-agent" class="section level3">
 <h3>HTTP settings (timeout, retries, user agent)</h3>
@@ -659,23 +767,35 @@ cap on backoff seconds (before jitter)</li>
 requests. By default this string is built dynamically from the installed
 package/runtime versions; set a custom string here if your organization
 requires a specific format</li>
+<li><code>options(shinyOAuth.allow_redirect = FALSE)</code> – when
+<code>FALSE</code> (default), all sensitive HTTP requests (token
+exchange, refresh, introspection, revocation, userinfo, OIDC discovery,
+JWKS) refuse to follow redirects and reject 3xx responses. This prevents
+authorization codes, tokens, and PKCE verifiers from leaking to redirect
+targets. Only set to <code>TRUE</code> if your provider legitimately
+requires redirect-following</li>
 </ul>
 </div>
-<div id="development-softening" class="section level3">
-<h3>Development softening</h3>
+<div id="developmentdebugging" class="section level3">
+<h3>Development/debugging</h3>
 <ul>
 <li><code>options(shinyOAuth.skip_browser_token = TRUE)</code> – skip
 browser cookie binding</li>
 <li><code>options(shinyOAuth.skip_id_sig = TRUE)</code> – skip ID token
 signature verification</li>
+<li><code>options(shinyOAuth.debug = TRUE)</code> – re‑raise errors
+during token exchange</li>
 </ul>
-<p>Don’t enable these in production. They disable key security checks
-and are intended for local testing only. Use
-<code>error_on_softened()</code> at startup to fail fast if softening
-flags are enabled in an environment where they should not be.</p>
+<p>Don’t enable these in production. They disable key security checks or
+alter error behavior, and are intended for local testing/debugging only.
+Use <code>error_on_softened()</code> at startup to fail fast if
+softening flags are enabled in an environment where they should not
+be.</p>
 </div>
-<div id="state-envelope-size-caps" class="section level3">
-<h3>State envelope size caps</h3>
+<div id="size-caps" class="section level3">
+<h3>Size caps</h3>
+<div id="state-envelope" class="section level4">
+<h4>State envelope</h4>
 <ul>
 <li><code>options(shinyOAuth.state_max_token_chars = 8192)</code> –
 maximum allowed length of the base64url-encoded <code>state</code> query
@@ -692,6 +812,30 @@ decrypt</li>
 </ul>
 <p>These prevent maliciously large state parameters from causing
 excessive CPU or memory usage during decoding and decryption.</p>
+</div>
+<div id="callback-query" class="section level4">
+<h4>Callback query</h4>
+<ul>
+<li><code>options(shinyOAuth.callback_max_code_bytes = 4096)</code> –
+maximum byte length of the <code>code</code> query parameter</li>
+<li><code>options(shinyOAuth.callback_max_state_bytes = 8192)</code> –
+maximum byte length of the <code>state</code> query parameter (outer
+token string)</li>
+<li><code>options(shinyOAuth.callback_max_error_bytes = 256)</code> –
+maximum byte length of the <code>error</code> query parameter</li>
+<li><code>options(shinyOAuth.callback_max_error_description_bytes = 4096)</code>
+– maximum byte length of the <code>error_description</code> query
+parameter</li>
+<li><code>options(shinyOAuth.callback_max_query_bytes = &lt;derived&gt;)</code>
+– maximum total byte length of the raw callback query string (pre-parse
+guard)</li>
+<li><code>options(shinyOAuth.callback_max_browser_token_bytes = 256)</code>
+– maximum byte length of the <code>browser_token</code> argument
+accepted by <code>handle_callback()</code></li>
+</ul>
+<p>These apply before any hashing/auditing/state parsing, and exist to
+prevent memory/log amplification from extremely large callback URLs.</p>
+</div>
 </div>
 </div>
 <div id="browser-cookie-preventing-xss" class="section level2">
@@ -763,6 +907,8 @@ expose tokens in UI or logs</li>
 <li>Make use of audit logging (see
 <code>vignette(&quot;audit-logging&quot;, package = &quot;shinyOAuth&quot;)</code>) and
 monitor these logs</li>
+<li>Consider enabling automatic revocation on session end
+(<code>revoke_on_session_end = TRUE</code>)</li>
 <li>Use a provider which enforces strong authentication (e.g.,
 multi-factor authentication)</li>
 <li>Set Content Security Policy (CSP) headers to restrict resource

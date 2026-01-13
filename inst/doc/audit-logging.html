@@ -391,25 +391,80 @@ designed to be directly serializable with
 <ul>
 <li><code>shiny_session$token</code>: the Shiny per-session token
 (<code>session$token</code>) when available.</li>
+<li><code>shiny_session$is_async</code>: a logical indicating whether
+the event was emitted from the main R process (<code>FALSE</code>) or
+from an async worker (<code>TRUE</code>). This helps distinguish logs
+produced by background tasks (e.g., async token exchange or refresh)
+from those in the main reactive flow.</li>
+<li><code>shiny_session$process_id</code>: the process ID (PID) of the R
+process that emitted the event.</li>
+<li><code>shiny_session$main_process_id</code>: (async events only) the
+PID of the main R process that spawned the async worker. This allows you
+to correlate events from workers back to the originating main
+process.</li>
 <li><code>shiny_session$http</code>: a compact HTTP summary with fields:
 <ul>
 <li><code>method</code>, <code>path</code>, <code>query_string</code>,
 <code>host</code>, <code>scheme</code>, <code>remote_addr</code></li>
 <li><code>headers</code>: a list of request headers derived from
 <code>HTTP_*</code> environment variables, with lowercase names (e.g.,
-<code>user_agent</code>, <code>x_forwarded_for</code>).</li>
+<code>user_agent</code>).</li>
 </ul></li>
 </ul>
 <p>Note: the raw <code>session$request</code> from Shiny is not included
 to keep the event JSON-serializable and concise.</p>
-<p>Note: the <code>shiny_session$http</code> summary intentionally
-captures all <code>HTTP_*</code> headers and the raw
-<code>QUERY_STRING</code> from the active Shiny request. If you forward
-events to a log sink, this may include sensitive material such as the
-authorization code, <code>state</code>, and every request header
-(including <code>Cookie</code>, <code>Authorization</code>, and other
-bearer tokens). Consider stripping or redacting sensitive headers and
-query parameters in your hook before exporting.</p>
+<div id="http-context-sanitization" class="section level3">
+<h3>HTTP context sanitization</h3>
+<p>For safety, the <code>shiny_session$http</code> summary is
+automatically sanitized before being attached to events. This prevents
+accidental secret leakage when forwarding events to log sinks:</p>
+<ul>
+<li><strong>OAuth query parameters are redacted</strong>:
+<code>code</code>, <code>state</code>, <code>access_token</code>,
+<code>refresh_token</code>, <code>id_token</code>, <code>token</code>,
+<code>session_state</code>, <code>code_verifier</code>, and
+<code>nonce</code> are replaced with <code>[REDACTED]</code>.</li>
+<li><strong>Sensitive headers are removed</strong>: <code>Cookie</code>,
+<code>Set-Cookie</code>, <code>Authorization</code>,
+<code>Proxy_Authorization</code>, <code>Proxy_Authenticate</code>, and
+<code>WWW-Authenticate</code> headers are stripped entirely.</li>
+<li><strong>Proxy headers are redacted</strong>: Headers starting with
+<code>x_</code> (e.g., <code>x_forwarded_for</code>,
+<code>x_real_ip</code>) are replaced with <code>[REDACTED]</code> to
+avoid leaking internal infrastructure details.</li>
+</ul>
+<p>This means you can safely forward the <code>shiny_session$http</code>
+object to external logging systems without manually stripping
+secrets.</p>
+<p>If you need the raw, unsanitized HTTP context in audit events, you
+can disable redaction:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_redact_http =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+</div>
+<div id="excluding-http-context-entirely" class="section level3">
+<h3>Excluding HTTP context entirely</h3>
+<p>To completely exclude HTTP request details from audit events:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_include_http =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<p>This means that the <code>shiny_session$http</code> field will be
+<code>NULL</code> in all audit events.</p>
+</div>
+<div id="digest-fields-and-keying" class="section level3">
+<h3>Digest fields and keying</h3>
+<p>Many audit events include digest fields such as
+<code>client_id_digest</code>, <code>state_digest</code>,
+<code>code_digest</code>, <code>browser_token_digest</code>, and
+<code>sub_digest</code>. These are intended to let you correlate events
+without emitting raw sensitive values.</p>
+<p>By default, these digests use HMAC-SHA256 with an auto-generated
+per-process key. This reduces the risk of correlation or dictionary
+reidentification if logs leak.</p>
+<p>If you run multiple workers/processes and want digests to be
+comparable across them, configure a shared key:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_digest_key =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;AUDIT_DIGEST_KEY&quot;</span>))</span></code></pre></div>
+<p>To disable keying (legacy deterministic SHA-256 digests):</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_digest_key =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<p>Note: unkeyed digests are pseudonymous, not anonymized—low-entropy
+identifiers (like email addresses) can be dictionary-attacked.</p>
+</div>
 </div>
 <div id="event-catalog" class="section level2">
 <h2>Event catalog</h2>
@@ -432,6 +487,18 @@ URL</p></li>
 <li><code>scopes_count</code></li>
 <li><code>redirect_uri</code></li>
 </ul></li>
+</ul>
+</div>
+</div>
+<div id="callback-query-rejected" class="section level3">
+<h3>Callback query rejected</h3>
+<div id="event-audit_callback_query_rejected" class="section level4">
+<h4>Event: <code>audit_callback_query_rejected</code></h4>
+<ul>
+<li>When: the callback query parameters fail validation (e.g., too
+large)</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>error_class</code></li>
 </ul>
 </div>
 </div>
@@ -543,6 +610,26 @@ reflects the plaintext state string.</p>
 </ul>
 </div>
 </div>
+<div id="token-introspection" class="section level3">
+<h3>Token introspection</h3>
+<div id="event-audit_token_introspection" class="section level4">
+<h4>Event: <code>audit_token_introspection</code></h4>
+<ul>
+<li>When: <code>introspect_token()</code> is called (e.g., during login
+if <code>introspect = TRUE</code>)</li>
+<li>Context:
+<ul>
+<li><code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code></li>
+<li><code>which</code> (“access” or “refresh”)</li>
+<li><code>supported</code> (logical), <code>active</code> (logical|NA),
+<code>status</code></li>
+<li><code>sub_digest</code>, <code>introspected_client_id_digest</code>,
+<code>scope_digest</code> (when available)</li>
+</ul></li>
+</ul>
+</div>
+</div>
 <div id="login-result" class="section level3">
 <h3>Login result</h3>
 <div id="event-audit_login_success" class="section level4">
@@ -552,7 +639,17 @@ reflects the plaintext state string.</p>
 created</li>
 <li>Context: <code>provider</code>, <code>issuer</code>,
 <code>client_id_digest</code>, <code>sub_digest</code>,
-<code>refresh_token_present</code>, <code>expires_at</code></li>
+<code>sub_source</code>, <code>refresh_token_present</code>,
+<code>expires_at</code></li>
+</ul>
+<p><code>sub_source</code> indicates where <code>sub_digest</code> was
+derived from:</p>
+<ul>
+<li><code>userinfo</code>: subject came from the userinfo response</li>
+<li><code>id_token</code>: subject came from an ID token that was
+validated (signature + claims)</li>
+<li><code>id_token_unverified</code>: subject came from an ID token
+payload parse when ID token validation was not performed</li>
 </ul>
 </div>
 <div id="event-audit_login_failed" class="section level4">
@@ -587,6 +684,24 @@ Shiny module</li>
 <li>Reasons include: <code>refresh_failed_async</code>,
 <code>refresh_failed_sync</code>, <code>reauth_window</code>,
 <code>token_expired</code></li>
+</ul>
+</div>
+</div>
+<div id="token-revocation" class="section level3">
+<h3>Token revocation</h3>
+<div id="event-audit_token_revocation" class="section level4">
+<h4>Event: <code>audit_token_revocation</code></h4>
+<ul>
+<li>When: <code>revoke_token()</code> is called (e.g., during logout or
+session end)</li>
+<li>Context:
+<ul>
+<li><code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code></li>
+<li><code>which</code> (“access” or “refresh”)</li>
+<li><code>supported</code> (logical), <code>revoked</code> (logical|NA),
+<code>status</code></li>
+</ul></li>
 </ul>
 </div>
 </div>
@@ -679,6 +794,30 @@ control flow.</li>
 </ul>
 </div>
 </div>
+<div id="error-response-state-consumption" class="section level3">
+<h3>Error response state consumption</h3>
+<p>When the provider returns an error response (e.g.,
+<code>access_denied</code>) but includes the <code>state</code>
+parameter, the module attempts to consume the state to prevent replay
+and clean up the store.</p>
+<div id="event-audit_error_state_consumed" class="section level4">
+<h4>Event: <code>audit_error_state_consumed</code></h4>
+<ul>
+<li>When: state from an error response is successfully consumed</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>state_digest</code></li>
+</ul>
+</div>
+<div id="event-audit_error_state_consumption_failed" class="section level4">
+<h4>Event: <code>audit_error_state_consumption_failed</code></h4>
+<ul>
+<li>When: consumption of state from an error response fails</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>state_digest</code>,
+<code>error_class</code>, <code>error_message</code></li>
+</ul>
+</div>
+</div>
 <div id="modulesession-lifecycle" class="section level3">
 <h3>Module/session lifecycle</h3>
 <div id="event-audit_session_started" class="section level4">
@@ -690,6 +829,42 @@ is initialized for a Shiny session</li>
 <code>client_provider</code>, <code>client_issuer</code>,
 <code>client_id_digest</code>, plus the standard
 <code>shiny_session</code> context described above</li>
+</ul>
+</div>
+<div id="event-audit_session_ended" class="section level4">
+<h4>Event: <code>audit_session_ended</code></h4>
+<ul>
+<li>When: a Shiny session ends (always emitted by
+<code>onSessionEnded</code>, regardless of configuration)</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>was_authenticated</code></li>
+</ul>
+</div>
+<div id="event-audit_session_ended_revoke" class="section level4">
+<h4>Event: <code>audit_session_ended_revoke</code></h4>
+<ul>
+<li>When: a Shiny session ends with
+<code>revoke_on_session_end = TRUE</code> and a token was present</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>; the actual revocation attempt is logged
+separately as <code>audit_token_revocation</code> events</li>
+</ul>
+</div>
+</div>
+<div id="authentication-state-changes" class="section level3">
+<h3>Authentication state changes</h3>
+<div id="event-audit_authenticated_changed" class="section level4">
+<h4>Event: <code>audit_authenticated_changed</code></h4>
+<ul>
+<li>When: the <code>$authenticated</code> reactive value changes (TRUE ↔︎
+FALSE)</li>
+<li>Context: <code>provider</code>, <code>issuer</code>,
+<code>client_id_digest</code>, <code>authenticated</code>,
+<code>previous_authenticated</code>, <code>reason</code></li>
+<li>Reasons include: <code>login</code> (when becoming authenticated),
+or the error code/state that caused de-authentication (e.g.,
+<code>token_expired</code>, <code>logged_out</code>,
+<code>token_cleared</code>)</li>
 </ul>
 </div>
 </div>
@@ -719,14 +894,14 @@ exporting</li>
 <code>options(shinyOAuth.trace_hook=...)</code></li>
 </ul>
 <p>Example of a JSON export hook:</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>json_hook <span class="ot">&lt;-</span> <span class="cf">function</span>(event) {</span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>    <span class="fu">try</span>({</span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>        line <span class="ot">&lt;-</span> jsonlite<span class="sc">::</span><span class="fu">toJSON</span>(event, <span class="at">auto_unbox =</span> <span class="cn">TRUE</span>, <span class="at">null =</span> <span class="st">&quot;null&quot;</span>)</span>
-<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>        <span class="fu">cat</span>(line, <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span>, <span class="at">file =</span> <span class="st">&quot;shinyOAuth-audit.log&quot;</span>, <span class="at">append =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>    }, <span class="at">silent =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>}</span>
-<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a></span>
-<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_hook =</span> json_hook)</span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>json_hook <span class="ot">&lt;-</span> <span class="cf">function</span>(event) {</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>    <span class="fu">try</span>({</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>        line <span class="ot">&lt;-</span> jsonlite<span class="sc">::</span><span class="fu">toJSON</span>(event, <span class="at">auto_unbox =</span> <span class="cn">TRUE</span>, <span class="at">null =</span> <span class="st">&quot;null&quot;</span>)</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>        <span class="fu">cat</span>(line, <span class="st">&quot;</span><span class="sc">\n</span><span class="st">&quot;</span>, <span class="at">file =</span> <span class="st">&quot;shinyOAuth-audit.log&quot;</span>, <span class="at">append =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>    }, <span class="at">silent =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>}</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a></span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a><span class="fu">options</span>(<span class="at">shinyOAuth.audit_hook =</span> json_hook)</span></code></pre></div>
 </div>
 
 

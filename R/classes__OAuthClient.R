@@ -43,6 +43,11 @@
 #'   Supported values are `HS256`, `HS384`, `HS512` for client_secret_jwt and asymmetric algorithms
 #'   supported by `jose::jwt_encode_sig` (e.g., `RS256`, `PS256`, `ES256`, `EdDSA`) for private keys.
 #'
+#' @param client_assertion_audience Optional override for the `aud` claim used when building
+#'   JWT client assertions (`client_secret_jwt` / `private_key_jwt`). By default, shinyOAuth
+#'   uses the exact token endpoint request URL. Some identity providers require a different
+#'   audience value; set this to the exact value your IdP expects.
+#'
 #' @param redirect_uri Redirect URI registered with provider
 #'
 #' @param scopes Vector of scopes to request
@@ -63,6 +68,18 @@
 #'    The client automatically generates, persists (in `state_store`), and
 #'    validates the OAuth `state` parameter (and OIDC `nonce` when applicable)
 #'    during the authorization code flow
+#'
+#' @param state_payload_max_age Positive number of seconds. Maximum allowed age
+#'   for the decrypted state payload's `issued_at` timestamp during callback
+#'   validation.
+#'
+#'   This value is an independent freshness backstop against replay attacks on
+#'   the encrypted `state` payload. It is intentionally decoupled from
+#'   `state_store` TTL (which controls how long the single-use state entry can
+#'   exist in the server-side cache, and also drives browser cookie max-age in
+#'   [oauth_module_server()]).
+#'
+#'   Default is 300 seconds.
 #'
 #' @param state_entropy Integer. The length (in characters) of the randomly
 #'   generated state parameter. Higher values provide more entropy and better
@@ -93,6 +110,36 @@
 #'   entropy (e.g., 64–128 base64url characters or a raw 32+ byte key). Avoid
 #'   human‑memorable passphrases. See also `vignette("usage", package = "shinyOAuth")`.
 #'
+#' @param scope_validation Controls how scope discrepancies are handled when
+#'   the authorization server grants fewer scopes than requested. RFC 6749
+#'   Section 3.3 permits servers to issue tokens with reduced scope.
+#'
+#'   - `"strict"` (default): Throws an error if any requested scope is missing
+#'     from the granted scopes.
+#'   - `"warn"`: Emits a warning but continues authentication if scopes are
+#'     missing.
+#'   - `"none"`: Skips scope validation entirely.
+#'
+#' @param introspect If TRUE, the login flow will call the provider's token
+#'   introspection endpoint (RFC 7662) to validate the access token. The login
+#'   is not considered complete unless introspection succeeds and returns
+#'   `active = TRUE`; otherwise the login fails and `authenticated` remains
+#'   FALSE. Default is FALSE. Requires the provider to have an
+#'   `introspection_url` configured.
+#'
+#' @param introspect_elements Optional character vector of additional
+#'   requirements to enforce on the introspection response when
+#'   `introspect = TRUE`. Supported values:
+#'   - `"sub"`: require the introspected `sub` to match the session subject
+#'     (from ID token `sub` when available, else from userinfo `sub`).
+#'   - `"client_id"`: require the introspected `client_id` to match your OAuth
+#'     client id.
+#'   - `"scope"`: validate introspected `scope` against requested scopes
+#'     (respects the client's `scope_validation` mode).
+#'   Default is `character(0)`.
+#'   (Note that not all providers may return each of these fields in
+#'   introspection responses.)
+#'
 #' @example inst/examples/oauth_module_server.R
 #'
 #' @export
@@ -118,19 +165,39 @@ OAuthClient <- S7::new_class(
       S7::class_character,
       default = NA_character_
     ),
+    # Optional override for the client assertion audience claim.
+    client_assertion_audience = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
     redirect_uri = S7::class_character,
     scopes = S7::class_character,
     state_store = S7::new_property(
       S7::class_any,
       default = quote(cachem::cache_mem(max_age = 300))
     ),
+    state_payload_max_age = S7::new_property(S7::class_numeric, default = 300),
     state_entropy = S7::new_property(S7::class_numeric, default = 64),
     state_key = S7::new_property(
       S7::class_any,
       default = quote(random_urlsafe(n = 128))
+    ),
+    scope_validation = S7::new_property(
+      S7::class_character,
+      default = "strict"
+    ),
+
+    # Token introspection settings (RFC 7662): control whether login validates
+    # the access token via the provider's introspection endpoint.
+    introspect = S7::new_property(S7::class_logical, default = FALSE),
+    introspect_elements = S7::new_property(
+      S7::class_character,
+      default = character(0)
     )
   ),
   validator = function(self) {
+    warn_about_oauth_client_created_in_shiny(state_key_missing = NA)
+
     if (!S7::S7_inherits(self@provider, OAuthProvider)) {
       return("OAuthClient: provider must be an OAuthProvider object")
     }
@@ -140,11 +207,30 @@ OAuthClient <- S7::new_class(
       return("OAuthClient: client_id must be a non-empty string")
     }
 
+    parsed <- try(httr2::url_parse(self@redirect_uri), silent = TRUE)
+    if (
+      inherits(parsed, "try-error") ||
+        !nzchar((parsed$scheme %||% "")) ||
+        !nzchar((parsed$hostname %||% ""))
+    ) {
+      return(
+        "OAuthClient: redirect_uri must be an absolute URL (including scheme and hostname)"
+      )
+    }
+
     if (!is_ok_host(self@redirect_uri)) {
       return(paste0(
         "OAuthClient: redirect URI not accepted as a host ",
         "(see `?is_ok_host` for details)"
       ))
+    }
+
+    # State payload freshness window (issued_at)
+    spma <- suppressWarnings(as.numeric(self@state_payload_max_age))
+    if (length(spma) != 1L || !is.finite(spma) || spma <= 0) {
+      return(
+        "OAuthClient: state_payload_max_age must be a finite positive number of seconds"
+      )
     }
 
     # Validate client_secret presence based on provider auth style and PKCE
@@ -212,6 +298,31 @@ OAuthClient <- S7::new_class(
       }
     }
 
+    # Fail fast: HS* ID token verification requires a strong client_secret.
+    #
+    # For PKCE/public clients, client_secret may legitimately be empty for token
+    # exchange (token_auth_style = 'body' with PKCE), but if the provider allows
+    # HS* ID token algs and the flow may validate ID tokens (id_token_validation
+    # or use_nonce), validate_id_token() will later error when client_secret is
+    # missing/too short.
+    aa <- toupper(as.character(self@provider@allowed_algs %||% character(0)))
+    hs_algs <- c("HS256", "HS384", "HS512")
+    should_validate_id_token <-
+      isTRUE(self@provider@id_token_validation) ||
+      isTRUE(self@provider@use_nonce)
+    if (any(aa %in% hs_algs) && isTRUE(should_validate_id_token)) {
+      if (!is_valid_string(self@client_secret)) {
+        return(
+          "OAuthClient: client_secret is required for HS* ID token validation when id_token_validation or use_nonce is enabled"
+        )
+      }
+      if (nchar(self@client_secret, type = "bytes") < 32) {
+        return(
+          "OAuthClient: HS* ID token validation requires client_secret >= 32 bytes"
+        )
+      }
+    }
+
     # If an explicit client_assertion_alg is provided, validate compatibility
     # with the configured token authentication style so we fail fast with a
     # clear input error rather than later inside JWT signing.
@@ -260,6 +371,15 @@ OAuthClient <- S7::new_class(
           ))
         }
       }
+    }
+
+    # Validate client_assertion_audience when provided
+    caa <- self@client_assertion_audience %||% NA_character_
+    caa_chr <- as.character(caa[[1]])
+    if (!is.na(caa_chr) && nzchar(caa_chr) && !is_valid_string(caa_chr)) {
+      return(
+        "OAuthClient: client_assertion_audience must be a non-empty string when provided"
+      )
     }
 
     # Validate state_entropy: must be a finite length-1 numeric integer in [22, 128]
@@ -359,8 +479,114 @@ OAuthClient <- S7::new_class(
     if (inherits(scopes_valid, "try-error")) {
       return(paste0("OAuthClient: scopes validation error: ", scopes_valid))
     }
+
+    # Validate scope_validation
+    if (
+      !is_valid_string(self@scope_validation) ||
+        !self@scope_validation %in% c("strict", "warn", "none")
+    ) {
+      return(
+        "OAuthClient: scope_validation must be one of 'strict', 'warn', or 'none'"
+      )
+    }
+
+    # Validate introspect
+    if (
+      !is.logical(self@introspect) ||
+        length(self@introspect) != 1L ||
+        is.na(self@introspect)
+    ) {
+      return("OAuthClient: introspect must be TRUE or FALSE (non-NA)")
+    }
+
+    # Validate introspect_elements
+    ie <- self@introspect_elements
+    if (!is.character(ie)) {
+      return("OAuthClient: introspect_elements must be a character vector")
+    }
+    if (anyNA(ie)) {
+      return("OAuthClient: introspect_elements must not contain NA")
+    }
+    if (!all(nzchar(ie))) {
+      return("OAuthClient: introspect_elements must not contain empty strings")
+    }
+    ie <- unique(ie)
+    if (!isTRUE(self@introspect) && length(ie) > 0) {
+      return(
+        "OAuthClient: introspect_elements was provided but introspect = FALSE; set introspect = TRUE or pass introspect_elements = character(0)"
+      )
+    }
+    if (isTRUE(self@introspect) && length(ie) > 0) {
+      allowed_ie <- c("sub", "client_id", "scope")
+      bad <- setdiff(ie, allowed_ie)
+      if (length(bad) > 0) {
+        return(
+          paste0(
+            "OAuthClient: invalid introspect_elements value(s): ",
+            paste(bad, collapse = ", "),
+            "; allowed: ",
+            paste(allowed_ie, collapse = ", ")
+          )
+        )
+      }
+    }
+
+    # Fail fast: introspect = TRUE requires introspection_url
+    if (isTRUE(self@introspect)) {
+      introspection_url <- self@provider@introspection_url %||% NA_character_
+      if (!is_valid_string(introspection_url)) {
+        return(
+          "OAuthClient: introspect = TRUE requires the provider to have an introspection_url configured"
+        )
+      }
+    }
   }
 )
+
+warn_about_oauth_client_created_in_shiny <- function(state_key_missing = NA) {
+  if (.is_test()) {
+    return(invisible(NULL))
+  }
+
+  sess <- get_current_shiny_session()
+  if (is.null(sess)) {
+    return(invisible(NULL))
+  }
+
+  bullets <- c(
+    "[{.pkg shinyOAuth}] - OAuthClient created inside Shiny",
+    "!" = paste0(
+      "Detected OAuth client construction while a Shiny session is active. ",
+      "This is usually a bug: the OAuth login flow involves a redirect which creates a new session."
+    )
+  )
+
+  if (isTRUE(state_key_missing)) {
+    bullets <- c(
+      bullets,
+      "x" = paste0(
+        "Because you did not supply {.code state_key}, it will be auto-generated for this session ",
+        "and callbacks in the post-redirect session will be unable to decrypt/validate state."
+      )
+    )
+  } else {
+    bullets <- c(
+      bullets,
+      "i" = paste0(
+        "Construct your {.code OAuthClient} once outside server logic (e.g., in global scope) and reuse it.",
+        " If you must create clients dynamically, ensure {.code state_key} is stable across sessions and (for multi-worker deployments) shared across workers."
+      )
+    )
+  }
+
+  rlang::warn(
+    bullets,
+    .frequency = "once",
+    .frequency_id = "oauth-client-created-in-shiny"
+  )
+
+  invisible(TRUE)
+}
 
 #' Create generic [OAuthClient]
 #'
@@ -378,12 +604,36 @@ oauth_client <- function(
   redirect_uri,
   scopes = character(0),
   state_store = cachem::cache_mem(max_age = 300),
+  state_payload_max_age = 300,
   state_entropy = 64,
   state_key = random_urlsafe(128),
   client_private_key = NULL,
   client_private_key_kid = NULL,
-  client_assertion_alg = NULL
+  client_assertion_alg = NULL,
+  client_assertion_audience = NULL,
+  scope_validation = c("strict", "warn", "none"),
+  introspect = FALSE,
+  introspect_elements = character(0)
 ) {
+  warn_about_oauth_client_created_in_shiny(
+    state_key_missing = missing(state_key)
+  )
+
+  scope_validation <- match.arg(scope_validation)
+
+  # Normalize scopes early so callers can provide a single space-delimited
+  # string (common in OAuth examples) while internal code consistently sees
+  # a character vector of individual tokens.
+  if (!is.null(scopes)) {
+    scopes_for_validation <- if (is.list(scopes)) {
+      unlist(scopes, recursive = TRUE, use.names = FALSE)
+    } else {
+      scopes
+    }
+    validate_scopes(as.character(scopes_for_validation))
+  }
+  scopes <- as_scope_tokens(scopes %||% NULL)
+
   OAuthClient(
     provider = provider,
     client_id = client_id,
@@ -391,10 +641,15 @@ oauth_client <- function(
     redirect_uri = redirect_uri,
     scopes = scopes,
     state_store = state_store,
+    state_payload_max_age = state_payload_max_age,
     state_entropy = state_entropy,
     state_key = state_key,
     client_private_key = client_private_key,
     client_private_key_kid = client_private_key_kid %||% NA_character_,
-    client_assertion_alg = client_assertion_alg %||% NA_character_
+    client_assertion_alg = client_assertion_alg %||% NA_character_,
+    client_assertion_audience = client_assertion_audience %||% NA_character_,
+    scope_validation = scope_validation,
+    introspect = introspect,
+    introspect_elements = introspect_elements
   )
 }
