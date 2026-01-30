@@ -1,6 +1,6 @@
 Package: shinyOAuth
 Title: Provider-Agnostic OAuth Authentication for 'shiny' Applications
-Version: 0.2.0
+Version: 0.3.0
 Authors@R: 
     person("Luka", "Koning", email = "koningluka@gmail.com", role = c("aut", "cre", "cph"))
 Description: Provides a simple, configurable, provider-agnostic 'OAuth 2.0' and
@@ -19,7 +19,8 @@ Imports: S7 (>= 0.2.0), R6 (>= 2.0), rlang (>= 1.0.0), shiny (>=
         1.1.0), cachem (>= 1.1.0), jose (>= 1.2.0), cli (>= 3.0.0),
         htmltools (>= 0.5.0)
 Suggests: testthat (>= 3.0.0), knitr, rmarkdown, webfakes, promises,
-        future, withr, later, sodium, shinytest2, xml2
+        mirai (>= 2.0.0), future, withr, later, sodium, shinytest2,
+        xml2
 Depends: R (>= 4.1.0)
 Config/testthat/edition: 3
 VignetteBuilder: knitr
@@ -27,8 +28,8 @@ URL: https://github.com/lukakoning/shinyOAuth,
         https://lukakoning.github.io/shinyOAuth/
 BugReports: https://github.com/lukakoning/shinyOAuth/issues
 NeedsCompilation: no
-Packaged: 2026-01-12 22:56:31 UTC; dhrko
+Packaged: 2026-01-30 12:20:55 UTC; dhrko
 Author: Luka Koning [aut, cre, cph]
 Maintainer: Luka Koning <koningluka@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-01-13 08:10:02 UTC
+Date/Publication: 2026-01-30 12:40:02 UTC
