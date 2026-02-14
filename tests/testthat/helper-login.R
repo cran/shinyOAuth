@@ -31,9 +31,39 @@ parse_query_param <- function(url, name, decode = FALSE) {
 
 valid_browser_token <- function() paste(rep("ab", 64), collapse = "")
 
-make_test_provider <- function(use_pkce = TRUE, use_nonce = FALSE) {
+# Centralized polling helper for async test assertions.
+# Polls `condition_fn` until it returns TRUE, flushing the Shiny reactive loop
+# and `later` callbacks each iteration.
+# Timeout (seconds) defaults to env var SHINYOAUTH_TEST_POLL_TIMEOUT, then 5s.
+# Poll interval defaults to env var SHINYOAUTH_TEST_POLL_INTERVAL, then 0.05s.
+poll_for_async <- function(
+  condition_fn,
+  session = NULL,
+  timeout = NULL,
+  interval = NULL
+) {
+  timeout <- timeout %||%
+    as.numeric(Sys.getenv("SHINYOAUTH_TEST_POLL_TIMEOUT", unset = "5"))
+  interval <- interval %||%
+    as.numeric(Sys.getenv("SHINYOAUTH_TEST_POLL_INTERVAL", unset = "0.05"))
+
+  deadline <- Sys.time() + timeout
+  while (!isTRUE(condition_fn()) && Sys.time() < deadline) {
+    later::run_now(interval)
+    if (!is.null(session)) {
+      session$flushReact()
+    }
+    Sys.sleep(interval / 5)
+  }
+}
+
+make_test_provider <- function(
+  use_pkce = TRUE,
+  use_nonce = FALSE,
+  userinfo_signed_jwt_required = FALSE
+) {
   # Provide issuer when nonce is requested to satisfy fail-fast validation
-  issuer <- if (isTRUE(use_nonce)) {
+  issuer <- if (isTRUE(use_nonce) || isTRUE(userinfo_signed_jwt_required)) {
     "https://issuer.example.com"
   } else {
     NA_character_
@@ -42,13 +72,22 @@ make_test_provider <- function(use_pkce = TRUE, use_nonce = FALSE) {
     name = "example",
     auth_url = "https://example.com/auth",
     token_url = "https://example.com/token",
-    userinfo_url = NA_character_,
+    userinfo_url = if (isTRUE(userinfo_signed_jwt_required)) {
+      "https://example.com/userinfo"
+    } else {
+      NA_character_
+    },
     introspection_url = NA_character_,
     issuer = issuer,
     use_nonce = use_nonce,
     use_pkce = use_pkce,
     pkce_method = "S256",
-    userinfo_required = FALSE,
+    userinfo_required = if (isTRUE(userinfo_signed_jwt_required)) {
+      TRUE
+    } else {
+      FALSE
+    },
+    userinfo_signed_jwt_required = userinfo_signed_jwt_required,
     id_token_required = FALSE,
     id_token_validation = FALSE,
     userinfo_id_token_match = FALSE,
@@ -69,19 +108,35 @@ make_test_provider <- function(use_pkce = TRUE, use_nonce = FALSE) {
 make_test_client <- function(
   use_pkce = TRUE,
   use_nonce = FALSE,
+  userinfo_signed_jwt_required = FALSE,
   state_max_age = 600,
   state_payload_max_age = 300,
-  scopes = character(0),
+  scopes = NULL,
+  claims = NULL,
+  claims_validation = "none",
+  required_acr_values = character(0),
   introspect = FALSE,
   introspect_elements = character(0)
 ) {
-  prov <- make_test_provider(use_pkce = use_pkce, use_nonce = use_nonce)
+  prov <- make_test_provider(
+    use_pkce = use_pkce,
+    use_nonce = use_nonce,
+    userinfo_signed_jwt_required = userinfo_signed_jwt_required
+  )
+  # When provider has an issuer (OIDC), default to "openid" scope to silence
+  # the auto-prepend warning in ensure_openid_scope().
+  if (is.null(scopes)) {
+    scopes <- if (!is.na(prov@issuer)) "openid" else character(0)
+  }
   oauth_client(
     provider = prov,
     client_id = "abc",
     client_secret = "", # public client
     redirect_uri = "http://localhost:8100",
     scopes = scopes,
+    claims = claims,
+    claims_validation = claims_validation,
+    required_acr_values = required_acr_values,
     state_store = cachem::cache_mem(max_age = state_max_age),
     state_payload_max_age = state_payload_max_age,
     state_entropy = 64,

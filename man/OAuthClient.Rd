@@ -14,11 +14,14 @@ OAuthClient(
   client_assertion_audience = NA_character_,
   redirect_uri = character(0),
   scopes = character(0),
+  claims = NULL,
   state_store = cachem::cache_mem(max_age = 300),
   state_payload_max_age = 300,
   state_entropy = 64,
   state_key = random_urlsafe(n = 128),
   scope_validation = "strict",
+  claims_validation = "none",
+  required_acr_values = character(0),
   introspect = FALSE,
   introspect_elements = character(0)
 )
@@ -72,17 +75,44 @@ audience value; set this to the exact value your IdP expects.}
 
 \item{scopes}{Vector of scopes to request}
 
+\item{claims}{OIDC claims request parameter (OIDC Core §5.5). Allows
+requesting specific claims from the UserInfo Endpoint and/or in the ID
+Token. Can be:
+\itemize{
+\item \code{NULL} (default): no claims parameter is sent
+\item A list: automatically JSON-encoded (via \code{\link[jsonlite:fromJSON]{jsonlite::toJSON()}} with
+\code{auto_unbox = TRUE}) and URL-encoded into the authorization request.
+The list should have top-level members \code{userinfo} and/or \code{id_token},
+each containing named lists of claims.
+Use \code{NULL} to request a claim without parameters (per spec).
+Example: \code{list(userinfo = list(email = NULL, given_name = list(essential = TRUE)), id_token = list(auth_time = list(essential = TRUE)))}
+
+Note on single-element arrays: because \code{auto_unbox = TRUE} is used,
+single-element R vectors are serialized as JSON scalars, not arrays.
+The OIDC spec defines \code{values} as an array. To force array encoding
+for a single-element vector, wrap it in \code{\link[=I]{I()}}, e.g.,
+\code{acr = list(values = I("urn:mace:incommon:iap:silver"))} produces
+\verb{\{"values":["urn:mace:incommon:iap:silver"]\}}. Multi-element vectors
+are always encoded as arrays.
+\item A character string: pre-encoded JSON string (for advanced use). Must
+be valid JSON. Use this when you need full control over JSON encoding.
+Note: The \code{claims} parameter is OPTIONAL per OIDC Core §5.5. Not all
+providers support it; consult your provider's documentation.
+}}
+
 \item{state_store}{State storage backend. Defaults to \code{cachem::cache_mem(max_age = 300)}.
-Alternative backends could include \code{cachem::cache_disk()} or a custom
-implementation (which you can create with \code{\link[=custom_cache]{custom_cache()}}. The backend
+Alternative backends should use \code{\link[=custom_cache]{custom_cache()}} with an atomic \verb{$take()}
+method for replay-safe single-use state consumption. The backend
 must implement cachem-like methods \verb{$get(key, missing)}, \verb{$set(key, value)},
 and \verb{$remove(key)}; \verb{$info()} is optional.
 
 Trade-offs: \code{cache_mem} is in-memory and thus scoped to a single R process
-(good default for a single Shiny process). \code{cache_disk} persists to disk
-and can be shared across multiple R processes (useful for multi-process
-deployments or when Shiny workers aren't sticky). A \code{\link[=custom_cache]{custom_cache()}}
-backend could use a database or external store (e.g., Redis, Memcached).
+(good default for a single Shiny process). For multi-process deployments,
+use \code{\link[=custom_cache]{custom_cache()}} with an atomic \verb{$take()} backed by a shared store
+(e.g., Redis \code{GETDEL}, SQL \verb{DELETE ... RETURNING}). Plain
+\code{cachem::cache_disk()} is \strong{not safe} as a shared state store because its
+\verb{$get()} + \verb{$remove()} operations are not atomic; use it only if wrapped
+in a \code{\link[=custom_cache]{custom_cache()}} that provides \verb{$take()}.
 See also \code{vignette("usage", package = "shinyOAuth")}.
 
 The client automatically generates, persists (in \code{state_store}), and
@@ -140,6 +170,36 @@ from the granted scopes.
 missing.
 \item \code{"none"}: Skips scope validation entirely.
 }}
+
+\item{claims_validation}{Controls validation of essential claims requested
+via the \code{claims} parameter (OIDC Core §5.5). When \code{claims} includes
+entries with \code{essential = TRUE} for \code{id_token} or \code{userinfo}, this setting
+determines what happens if those essential claims are missing from the
+returned ID token or userinfo response.
+\itemize{
+\item \code{"none"} (default): Skips claims validation entirely. This is the
+default because providers are expected to fulfil essential claims
+requests or return an error.
+\item \code{"warn"}: Emits a warning but continues authentication if essential
+claims are missing.
+\item \code{"strict"}: Throws an error if any requested essential claims are
+missing from the response.
+}}
+
+\item{required_acr_values}{Optional character vector of acceptable
+Authentication Context Class Reference values (OIDC Core §2, §3.1.2.1).
+When non-empty, the ID token returned by the provider must contain an
+\code{acr} claim whose value is one of the specified entries; otherwise the
+login fails with a \code{shinyOAuth_id_token_error}.
+
+Additionally, when non-empty, the authorization request automatically
+includes an \code{acr_values} query parameter (space-separated) as a voluntary
+hint to the provider (OIDC Core §3.1.2.1).  Note that the provider is
+not required to honour this hint; the client-side validation is the
+authoritative enforcement.
+
+Requires an OIDC-capable provider with \code{id_token_validation = TRUE} and
+an \code{issuer} configured.  Default is \code{character(0)} (no enforcement).}
 
 \item{introspect}{If TRUE, the login flow will call the provider's token
 introspection endpoint (RFC 7662) to validate the access token. The login

@@ -4,7 +4,7 @@
 \alias{custom_cache}
 \title{Create a custom cache backend (cachem-like)}
 \usage{
-custom_cache(get, set, remove, info = NULL)
+custom_cache(get, set, remove, take = NULL, info = NULL)
 }
 \arguments{
 \item{get}{A function(key, missing = NULL) -> value. Required.
@@ -15,25 +15,34 @@ The \code{missing} parameter is mandatory because both \code{OAuthClient} and
 \item{set}{A function(key, value) -> invisible(NULL). Required.
 Should store the value under the given key}
 
-\item{remove}{A function(key) -> logical or sentinel. Required.
+\item{remove}{A function(key) -> any. Required.
 
-For state stores, this enforces single-use eviction. If your backend performs
-an atomic "get-and-delete" (e.g., SQL DELETE .. RETURNING), you may supply
-a function which does nothing here but returns \code{TRUE}. (The login flow will always attempt to call
-\verb{$remove()} after \verb{$get()} as a best-effort cleanup.)
+Deletes the entry for \code{key}. When \verb{$take()} is provided, \verb{$remove()} serves
+only as a best-effort cleanup and its return value is ignored. When
+\verb{$take()} is not provided, 'shinyOAuth' falls back to
+\verb{$get()} + \verb{$remove()} followed by a post-removal absence check via
+\verb{$get(key, missing = NA)}. In this fallback path the return value of
+\verb{$remove()} is not relied upon; the post-check is authoritative.}
 
-Recommended contract for interoperability and strong replay protection:
-\itemize{
-\item Return \code{TRUE} when a key was actually deleted or if it already did not exist
-\item Return \code{FALSE} when they key could not be deleted or when it is unknown if
-they key was deleted
-}
+\item{take}{A function(key, missing = NULL) -> value. Optional.
 
-When the return value is not \code{TRUE}, 'shinyOAuth' will attempt to retrieve
-the value from the state store to check if it may still be present; if that
-fails (i.e., key is not present), it will treat the removal as succesful.
-If it does find the key, it will produce an error indicating that removal
-did not succeed.}
+An atomic get-and-delete operation. When provided, 'shinyOAuth' uses
+\verb{$take()} instead of separate \verb{$get()} + \verb{$remove()} calls to enforce
+single-use state consumption. This prevents TOCTOU (time-of-check /
+time-of-use) replay attacks in multi-worker deployments with shared state
+stores.
+
+Should return the stored value and atomically remove the entry, or
+return the \code{missing} argument (default \code{NULL}) if the key is not present.
+
+If your backend supports atomic get-and-delete natively
+(e.g., Redis \code{GETDEL}, SQL \verb{DELETE ... RETURNING}), wire it through this
+parameter for replay-safe state stores.
+
+When \code{take} is not provided and the state store is not a per-process cache
+(like \code{\link[cachem:cache_mem]{cachem::cache_mem()}}), 'shinyOAuth' will \strong{error} at state
+consumption time because non-atomic \verb{$get()} + \verb{$remove()} cannot
+guarantee single-use under concurrent access in shared stores.}
 
 \item{info}{Function() -> list(max_age = seconds, ...). Optional
 
@@ -48,9 +57,8 @@ Builds a minimal cachem-like cache backend object that exposes cachem-compatible
 \verb{$get(key, missing)}, \verb{$set(key, value)}, \verb{$remove(key)}, and \verb{$info()}.
 
 Use this helper when you want to plug a custom state store or JWKS cache
-into 'shinyOAuth', when \code{\link[cachem:cache_mem]{cachem::cache_mem()}} or \code{\link[cachem:cache_disk]{cachem::cache_disk()}}
-are not suitable. This may be useful specifically when you deploy
-a Shiny app to a multi-process environment with non-sticky workers.
+into 'shinyOAuth', when \code{\link[cachem:cache_mem]{cachem::cache_mem()}} is not suitable (e.g.,
+multi-process deployments with non-sticky workers).
 In such cases, you may want to use a shared external cache (e.g., database,
 Redis, Memcached).
 
@@ -80,9 +88,20 @@ my_cache <- custom_cache(
   remove = function(key) {
     if (exists(key, envir = mem, inherits = FALSE)) {
       rm(list = key, envir = mem)
-      return(TRUE) # signal successful deletion
     }
-    return(TRUE) # key did not exist
+    invisible(NULL)
+  },
+
+  # Atomic get-and-delete: preferred for state stores in multi-worker
+  # deployments to prevent TOCTOU replay attacks. For per-process caches
+  # (like cachem::cache_mem()) this is optional; for shared backends (Redis,
+  # database) it should map to the backend's atomic primitive (e.g., GETDEL).
+  take = function(key, missing = NULL) {
+    val <- base::get0(key, envir = mem, ifnotfound = missing, inherits = FALSE)
+    if (exists(key, envir = mem, inherits = FALSE)) {
+      rm(list = key, envir = mem)
+    }
+    val
   },
 
   info = function() list(max_age = 600)

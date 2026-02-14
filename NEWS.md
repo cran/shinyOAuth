@@ -1,3 +1,225 @@
+# shinyOAuth 0.4.0
+
+* 'mirai' & async backend improvements:
+  - Warnings and messages emitted in async workers (e.g., missing `expires_in`
+  from token response) are now captured and re-emitted on the main process so
+  they appear in the R console. This includes conditions from user-supplied
+  `trace_hook` / `audit_hook` functions: warnings, messages, and errors 
+  (surfaced as warnings) all propagate back to the main thread. Replay can be
+  disabled via `options(shinyOAuth.replay_async_conditions = FALSE)`.
+  - Async callback flow no longer serializes the full client object (including
+  potentially non-serializable custom `state_store` / JWKS cache backends)
+  into the worker context. The `state_store` (already consumed on the main
+  thread) is replaced with a lightweight serializable dummy before dispatch.
+  If the client still fails serialization, the flow falls back to synchronous
+  execution with an explicit warning instead of an opaque runtime error.
+  - Further reduced serialization overhead towards async workers by using 
+  certain functions from the package namespace directly.
+  - Detect active daemons via `mirai::daemons_set()` instead of 
+  `mirai::status()`. Falls back to `mirai::info()` on older 'mirai' versions
+  that lack `mirai::daemons_set()` (< 2.3.0).
+  - Configurable per-task timeout via `options(shinyOAuth.async_timeout)` 
+  (milliseconds); timed-out 'mirai' tasks are automatically cancelled by the
+  dispatcher. Default is `NULL` (no timeout).
+  - Async audit events now include a `mirai_error_type` field. This classifies 
+  mirai transport-level failures separately from application-level errors.
+  - Prevent 'mirai' warning spam about 'stats' maybe not being available in 
+  workers.
+
+* ID token validation (`validate_id_token()`):
+  - Now enforces RFC 7515 section 4.1.11 critical header
+  parameter (`crit`) processing rules. Tokens containing unsupported critical 
+  extensions are rejected with a `shinyOAuth_id_token_error`. The current
+  implementation supports no critical extensions, so any `crit` presence 
+  triggers rejection.
+  - Now validates the `at_hash` (Access Token hash) claim
+  when present in the ID token (per OIDC Core section 3.1.3.8 and 3.2.2.9). If 
+  the claim exists, the access token binding is verified; a mismatch raises a 
+  `shinyOAuth_id_token_error`. New `id_token_at_hash_required` property on 
+  `OAuthProvider` (default `FALSE`) forces login to fail when the ID token does 
+  not contain an `at_hash` claim.
+  - Now validates, for refreshed ID tokens, per OIDC Core section 12.2, `iss`
+  and `aud` claims against the original ID token's values (not just the provider
+  configuration) to cover edge cases with multi-tenant providers or rotating
+  issuer URIs. Enforced in both validated and non-validated code paths.
+  - Now detects encrypted ID tokens (JWE compact serialization, 5 dot-separated 
+  segments) early and raises a clear `shinyOAuth_id_token_error` instead of 
+  letting a confusing alg/typ/parse failure propagate.
+  - Now validates the `auth_time` claim when `max_age` is
+  present in `extra_auth_params` (OIDC Core section 3.1.2.1).
+  - Now enforces a maximum ID token lifetime (`exp - iat`) per OIDC Core
+  section 3.1.3.7; tokens with unreasonably long lifetimes are rejected with a
+  `shinyOAuth_id_token_error`. Configure via
+  `options(shinyOAuth.max_id_token_lifetime = <seconds>)` (default of `86400`
+  which is 24 hours). Set to `Inf` to disable the check.
+  
+* Stricter state store usage:
+  - `custom_cache()` gains an optional `take` parameter for atomic get-and-delete.
+  - `state_store_get_remove()` prefers `$take()` when available; falls back to
+    `$get()` + `$remove()` with a mandatory post-removal absence check (instead
+    of trusting `$remove()` return values).
+  - Non-`cachem::cache_mem()` stores without `$take()` now error by default
+    to prevent TOCTOU replay attacks in shared/multi-worker deployments. 
+    To bypass this error, operators must explicitly acknowledge the risk by 
+    setting `options(shinyOAuth.allow_non_atomic_state_store = TRUE)`, which
+    downgrades the error to a warning.
+  - `OAuthClient` validator now validates `$take()` signature when present.
+  - The `$remove()` return value is no longer relied upon in the fallback path;
+    the post-removal `$get()` absence check is authoritative.
+
+* Stricter JWKS cache handling: JWKS cache key now includes host-policy fields
+(`jwks_host_issuer_match`, `jwks_host_allow_only`). Previously, two provider
+configs for the same issuer with different host policies shared the same cache
+entry, allowing a relaxed-policy provider to populate the cache and a
+strict-policy provider to skip host validation on cache hit. Cache entries now
+also store the JWKS source host and re-validate it against the current
+provider policy on read (defense-in-depth).
+
+* Stricter URL validation: `OAuthClient` now rejects redirect URIs containing 
+fragments (per RFC 6749, section 3.1.2); `OAuthProvider` now rejects issuer 
+identifiers containing query or fragment components, covering both 
+`oauth_provider_oidc_discover()` and manual construction of providers.
+
+* Stricter state payload parsing: callback `state` now rejects embedded NUL
+bytes before JSON decoding.
+
+* Stricter response size validation: enforce max response body size on all 
+outbound HTTP endpoints (token, introspection, userinfo, OIDC discovery, JWKS).
+Curl aborts the transfer early when `Content-Length` exceeds the limit; a 
+post-download guard catches chunked responses. Default 1 MiB, configurable via
+`options(shinyOAuth.max_body_bytes)`.
+
+* `OAuthProvider` (S7 class):
+  - `leeway` validator now rejects non-finite values (`Inf`, 
+  `-Inf`, `NaN`). Previously these passed validation but were silently coerced 
+  to 0 at runtime, effectively disabling clock-skew tolerance.
+  - Reserved OAuth parameter blocking in `extra_auth_params` and 
+  `extra_token_params` is now case-insensitive and trims whitespace. 
+  - Vector inputs for `pkce_method` and URL parameters (`auth_url`, `token_url`, 
+  `userinfo_url`, `introspection_url`, `revocation_url`) now produce clear 
+  scalar-input errors instead of cryptic coercion failures.
+
+* `OAuthClient` (S7 class):
+  - Gains a `claims_validation` property; when the client sends a structured 
+  `claims` request parameter with `essential = TRUE` entries, this setting
+  controls whether the returned ID token and/or userinfo response are checked 
+  for those essential claims (similar to `scope_validation`).
+  - Gains a `required_acr_values` property; enables client-side
+  enforcement of the OIDC `acr` (Authentication Context Class Reference) claim.
+  - `extra_token_headers` are now consistently applied to revoke
+  and introspect requests, matching the existing behavior for token exchange and 
+  refresh. Previously, provider integrations requiring custom headers across all
+  token endpoints could partially fail on revocation/introspection.
+  - Fixed incorrect warning about client being created in Shiny when this was
+  not the case.
+  - Malformed `client_assertion_alg` and `client_assertion_audience` values
+  (e.g., `character(0)`, multi-element vectors) now produce clear validation 
+  errors instead of crashing with base R subscript-out-of-bounds errors. Empty 
+  string `""` for `client_assertion_audience` is now explicitly rejected instead 
+  of being silently treated as "not provided".
+
+* `OAuthToken` (S7 class):
+  - Gains a read-only `id_token_claims` property that exposes the
+  decoded ID token JWT payload as a named list, surfacing all OIDC claims
+  (e.g., `acr`, `amr`, `auth_time`) without manual decoding.
+  - Gains an `id_token_validated` property (logical) indicating whether the ID 
+  token was cryptographically verified during the OAuth flow.
+
+* `oauth_module_server()`: 
+  - Now surfaces `error_uri` from provider error
+  callbacks (RFC 6749, section 4.1.2.1). The new `$error_uri` reactive field
+  contains the URI to a human-readable error page when the provider includes 
+  one; `NULL` otherwise. The `error_uri` callback parameter is also validated
+  against a configurable size limit
+  (e.g., `options(shinyOAuth.callback_max_error_uri_bytes = 2048)`).
+  - OAuth callback query cleanup is now also applied in early 
+  return paths of internal function `.process_query()`, ensuring more consistent
+  cleanup.
+  * OAuth callback query size caps are now enforced even when the user is
+  already authenticated. Previously, the "token already present" branch in
+  `.process_query()` called `.query_has_oauth_callback_keys()` (which parses
+  the query string) before any size validation, bypassing the intended DoS
+  guardrails. The `validate_untrusted_query_string()` check now runs
+  unconditionally at the top of `.process_query()`.
+  - OAuth callback error responses (`?error=...`) now 
+  require a valid `state` parameter. Missing/invalid/consumed state is then
+  treated properly as an `invalid_state` error instead of surfacing the error 
+  from `?error=...` (which could be set by an attacker).
+  - OAuth callback including an `iss` query parameter now validate this against 
+  the provider's configured/discovered issuer during callback processing 
+  (complementing the existing ID token `iss` claim validation that occurs 
+  post-exchange) (per RFC 9207). A mismatch produces an `issuer_mismatch` error 
+  and audit event, defending against authorization-server mix-up attacks in
+  multi-provider scenarios. When `iss` is absent, current behavior is retained 
+  (no enforcement).
+
+* `handle_callback()`: no longer accepts `decrypted_payload` and
+`state_store_values` bypass parameters. These parameters were only intended for
+internal use by `oauth_module_server()`'s async path. As they can be misused by
+direct/custom callers to bypass important security checks, they have been
+moved to an internal-only helper function (`handle_callback_internal()`).
+
+* `handle_callback()`/`refresh_token()`: when a token response omits 
+`expires_in`, a warning is now emitted once per phase (`exchange_code` / 
+`refresh_token`) so operators know that proactive token refresh will not
+trigger. Users can now also set a finite default lifetime for such tokens via
+`options(shinyOAuth.default_expires_in = <seconds>)` (instead of the default of 
+`Inf`).
+
+* `get_userinfo()` now supports JWT-encoded userinfo responses per OIDC Core,
+section 5.3.2. When the endpoint returns `Content-Type: application/jwt`, the 
+body is decoded as a JWT. Verification is fail-closed: signature verification is
+always performed against the provider JWKS using the provider's `allowed_algs`, 
+`alg=none` is always rejected, and unparseable headers, non-asymmetric
+algorithms, or missing issuer/JWKS infrastructure all raise errors. 
+`options(shinyOAuth.allow_unsigned_userinfo_jwt = TRUE)` permits unsigned
+JWTs. New `userinfo_signed_jwt_required` property on `OAuthProvider`
+(default `FALSE`) mandates that the userinfo endpoint returns
+`application/jwt` content-type which is then subject to the above verification.
+
+* `client_bearer_req()` now validates the target URL against `is_ok_host()`
+before attaching the Bearer token. Relative URLs, plain HTTP to non-loopback
+hosts, and hosts outside `options(shinyOAuth.allowed_hosts)` are rejected by
+default. A new `check_url` argument (default `TRUE`) allows opting out of
+the check when the URL has already been validated.
+
+* `err_http()` now extracts RFC 6749 section 5.2 structured error fields 
+(`error`, `error_description`, `error_uri`) from JSON error response bodies. 
+These fields are surfaced in the error message bullets, attached to the 
+condition object (as `oauth_error`, `oauth_error_description`, 
+`oauth_error_uri`), and included in trace/audit events. This improves debugging
+of token endpoint failures (e.g. `invalid_grant`, `invalid_client`) without
+changing existing control flow.
+
+* OIDC `claims` parameter support (OIDC Core, section 5.5): `OAuthClient` and 
+`oauth_client()` now accept a `claims` argument to request specific claims 
+from the userinfo Endpoint and/or in the ID token. Pass a list structure 
+(automatically JSON-encoded) or a pre-encoded JSON string.
+
+* OIDC `openid` scope enforcement: when a provider has an `issuer` set
+(indicating OIDC) and `openid` is missing from the client's scopes,
+`build_auth_url()` now auto-prepends it and emits a one-time warning.
+
+* OIDC discovery (`oauth_provider_oidc_discover()`) now prefers confidential
+auth methods (`client_secret_basic`, `client_secret_post`) over `none` when
+both are advertised in `token_endpoint_auth_methods_supported`. Previously,
+mixed metadata (e.g. `none` + `client_secret_basic`) with PKCE enabled would
+silently select the public-client posture (`"body"` without credentials).
+
+* Scope validation now aligns with the RFC 6749, section 3.3 `scope-token` 
+grammar (`NQSCHAR = %x21 / %x23-5B / %x5D-7E`). The previous regex rejected 
+valid ASCII characters such as `!`, `#`, `$`, `=`, `@`, `~`, and others. All
+printable ASCII except space, double-quote, and backslash is now accepted.
+
+- JWT helpers (`build_client_assertion()`, 
+`resolve_client_assertion_audience()`) now have defense-in-depth scalar guards 
+so malformed property values cannot cause subscript errors at runtime.
+
+* Audit events:
+  - `audit_token_refresh`: replaced non-informative `had_refresh_token` field 
+  (always `TRUE` post-mutation) with `refresh_token_rotated` (indicates whether 
+  the provider returned a new refresh token).
+
 # shinyOAuth 0.3.0
 
 * Async backend: the default async backend is now 'mirai' (>= 2.0.0) for

@@ -1,11 +1,10 @@
 #' Validate OAuth 2.0 scope strings
 #'
-#' Validates that scope values contain only alphanumeric characters and safe
-#' special characters. Per RFC 6749 section 3.3, scope tokens should use only
-#' printable ASCII characters excluding double-quote and backslash, but in
-#' practice most providers restrict to alphanumeric + safe punctuation.
-#' This validator allows the common set `[A-Za-z0-9._:/-]` and also `*` and `+`
-#' to accommodate providers that use wildcard or quantifier-like tokens.
+#' Validates that scope values conform to the RFC 6749 §3.3 scope-token
+#' grammar: `scope-token = 1*NQSCHAR` where `NQSCHAR = %x21 / %x23-5B /
+#' %x5D-7E`. In plain terms, every printable ASCII character is allowed
+#' except space (used as the scope-list delimiter), double-quote (`"`), and
+#' backslash (`\`).
 #'
 #' @param scopes Character vector of scope values
 #'
@@ -42,16 +41,17 @@ validate_scopes <- function(scopes) {
     }
 
     for (token in tokens) {
-      # RFC 6749 allows alphanumeric + safe chars (common practice: alphanumeric, dash, underscore, period, colon, slash)
-      # We allow a slightly broader set including '*' and '+' to avoid false positives
-      # for providers with wider scope grammars.
-      if (!grepl("^[A-Za-z0-9._:/\\-*+]+$", token, perl = TRUE)) {
+      # RFC 6749 §3.3 NQSCHAR: %x21 / %x23-5B / %x5D-7E
+      # i.e. all printable ASCII except SP (%x20), '"' (%x22), '\' (%x5C).
+      if (!grepl("^[!#-\\[\\]-~]+$", token, perl = TRUE)) {
         err_input(paste0(
           "scope[",
           i,
           "] contains invalid characters: '",
           token,
-          "' (only alphanumeric and ._:/- * + allowed)"
+          "' (RFC 6749 allows printable ASCII except space, ",
+          '\"',
+          ", and \\)"
         ))
       }
     }
@@ -91,4 +91,47 @@ as_scope_tokens <- function(scopes) {
   tokens <- unlist(strsplit(scopes, "\\s+"), use.names = FALSE)
   tokens <- tokens[nzchar(tokens)]
   tokens
+}
+
+#' Ensure openid scope for OIDC providers
+#'
+#' Per OIDC Core section 1.2.1, OpenID Connect requests MUST contain the
+#' `openid` scope value. When the provider has an `issuer` set (indicating
+#' OIDC), this helper checks for the `openid` scope and auto-prepends it with
+#' a one-time warning if missing.
+#'
+#' @param scopes Character vector of scope tokens.
+#' @param provider An [OAuthProvider] object.
+#'
+#' @return Character vector of scope tokens, possibly with `"openid"` prepended.
+#'
+#' @keywords internal
+#' @noRd
+ensure_openid_scope <- function(scopes, provider) {
+  # Only applies to OIDC providers (those with an issuer)
+  if (!is_valid_string(provider@issuer)) {
+    return(scopes)
+  }
+
+  # Normalize to individual tokens so that a single space-delimited string
+  # like "openid profile" is correctly recognised by the %in% check below.
+  scopes <- as_scope_tokens(scopes)
+
+  # Already present — nothing to do
+  if ("openid" %in% scopes) {
+    return(scopes)
+  }
+
+  rlang::warn(
+    c(
+      "[{.pkg shinyOAuth}] - {.strong Missing `openid` scope for OIDC provider}",
+      "!" = "Provider {.val {provider@name}} has an issuer set, indicating OIDC, but {.val openid} was not in the requested scopes.",
+      "i" = "Auto-prepending {.val openid} to scopes per OIDC Core \u00a73.1.2.1.",
+      "i" = "Add {.val openid} to your {.code oauth_client(scopes = ...)} to silence this warning."
+    ),
+    .frequency = "once",
+    .frequency_id = "shinyOAuth_missing_openid_scope"
+  )
+
+  c("openid", scopes)
 }

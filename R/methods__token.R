@@ -44,11 +44,9 @@ revoke_token <- function(
 ) {
   S7::check_is_S7(oauth_client, OAuthClient)
   S7::check_is_S7(oauth_token, OAuthToken)
-  stopifnot(
-    is.logical(async),
-    length(async) == 1,
-    !is.na(async)
-  )
+  if (!(is.logical(async) && length(async) == 1 && !is.na(async))) {
+    err_input("{.arg async} must be a single non-NA logical.")
+  }
 
   which <- match.arg(which)
 
@@ -86,18 +84,16 @@ revoke_token <- function(
     # available in the worker process.
     captured_async_options <- capture_async_options()
 
-    # Capture internal functions to avoid ::: in async worker
-    .with_async_options <- with_async_options
-    .with_async_session_context <- with_async_session_context
-    .revoke_token <- revoke_token
-
+    # Use namespace-qualified calls to avoid passing function closures to mirai
+    # (functions carry their enclosing environments, causing serialization overhead)
     return(async_dispatch(
       expr = quote({
+        .ns <- asNamespace("shinyOAuth")
         # Restore shinyOAuth.* options in the async worker
-        .with_async_options(captured_async_options, {
+        .ns$with_async_options(captured_async_options, {
           # Set async context so errors include session info with is_async = TRUE
-          .with_async_session_context(captured_shiny_session, {
-            .revoke_token(
+          .ns$with_async_session_context(captured_shiny_session, {
+            shinyOAuth::revoke_token(
               oauth_client = oauth_client,
               oauth_token = oauth_token,
               which = which,
@@ -108,9 +104,6 @@ revoke_token <- function(
         })
       }),
       args = list(
-        .with_async_options = .with_async_options,
-        .with_async_session_context = .with_async_session_context,
-        .revoke_token = .revoke_token,
         captured_async_options = captured_async_options,
         captured_shiny_session = captured_shiny_session,
         oauth_client = oauth_client,
@@ -193,6 +186,11 @@ revoke_token <- function(
 
   req <- add_req_defaults(req)
   req <- req_no_redirect(req)
+  # Apply any extra token headers (mirrors exchange/refresh paths)
+  extra_headers <- as.list(oauth_client@provider@extra_token_headers)
+  if (length(extra_headers)) {
+    req <- do.call(httr2::req_headers, c(list(req), extra_headers))
+  }
   req <- do.call(httr2::req_body_form, c(list(req), params))
   req <- httr2::req_error(req, is_error = function(resp) FALSE)
   resp <- req_with_retry(req)
@@ -339,11 +337,9 @@ introspect_token <- function(
   # Type checks
   S7::check_is_S7(oauth_client, OAuthClient)
   S7::check_is_S7(oauth_token, OAuthToken)
-  stopifnot(
-    is.logical(async),
-    length(async) == 1,
-    !is.na(async)
-  )
+  if (!(is.logical(async) && length(async) == 1 && !is.na(async))) {
+    err_input("{.arg async} must be a single non-NA logical.")
+  }
 
   which <- match.arg(which)
 
@@ -419,18 +415,16 @@ introspect_token <- function(
     # available in the worker process.
     captured_async_options <- capture_async_options()
 
-    # Capture internal functions to avoid ::: in async worker
-    .with_async_options <- with_async_options
-    .with_async_session_context <- with_async_session_context
-    .introspect_token <- introspect_token
-
+    # Use namespace-qualified calls to avoid passing function closures to mirai
+    # (functions carry their enclosing environments, causing serialization overhead)
     return(async_dispatch(
       expr = quote({
+        .ns <- asNamespace("shinyOAuth")
         # Restore shinyOAuth.* options in the async worker
-        .with_async_options(captured_async_options, {
+        .ns$with_async_options(captured_async_options, {
           # Set async context so errors include session info with is_async = TRUE
-          .with_async_session_context(captured_shiny_session, {
-            .introspect_token(
+          .ns$with_async_session_context(captured_shiny_session, {
+            shinyOAuth::introspect_token(
               oauth_client = oauth_client,
               oauth_token = oauth_token,
               which = which,
@@ -441,9 +435,6 @@ introspect_token <- function(
         })
       }),
       args = list(
-        .with_async_options = .with_async_options,
-        .with_async_session_context = .with_async_session_context,
-        .introspect_token = .introspect_token,
         captured_async_options = captured_async_options,
         captured_shiny_session = captured_shiny_session,
         oauth_client = oauth_client,
@@ -512,6 +503,11 @@ introspect_token <- function(
   }
   req <- add_req_defaults(req)
   req <- req_no_redirect(req)
+  # Apply any extra token headers (mirrors exchange/refresh paths)
+  extra_headers <- as.list(oauth_client@provider@extra_token_headers)
+  if (length(extra_headers)) {
+    req <- do.call(httr2::req_headers, c(list(req), extra_headers))
+  }
   req <- do.call(httr2::req_body_form, c(list(req), params))
   req <- httr2::req_error(req, is_error = function(resp) FALSE)
   # Perform request with retry for transient failures
@@ -551,6 +547,21 @@ introspect_token <- function(
   raw <- NULL
   active <- NA
   status <- "ok"
+  # Guard against oversized introspection responses before parsing
+  size_ok <- try(
+    check_resp_body_size(resp, context = "introspection"),
+    silent = TRUE
+  )
+  if (inherits(size_ok, "try-error")) {
+    result <- list(
+      supported = TRUE,
+      active = NA,
+      raw = NULL,
+      status = "body_too_large"
+    )
+    .audit_introspection(result)
+    return(result)
+  }
   # Try parse JSON; RFC 7662 requires JSON body with at least { active: boolean }
   body_txt <- httr2::resp_body_string(resp)
   parsed <- try(
@@ -692,14 +703,14 @@ refresh_token <- function(
 ) {
   S7::check_is_S7(oauth_client, OAuthClient)
   S7::check_is_S7(token, OAuthToken)
-  stopifnot(
-    is.logical(async),
-    length(async) == 1,
-    !is.na(async),
-    is.logical(introspect),
-    length(introspect) == 1,
-    !is.na(introspect)
-  )
+  if (!(is.logical(async) && length(async) == 1 && !is.na(async))) {
+    err_input("{.arg async} must be a single non-NA logical.")
+  }
+  if (
+    !(is.logical(introspect) && length(introspect) == 1 && !is.na(introspect))
+  ) {
+    err_input("{.arg introspect} must be a single non-NA logical.")
+  }
 
   # Optional async execution using mirai if requested and available.
   if (isTRUE(async)) {
@@ -711,18 +722,16 @@ refresh_token <- function(
     # available in the worker process.
     captured_async_options <- capture_async_options()
 
-    # Capture internal functions to avoid ::: in async worker
-    .with_async_options <- with_async_options
-    .with_async_session_context <- with_async_session_context
-    .refresh_token <- refresh_token
-
+    # Use namespace-qualified calls to avoid passing function closures to mirai
+    # (functions carry their enclosing environments, causing serialization overhead)
     return(async_dispatch(
       expr = quote({
+        .ns <- asNamespace("shinyOAuth")
         # Restore shinyOAuth.* options in the async worker
-        .with_async_options(captured_async_options, {
+        .ns$with_async_options(captured_async_options, {
           # Set async context so errors include session info with is_async = TRUE
-          .with_async_session_context(captured_shiny_session, {
-            .refresh_token(
+          .ns$with_async_session_context(captured_shiny_session, {
+            shinyOAuth::refresh_token(
               oauth_client = oauth_client,
               token = token,
               async = FALSE,
@@ -733,9 +742,6 @@ refresh_token <- function(
         })
       }),
       args = list(
-        .with_async_options = .with_async_options,
-        .with_async_session_context = .with_async_session_context,
-        .refresh_token = .refresh_token,
         captured_async_options = captured_async_options,
         captured_shiny_session = captured_shiny_session,
         oauth_client = oauth_client,
@@ -747,6 +753,10 @@ refresh_token <- function(
   if (!is_valid_string(token@refresh_token)) {
     err_input("No refresh token available")
   }
+
+  # Snapshot the pre-refresh refresh token so the audit event can report
+  # whether the provider rotated it (returned a new one) or preserved it.
+  pre_refresh_token <- token@refresh_token
 
   params <- list(
     grant_type = "refresh_token",
@@ -883,6 +893,9 @@ refresh_token <- function(
         id_token = token_set[["id_token"]]
       )
     }
+
+    # Validate essential claims in userinfo (OIDC Core §5.5)
+    validate_essential_claims(oauth_client, ui, "userinfo")
   }
 
   # Align expiry handling with login path: expires_in==0 means "expires now".
@@ -891,7 +904,7 @@ refresh_token <- function(
   ) {
     as.numeric(Sys.time()) + as.numeric(token_set$expires_in)
   } else {
-    Inf
+    resolve_missing_expires_in(phase = "refresh_token")
   }
 
   token@access_token <- token_set$access_token
@@ -908,6 +921,8 @@ refresh_token <- function(
   # from login - this is the common case per OIDC spec.
   if (is_valid_string(token_set$id_token)) {
     token@id_token <- token_set$id_token
+    # Propagate whether the new ID token was cryptographically validated.
+    token@id_token_validated <- isTRUE(token_set[[".id_token_validated"]])
   }
 
   # Userinfo: update if fetched during refresh (userinfo_required = TRUE)
@@ -935,8 +950,8 @@ refresh_token <- function(
       provider = oauth_client@provider@name %||% NA_character_,
       issuer = oauth_client@provider@issuer %||% NA_character_,
       client_id_digest = string_digest(oauth_client@client_id),
-      had_refresh_token = !is.na(token@refresh_token) &&
-        nzchar(token@refresh_token),
+      refresh_token_rotated = is_valid_string(token_set$refresh_token) &&
+        !identical(token_set$refresh_token, pre_refresh_token),
       new_expires_at = token@expires_at
     ),
     shiny_session = shiny_session

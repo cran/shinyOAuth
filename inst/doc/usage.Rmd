@@ -83,7 +83,7 @@ You may place it near the top-level of your UI (e.g., inside `fluidPage()`, `tag
 or `bslib::page()`).
 
 Note also that you must access the app in a regular browser.
-This is because the necesarry redirects that the browser must perform can usually
+This is because the necessary redirects that the browser must perform can usually
 not be handled inside embedded viewers of IDEs like RStudio or Positron.
 
 ## Manual login button variant
@@ -372,7 +372,8 @@ audit and trace hooks.
 ### Networking/security
 
 - `options(shinyOAuth.leeway = 30)` – default clock skew leeway (seconds) for ID token `exp`/`iat`/`nbf` checks and state payload `issued_at` future check
-- `options(shinyOAuth.allowed_non_https_hosts = c("localhost", "127.0.0.1", "::1"))` - allows hosts to use `http://` scheme instead of `https://`
+- `options(shinyOAuth.max_id_token_lifetime = 86400)` – maximum allowed ID token lifetime in seconds (`exp - iat`). Tokens whose lifetime exceeds this cap are rejected (OIDC Core §3.1.3.7 rule 9). Default `86400` (24 hours). Set to `Inf` to disable the check
+- `options(shinyOAuth.allowed_non_https_hosts = c("localhost", "127.0.0.1", "::1", "[::1]"))` - allows hosts to use `http://` scheme instead of `https://`
 - `options(shinyOAuth.allowed_hosts = c())` – when non‑empty, restricts accepted hosts
 to this whitelist
 - `options(shinyOAuth.allow_hs = TRUE)` – opt‑in HMAC validation for ID tokens (HS256/HS384/HS512). Requires a strictly server‑side `client_secret`
@@ -396,12 +397,32 @@ you can unblock them using the following options:
 
 - `options(shinyOAuth.unblock_auth_params = c("redirect_uri"))` – allows overriding the specified
   authorization URL parameters. Default blocked: `response_type`, `client_id`, `redirect_uri`, `state`,
-  `scope`, `code_challenge`, `code_challenge_method`, `nonce`
+  `scope`, `code_challenge`, `code_challenge_method`, `nonce`, `claims`
 - `options(shinyOAuth.unblock_token_params = c(...))` – allows overriding the specified token exchange
   parameters. Default blocked: `grant_type`, `code`, `redirect_uri`, `code_verifier`, `client_id`,
   `client_secret`, `client_assertion`, `client_assertion_type`
 - `options(shinyOAuth.unblock_token_headers = c("authorization"))` – allows overriding the specified
   token exchange headers (case-insensitive). Default blocked: `Authorization`, `Cookie`
+
+### Async timeout (mirai)
+
+- `options(shinyOAuth.async_timeout = 10000)` – per-task timeout in milliseconds for mirai async tasks.
+  When using mirai with dispatcher (the default), timed-out tasks are automatically cancelled and resolve
+  as a mirai error. Default is `NULL` (no timeout). Ignored when falling back to the 'future' backend
+
+### Async condition replay
+
+- `options(shinyOAuth.replay_async_conditions = FALSE)` – when `FALSE`, warnings and messages captured
+  from async workers are silently discarded instead of being re-emitted on the main R process. Default is
+  `TRUE` (replay all captured conditions). Useful if worker diagnostics are too noisy or handled
+  separately via `trace_hook` / `audit_hook`
+
+### Token lifetime fallback
+
+- `options(shinyOAuth.default_expires_in = 3600)` – fallback token lifetime (in seconds) 
+when the provider omits `expires_in` from the token response. Without this option 
+the lifetime defaults to `Inf` and proactive refresh will never trigger. A warning
+is emitted in either case
 
 ### HTTP settings (timeout, retries, user agent)
 
@@ -418,11 +439,25 @@ you can unblock them using the following options:
   HTTP requests (token exchange, refresh, introspection, revocation, userinfo, OIDC discovery, JWKS) refuse to
   follow redirects and reject 3xx responses. This prevents authorization codes, tokens, and PKCE verifiers from
   leaking to redirect targets. Only set to `TRUE` if your provider legitimately requires redirect-following
+- `options(shinyOAuth.max_body_bytes = 1048576)` – maximum response body size (bytes, default 1 MiB) accepted
+  from OAuth endpoints (token, introspection, userinfo, discovery, JWKS). Curl aborts the transfer early when
+  `Content-Length` exceeds this limit; a post-download guard catches chunked responses. Increase if a provider
+  legitimately returns larger payloads
+
+### State store
+
+- `options(shinyOAuth.allow_non_atomic_state_store = TRUE)` – allow non-atomic `$get()` + `$remove()` fallback
+  for shared state stores (e.g., `cachem::cache_disk()`) that do not implement `$take()`. By default, shinyOAuth
+  errors when a non-`cachem::cache_mem()` store lacks `$take()`, because the non-atomic fallback cannot guarantee
+  single-use state consumption under concurrent access (TOCTOU replay window). Setting this option to `TRUE`
+  downgrades the error to a one-time warning and allows the fallback to proceed. Not recommended for
+  production without additional replay protection.
 
 ### Development/debugging
 
 - `options(shinyOAuth.skip_browser_token = TRUE)` – skip browser cookie binding
 - `options(shinyOAuth.skip_id_sig = TRUE)` – skip ID token signature verification
+- `options(shinyOAuth.allow_unsigned_userinfo_jwt = TRUE)` – accept unsigned (`alg=none`) UserInfo JWTs
 - `options(shinyOAuth.debug = TRUE)` – re‑raise errors during token exchange
 
 Don't enable these in production. They disable key security checks or alter error behavior, and are intended for local testing/debugging only.
@@ -445,6 +480,8 @@ These prevent maliciously large state parameters from causing excessive CPU or m
 - `options(shinyOAuth.callback_max_state_bytes = 8192)` – maximum byte length of the `state` query parameter (outer token string)
 - `options(shinyOAuth.callback_max_error_bytes = 256)` – maximum byte length of the `error` query parameter
 - `options(shinyOAuth.callback_max_error_description_bytes = 4096)` – maximum byte length of the `error_description` query parameter
+- `options(shinyOAuth.callback_max_error_uri_bytes = 2048)` – maximum byte length of the `error_uri` query parameter
+- `options(shinyOAuth.callback_max_iss_bytes = 2048)` – maximum byte length of the `iss` query parameter (RFC 9207 issuer identification)
 - `options(shinyOAuth.callback_max_query_bytes = <derived>)` – maximum total byte length of the raw callback query string (pre-parse guard)
 - `options(shinyOAuth.callback_max_browser_token_bytes = 256)` – maximum byte length of the `browser_token` argument accepted by `handle_callback()`
 
@@ -469,12 +506,10 @@ An important mitigation is to sanitize user inputs before rendering them in the 
 
 When you run multiple Shiny R processes (e.g., multiple workers, Shiny Server Pro, RStudio Connect, Docker/Kubernetes replicas, or any non‑sticky load balancer), you must ensure that:
 
-- All workers share the same state store (e.g., `cachem::cache_disk()` pointing at a shared directory, or a custom cachem backend; 
-the default `cachem::cache_mem()` is per‑process only and is then not shared)
-- All workers share the same state key (e.g., read from environment variable; by default, a random key is generated per client instance
-which is then not shared)
+- All workers share the same state store with atomic single-use semantics. Use `custom_cache()` with an atomic `$take()` method backed by a shared store (e.g., Redis `GETDEL`, SQL `DELETE ... RETURNING`). Plain `cachem::cache_disk()` is not safe as a shared state store because its `$get()` + `$remove()` are not atomic and may allow replay attacks under concurrent access; the default `cachem::cache_mem()` is per‑process only and is not shared. See `?custom_cache` for details on implementing `$take()`.
+- All workers share the same state key (e.g., read from environment variable; by default, a random key is generated per client instance which is then not shared)
 
-This is because during the authorization code + PKCE flow, 'shinyOAuth' creates an encrypted “state envelope” which is stored in a cache (the state_store) and echoed back via the `state` query parameter. The envelope is sealed with AES‑GCM using your state_key. If the callback lands on a different worker than the one that initiated login, that worker must be able to both read the cached entry and decrypt the envelope using the same key. If workers have different keys, decryption will fail and the login flow will abort with a state error.
+This is because during the authorization code + PKCE flow, 'shinyOAuth' creates an encrypted "state envelope" which is stored in a cache (the state_store) and echoed back via the `state` query parameter. The envelope is sealed with AES‑GCM using your state_key. If the callback lands on a different worker than the one that initiated login, that worker must be able to both read the cached entry and decrypt the envelope using the same key. If workers have different keys, decryption will fail and the login flow will abort with a state error.
 
 When providing a custom state key, please ensure it has high entropy (minimum 32 characters or 32 raw bytes; recommended 64–128 characters) to prevent offline guessing attacks against the encrypted state. Do not use short or human‑memorable passphrases.
 
@@ -494,6 +529,11 @@ your app registration only the permissions it needs
 - Make use of audit logging (see `vignette("audit-logging", package = "shinyOAuth")`) and
 monitor these logs
 - Consider enabling automatic revocation on session end (`revoke_on_session_end = TRUE`)
+- If your provider can return UserInfo as a signed JWT (`Content-Type: application/jwt`),
+set `userinfo_signed_jwt_required = TRUE` in your `OAuthProvider` to prevent downgrade
+to plain JSON. Without this flag, shinyOAuth verifies any JWT it receives, but a
+misconfigured provider or man-in-the-middle could return unsigned JSON claims
+instead, bypassing signature verification.
 - Use a provider which enforces strong authentication (e.g., multi-factor authentication)
 - Set Content Security Policy (CSP) headers to restrict resource loading and mitigate XSS attacks;
 (requires middleware; can't be done in Shiny)

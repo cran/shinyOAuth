@@ -62,6 +62,25 @@
 #' `TRUE` only if both `userinfo_required` and `id_token_validation` are `TRUE`;
 #' otherwise it defaults to `FALSE`.
 #'
+#' @param userinfo_signed_jwt_required Whether to require that the userinfo
+#' endpoint returns a signed JWT (`Content-Type: application/jwt`) whose
+#' signature can be verified against the provider's JWKS. When `TRUE`:
+#' \itemize{
+#'   \item If the userinfo response is not `application/jwt`, authentication fails.
+#'   \item If the JWT uses `alg=none` or an algorithm not in `allowed_algs`,
+#'     authentication fails.
+#'   \item If signature verification fails (JWKS fetch error, no compatible keys,
+#'     or invalid signature), authentication fails.
+#' }
+#' This prevents an attacker or misconfigured provider from bypassing signature
+#' verification by returning unsigned claims as plain JSON or `alg=none` JWTs.
+#' Requires `userinfo_required = TRUE` and a valid `issuer` (for JWKS).
+#' Defaults to `FALSE`.
+#'
+#' `oauth_provider_oidc_discover()` will automatically enable this when the
+#' OIDC discovery document advertises `userinfo_signing_alg_values_supported`
+#' with algorithms that overlap the caller's `allowed_algs`.
+#'
 #' @param userinfo_id_selector A function that extracts the user ID from the userinfo response.#'
 #' Should take a single argument (the userinfo list) and return the user ID
 #' as a string.
@@ -89,6 +108,13 @@
 #' Note: At the S7 class level, this defaults to FALSE. Helper constructors like
 #' [oauth_provider()] and [oauth_provider_oidc()] turn this on when an issuer
 #' is provided or when OIDC is used.
+#'
+#' @param id_token_at_hash_required Whether to require the `at_hash` (Access Token hash)
+#' claim in the ID token. When `TRUE`, login fails if the ID token does not
+#' contain an `at_hash` claim or if the claim does not match the access token.
+#' When `FALSE` (default), `at_hash` is validated only when present.
+#' Requires `id_token_validation = TRUE`. See OIDC Core section 3.1.3.8 and
+#' section 3.2.2.9.
 #'
 #' @param extra_auth_params Extra parameters for authorization URL
 #' @param extra_token_params Extra parameters for token exchange
@@ -204,8 +230,16 @@ OAuthProvider <- S7::new_class(
       S7::class_logical,
       default = FALSE
     ),
+    userinfo_signed_jwt_required = S7::new_property(
+      S7::class_logical,
+      default = FALSE
+    ),
     id_token_required = S7::new_property(S7::class_logical, default = FALSE),
     id_token_validation = S7::new_property(S7::class_logical, default = FALSE),
+    id_token_at_hash_required = S7::new_property(
+      S7::class_logical,
+      default = FALSE
+    ),
     extra_auth_params = S7::class_list,
     extra_token_params = S7::class_list,
     extra_token_headers = S7::new_property(
@@ -310,6 +344,20 @@ OAuthProvider <- S7::new_class(
       } # early exit on first violation
     }
 
+    # OIDC issuer identifiers must not contain query or fragment components
+    if (is_valid_string(self@issuer)) {
+      parsed_issuer <- try(httr2::url_parse(self@issuer), silent = TRUE)
+      if (
+        !inherits(parsed_issuer, "try-error") &&
+          (length(parsed_issuer$query) > 0L ||
+            nzchar(parsed_issuer$fragment %||% ""))
+      ) {
+        return(
+          "OAuthProvider: issuer must not contain query or fragment components"
+        )
+      }
+    }
+
     # Validate extra_token_headers: must be named character vector of length n
     # with all non-empty names and scalar (length-1) character values.
     if (length(self@extra_token_headers) > 0) {
@@ -341,7 +389,7 @@ OAuthProvider <- S7::new_class(
         return(sprintf(
           paste0(
             "OAuthProvider: extra_token_headers must not contain reserved headers: %s. ",
-            "To unblock, set options(shinyOAuth.unblock_token_headers = c(...))"
+            "To unblock, set `options(shinyOAuth.unblock_token_headers = c(...))`"
           ),
           paste(sQuote(bad_headers), collapse = ", ")
         ))
@@ -384,12 +432,16 @@ OAuthProvider <- S7::new_class(
       "scope",
       "code_challenge",
       "code_challenge_method",
-      "nonce"
+      "nonce",
+      "claims" # Managed via oauth_client(..., claims = ...)
     )
-    unblocked_auth <- getOption("shinyOAuth.unblock_auth_params", character())
+    unblocked_auth <- tolower(trimws(getOption(
+      "shinyOAuth.unblock_auth_params",
+      character()
+    )))
     reserved_auth_keys <- setdiff(default_reserved_auth_keys, unblocked_auth)
     if (length(self@extra_auth_params) > 0) {
-      nms <- names(self@extra_auth_params)
+      nms <- tolower(trimws(names(self@extra_auth_params)))
       bad <- intersect(nms, reserved_auth_keys)
       if (length(bad) > 0) {
         return(sprintf(
@@ -428,10 +480,13 @@ OAuthProvider <- S7::new_class(
       "client_assertion",
       "client_assertion_type"
     )
-    unblocked_token <- getOption("shinyOAuth.unblock_token_params", character())
+    unblocked_token <- tolower(trimws(getOption(
+      "shinyOAuth.unblock_token_params",
+      character()
+    )))
     reserved_token_keys <- setdiff(default_reserved_token_keys, unblocked_token)
     if (length(self@extra_token_params) > 0) {
-      nms <- names(self@extra_token_params)
+      nms <- tolower(trimws(names(self@extra_token_params)))
       bad <- intersect(nms, reserved_token_keys)
       if (length(bad) > 0) {
         return(sprintf(
@@ -628,6 +683,15 @@ OAuthProvider <- S7::new_class(
       }
     }
 
+    # Fail fast: id_token_at_hash_required requires id_token_validation
+    if (isTRUE(self@id_token_at_hash_required)) {
+      if (!isTRUE(self@id_token_validation)) {
+        return(
+          "OAuthProvider: id_token_at_hash_required = TRUE requires id_token_validation = TRUE"
+        )
+      }
+    }
+
     # Fail fast: userinfo_required implies a configured/valid userinfo_url
     if (isTRUE(self@userinfo_required)) {
       if (!is_valid_string(self@userinfo_url)) {
@@ -638,6 +702,20 @@ OAuthProvider <- S7::new_class(
       if (!is_ok_host(self@userinfo_url)) {
         return(
           "OAuthProvider: userinfo_url provided but not accepted as a host (see `?is_ok_host`)"
+        )
+      }
+    }
+
+    # Fail fast: signed JWT userinfo requires userinfo + issuer
+    if (isTRUE(self@userinfo_signed_jwt_required)) {
+      if (!isTRUE(self@userinfo_required)) {
+        return(
+          "OAuthProvider: userinfo_signed_jwt_required = TRUE requires userinfo_required = TRUE"
+        )
+      }
+      if (!is_valid_string(self@issuer)) {
+        return(
+          "OAuthProvider: userinfo_signed_jwt_required = TRUE requires a non-empty issuer (for JWKS verification)"
         )
       }
     }
@@ -675,11 +753,11 @@ OAuthProvider <- S7::new_class(
     if (
       !is.numeric(self@leeway) ||
         length(self@leeway) != 1 ||
-        is.na(self@leeway) ||
+        !is.finite(self@leeway) ||
         self@leeway < 0
     ) {
       return(
-        "OAuthProvider: leeway must be a single non-negative numeric value"
+        "OAuthProvider: leeway must be a single finite non-negative numeric value"
       )
     }
 
@@ -741,6 +819,7 @@ oauth_provider <- function(
   pkce_method = "S256",
   userinfo_required = NULL,
   userinfo_id_token_match = NULL,
+  userinfo_signed_jwt_required = FALSE,
   userinfo_id_selector = function(userinfo) userinfo$sub,
   id_token_required = NULL,
   id_token_validation = NULL,
@@ -766,8 +845,30 @@ oauth_provider <- function(
     "EdDSA"
   ),
   allowed_token_types = c("Bearer"),
-  leeway = getOption("shinyOAuth.leeway", 30)
+  leeway = getOption("shinyOAuth.leeway", 30),
+  id_token_at_hash_required = FALSE
 ) {
+  # Validate scalar URL inputs before normalization to prevent cryptic
+  # coercion errors from normalize_url() when callers pass vectors.
+  for (url_arg in list(
+    list("auth_url", auth_url),
+    list("token_url", token_url),
+    list("userinfo_url", userinfo_url),
+    list("introspection_url", introspection_url),
+    list("revocation_url", revocation_url)
+  )) {
+    u_val <- url_arg[[2]]
+    if (!is.null(u_val) && (!is.character(u_val) || length(u_val) != 1L)) {
+      stop(
+        "OAuthProvider: ",
+        url_arg[[1]],
+        " must be a scalar character string (length 1), not length ",
+        length(u_val),
+        call. = FALSE
+      )
+    }
+  }
+
   # Use shared internal helper to normalize only the path component
   auth_url <- normalize_url(auth_url)
   token_url <- normalize_url(token_url)
@@ -780,6 +881,16 @@ oauth_provider <- function(
   }
 
   # Normalize pkce_method (be tolerant of NULL/NA and case)
+  if (
+    !is.null(pkce_method) &&
+      (!is.character(pkce_method) || length(pkce_method) != 1L)
+  ) {
+    stop(
+      "OAuthProvider: pkce_method must be a scalar character string (length 1), not length ",
+      length(pkce_method),
+      call. = FALSE
+    )
+  }
   if (is.null(pkce_method) || is.na(pkce_method)) {
     pkce_method <- "S256"
   }
@@ -894,6 +1005,7 @@ oauth_provider <- function(
     id_token_required = id_token_required,
     id_token_validation = id_token_validation,
     userinfo_id_token_match = userinfo_id_token_match,
+    userinfo_signed_jwt_required = isTRUE(userinfo_signed_jwt_required),
     userinfo_id_selector = userinfo_id_selector,
     extra_auth_params = extra_auth_params,
     extra_token_params = extra_token_params,
@@ -906,6 +1018,7 @@ oauth_provider <- function(
     jwks_host_allow_only = jwks_host_allow_only,
     allowed_algs = allowed_algs,
     allowed_token_types = allowed_token_types,
-    leeway = leeway
+    leeway = leeway,
+    id_token_at_hash_required = id_token_at_hash_required
   )
 }

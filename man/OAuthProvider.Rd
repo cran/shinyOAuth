@@ -18,8 +18,10 @@ OAuthProvider(
   userinfo_required = FALSE,
   userinfo_id_selector = function(userinfo) userinfo$sub,
   userinfo_id_token_match = FALSE,
+  userinfo_signed_jwt_required = FALSE,
   id_token_required = FALSE,
   id_token_validation = FALSE,
+  id_token_at_hash_required = FALSE,
   extra_auth_params = list(),
   extra_token_params = list(),
   extra_token_headers = character(0),
@@ -102,6 +104,25 @@ For \code{\link[=oauth_provider]{oauth_provider()}}, when not explicitly supplie
 \code{TRUE} only if both \code{userinfo_required} and \code{id_token_validation} are \code{TRUE};
 otherwise it defaults to \code{FALSE}.}
 
+\item{userinfo_signed_jwt_required}{Whether to require that the userinfo
+endpoint returns a signed JWT (\code{Content-Type: application/jwt}) whose
+signature can be verified against the provider's JWKS. When \code{TRUE}:
+\itemize{
+\item If the userinfo response is not \code{application/jwt}, authentication fails.
+\item If the JWT uses \code{alg=none} or an algorithm not in \code{allowed_algs},
+authentication fails.
+\item If signature verification fails (JWKS fetch error, no compatible keys,
+or invalid signature), authentication fails.
+}
+This prevents an attacker or misconfigured provider from bypassing signature
+verification by returning unsigned claims as plain JSON or \code{alg=none} JWTs.
+Requires \code{userinfo_required = TRUE} and a valid \code{issuer} (for JWKS).
+Defaults to \code{FALSE}.
+
+\code{oauth_provider_oidc_discover()} will automatically enable this when the
+OIDC discovery document advertises \code{userinfo_signing_alg_values_supported}
+with algorithms that overlap the caller's \code{allowed_algs}.}
+
 \item{id_token_required}{Whether to require an ID token to be returned
 during token exchange. If no ID token is returned, the token exchange
 will fail. This requires the provider to be a valid OpenID Connect
@@ -120,6 +141,13 @@ the client's scope to include "openid").
 Note: At the S7 class level, this defaults to FALSE. Helper constructors like
 \code{\link[=oauth_provider]{oauth_provider()}} and \code{\link[=oauth_provider_oidc]{oauth_provider_oidc()}} turn this on when an issuer
 is provided or when OIDC is used.}
+
+\item{id_token_at_hash_required}{Whether to require the \code{at_hash} (Access Token hash)
+claim in the ID token. When \code{TRUE}, login fails if the ID token does not
+contain an \code{at_hash} claim or if the claim does not match the access token.
+When \code{FALSE} (default), \code{at_hash} is validated only when present.
+Requires \code{id_token_validation = TRUE}. See OIDC Core section 3.1.3.8 and
+section 3.2.2.9.}
 
 \item{extra_auth_params}{Extra parameters for authorization URL}
 

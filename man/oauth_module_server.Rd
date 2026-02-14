@@ -112,32 +112,37 @@ the \code{Secure} attribute}
 }
 \value{
 A reactiveValues object with \code{token}, \code{error}, \code{error_description},
-and \code{authenticated}, plus additional fields used by the module.
+\code{error_uri}, and \code{authenticated}, plus additional fields used by the module.
 
 The returned reactiveValues contains the following fields:
 
 \itemize{
 \item \code{authenticated}: logical TRUE when there is no error and a token is
 present and valid (matching the verifications enabled in the client provider);
-FALSE otherwise.
+FALSE otherwise. Exception: when \code{indefinite_session = TRUE}, errors do not
+affect this flag so \code{authenticated} remains TRUE even if refresh or other
+operations fail.
 \item \code{token}: \link{OAuthToken} object, or NULL if not yet authenticated.
 This contains the access token, refresh token (if any), ID token (if
-any), and userinfo (if fetched). See \link{OAuthToken} for details.
+any), userinfo (if fetched), and the decoded ID token claims via
+\code{token@id_token_claims} (a read-only named list exposing all JWT
+payload claims such as \code{sub}, \code{acr}, \code{amr}, \code{auth_time}, etc.).
+See \link{OAuthToken} for details.
 Note that since \link{OAuthToken} is a S7 object, you access its fields
-with \code{@}, e.g., \code{token@userinfo}.
+with \code{@}, e.g., \code{token@userinfo} or \code{token@id_token_claims$acr}.
 \item \code{error}: error code string when the OAuth flow fails.
 Be careful with exposing this directly to users, as it may
 contain sensitive information which could aid an attacker.
 \item \code{error_description}: human-readable error detail when available.
 Be extra careful with exposing this directly to users, as it may
 contain even more sensitive information which could aid an attacker.
+\item \code{error_uri}: URI identifying a human-readable web page with
+information about the error (per RFC 6749 section 4.1.2.1). NULL when
+the provider does not include one.
 \item \code{browser_token}: internal opaque browser cookie value; used for state
 double-submit protection; NULL if not yet set
 \item \code{pending_callback}: internal list(code, state); used to defer token
 exchange until \code{browser_token} is available; NULL otherwise.
-\item \code{pending_error}: internal list(error, error_description, state); used to
-defer error-response state consumption until \code{browser_token} is available;
-NULL otherwise.
 \item \code{pending_login}: internal logical; TRUE when a login was requested but must
 wait for \code{browser_token} to be set, FALSE otherwise.
 \item \code{auto_redirected}: internal logical; TRUE once the module has initiated an

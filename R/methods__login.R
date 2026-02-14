@@ -288,9 +288,40 @@ build_auth_url <- function(
     params$nonce <- nonce
   }
 
-  if (length(oauth_client@scopes) > 0) {
-    params$scope <- paste(oauth_client@scopes, collapse = " ")
+  effective_scopes <- ensure_openid_scope(
+    oauth_client@scopes,
+    oauth_client@provider
+  )
+  if (length(effective_scopes) > 0) {
+    params$scope <- paste(effective_scopes, collapse = " ")
   }
+
+  # OIDC claims parameter (OIDC Core §5.5): JSON-encode if a list,
+  # otherwise use as-is
+  if (!is.null(oauth_client@claims)) {
+    if (is.list(oauth_client@claims)) {
+      # JSON-encode the list with auto_unbox to avoid wrapping single values
+      # in arrays, and null = "null" to preserve explicit null values which
+      # OIDC uses to request claims without additional parameters
+      params$claims <- jsonlite::toJSON(
+        oauth_client@claims,
+        auto_unbox = TRUE,
+        null = "null"
+      )
+    } else {
+      # Assume pre-encoded JSON string
+      params$claims <- oauth_client@claims
+    }
+  }
+
+  # OIDC acr_values hint (OIDC Core §3.1.2.1): when the client specifies
+  # required_acr_values, automatically include a space-separated acr_values
+  # parameter in the authorization request as a voluntary hint to the provider.
+  racr <- oauth_client@required_acr_values %||% character(0)
+  if (length(racr) > 0) {
+    params$acr_values <- paste(racr, collapse = " ")
+  }
+
   if (length(oauth_client@provider@extra_auth_params) > 0) {
     extra <- oauth_client@provider@extra_auth_params
 
@@ -306,12 +337,20 @@ build_auth_url <- function(
       "scope",
       "nonce",
       "code_challenge",
-      "code_challenge_method"
+      "code_challenge_method",
+      "claims" # Managed via oauth_client(..., claims = ...)
     )
-    unblocked <- getOption("shinyOAuth.unblock_auth_params", character())
+    # Also block acr_values when auto-generated from required_acr_values
+    if (length(racr) > 0) {
+      default_blocked_params <- c(default_blocked_params, "acr_values")
+    }
+    unblocked <- tolower(trimws(getOption(
+      "shinyOAuth.unblock_auth_params",
+      character()
+    )))
     blocked_params <- setdiff(default_blocked_params, unblocked)
 
-    conflicts <- intersect(names(extra), blocked_params)
+    conflicts <- intersect(tolower(trimws(names(extra))), blocked_params)
     if (length(conflicts) > 0) {
       err_config(c(
         paste0(
@@ -320,7 +359,7 @@ build_auth_url <- function(
         ),
         "i" = "These parameters are managed internally to ensure OAuth security.",
         "i" = "Set scopes via oauth_client(..., scopes = ...) and redirect_uri via oauth_client(..., redirect_uri = ...).",
-        "i" = "To unblock, set options(shinyOAuth.unblock_auth_params = c(...))"
+        "i" = "To unblock, set `options(shinyOAuth.unblock_auth_params = c(...))`"
       ))
     }
     params <- c(params, extra)
@@ -343,21 +382,11 @@ build_auth_url <- function(
 #' (this should be the same value that was generated and sent in `prepare_call()`).
 #' @param browser_token Browser token present in the user's session (this is managed
 #' by `oauth_module_server()` and should match the one used in `prepare_call()`).
-#' @param decrypted_payload Optional pre-decrypted and validated payload list
-#'   (as returned by `state_decrypt_gcm()` followed by internal validation).
-#'   Supplying this allows callers to validate and bind the state on the main
-#'   thread before dispatching to a background worker for async flows.
-#' @param state_store_values Optional pre-fetched state store entry (a list with
-#'   `browser_token`, `pkce_code_verifier`, and `nonce`). When supplied, the
-#'   function will skip reading/removing from `oauth_client@state_store` and use
-#'   the provided values instead. This supports async flows that prefetch and
-#'   remove the single-use state entry on the main thread to avoid cross-process
-#'   cache visibility issues.
 #' @param shiny_session Optional pre-captured Shiny session context (from
 #'   `capture_shiny_session_context()`) to include in audit events. Used when
 #'   calling from async workers that lack access to the reactive domain.
 #'
-#' @return An [OAuthToken]` object containing the access token, refresh token,
+#' @return An [OAuthToken] object containing the access token, refresh token,
 #' expiration time, user information (if requested), and ID token (if applicable).
 #' If any step of the process fails (e.g., state verification, token exchange,
 #' token validation), an error is thrown indicating the failure reason.
@@ -366,6 +395,27 @@ build_auth_url <- function(
 #'
 #' @export
 handle_callback <- function(
+  oauth_client,
+  code,
+  payload,
+  browser_token,
+  shiny_session = NULL
+) {
+  handle_callback_internal(
+    oauth_client = oauth_client,
+    code = code,
+    payload = payload,
+    browser_token = browser_token,
+    decrypted_payload = NULL,
+    state_store_values = NULL,
+    shiny_session = shiny_session
+  )
+}
+
+# Internal helper that supports pre-validated bypass parameters for async flows.
+# NOT exported: only called by oauth_module_server() when dispatching to async
+# workers where state-store and payload validation must occur on the main thread.
+handle_callback_internal <- function(
   oauth_client,
   code,
   payload,
@@ -682,6 +732,9 @@ handle_callback <- function(
         id_token = token_set[["id_token"]]
       )
     }
+
+    # Validate essential claims in userinfo (OIDC Core §5.5)
+    validate_essential_claims(oauth_client, userinfo, "userinfo")
   }
 
   # Return ---------------------------------------------------------------------
@@ -697,9 +750,10 @@ handle_callback <- function(
     ) {
       as.numeric(Sys.time()) + as.numeric(token_set$expires_in)
     } else {
-      Inf
+      resolve_missing_expires_in(phase = "exchange_code")
     },
-    id_token = token_set$id_token %||% NA_character_
+    id_token = token_set$id_token %||% NA_character_,
+    id_token_validated = isTRUE(token_set[[".id_token_validated"]])
   )
   # Set userinfo separately for compatibility with some S7 dispatchers
   token@userinfo <- token_set$userinfo %||% list()
@@ -1341,10 +1395,17 @@ verify_token_set <- function(
   # a refresh returns an ID token, even if signature/claim validation is
   # disabled (id_token_validation = FALSE).
   expected_sub <- NULL
+  original_iss <- NULL
+  original_aud <- NULL
   should_validate_id_token <- isTRUE(id_token_present) &&
     (isTRUE(client@provider@id_token_validation) ||
       isTRUE(client@provider@use_nonce) ||
       isTRUE(is_valid_string(nonce)))
+
+  # Track whether the ID token was actually validated for downstream consumers.
+  # This flag starts FALSE and is set to TRUE only when validate_id_token()
+  # succeeds (i.e. signature + claims are cryptographically verified).
+  id_token_validated <- FALSE
 
   id_token <- token_set[["id_token"]]
   if (isTRUE(is_refresh) && isTRUE(id_token_present)) {
@@ -1363,6 +1424,13 @@ verify_token_set <- function(
       err_id_token("Original ID token missing sub claim (OIDC 12.2)")
     }
     expected_sub <- original_payload$sub
+
+    # OIDC Core 12.2: extract original iss and aud for cross-comparison.
+    # The new ID token's iss and aud MUST match the original's actual values,
+    # not just the provider config. This guards against multi-tenant issuers
+    # that rotate issuer URIs or aud arrays that include extra audiences.
+    original_iss <- original_payload$iss
+    original_aud <- original_payload$aud
 
     if (!isTRUE(should_validate_id_token)) {
       # Even when full ID token validation is disabled (id_token_validation = FALSE),
@@ -1386,6 +1454,28 @@ verify_token_set <- function(
           "Refresh returned an ID token with sub that does not match the original (OIDC 12.2)"
         )
       }
+      # OIDC Core 12.2: iss MUST be the same as in the original ID token.
+      # Strict string equality — no trailing-slash normalization.
+      if (
+        is_valid_string(original_iss) &&
+          !identical(new_payload$iss %||% "", original_iss)
+      ) {
+        err_id_token(
+          "Refresh returned an ID token with iss that does not match the original (OIDC 12.2)"
+        )
+      }
+      # OIDC Core 12.2: aud MUST be the same as in the original ID token.
+      if (
+        !is.null(original_aud) &&
+          !identical(
+            sort(as.character(new_payload$aud %||% character())),
+            sort(as.character(original_aud))
+          )
+      ) {
+        err_id_token(
+          "Refresh returned an ID token with aud that does not match the original (OIDC 12.2)"
+        )
+      }
     }
   }
 
@@ -1394,12 +1484,124 @@ verify_token_set <- function(
   if (isTRUE(should_validate_id_token)) {
     # Verifies signature & claims of ID token
     # Will error if invalid
+    # OIDC Core §3.1.2.1: when max_age was requested in extra_auth_params,
+    # pass it to validate_id_token() so auth_time is enforced.
+    requested_max_age <- NULL
+    if (!isTRUE(is_refresh)) {
+      ma <- client@provider@extra_auth_params[["max_age"]]
+      if (!is.null(ma)) {
+        requested_max_age <- suppressWarnings(as.numeric(ma))
+        if (
+          is.na(requested_max_age) ||
+            !is.finite(requested_max_age) ||
+            requested_max_age < 0
+        ) {
+          requested_max_age <- NULL
+        }
+      }
+    }
     validate_id_token(
       client,
       id_token,
       expected_nonce = nonce,
-      expected_sub = expected_sub
+      expected_sub = expected_sub,
+      expected_access_token = token_set[["access_token"]],
+      max_age = requested_max_age
     )
+
+    # If we reach this point, validate_id_token() succeeded —
+    # the ID token's signature and claims were cryptographically verified.
+    id_token_validated <- TRUE
+
+    # OIDC Core 12.2: during refresh, verify iss and aud match the original
+    # ID token's actual values (not just the provider config). validate_id_token()
+    # already checks iss == provider@issuer and client_id %in% aud, but 12.2
+    # additionally requires exact match against the original token's claims.
+    # Parse the new token payload directly (rather than depending on the return
+    # value of validate_id_token) so the check is robust regardless of mocking.
+    if (isTRUE(is_refresh) && !is.null(original_iss)) {
+      new_payload_for_iss_aud <- tryCatch(
+        parse_jwt_payload(id_token),
+        error = function(e) NULL
+      )
+      if (!is.null(new_payload_for_iss_aud)) {
+        if (
+          is_valid_string(original_iss) &&
+            !identical(new_payload_for_iss_aud$iss %||% "", original_iss)
+        ) {
+          err_id_token(
+            "Refresh returned an ID token with iss that does not match the original (OIDC 12.2)"
+          )
+        }
+        if (
+          !is.null(original_aud) &&
+            !identical(
+              sort(as.character(new_payload_for_iss_aud$aud %||% character())),
+              sort(as.character(original_aud))
+            )
+        ) {
+          err_id_token(
+            "Refresh returned an ID token with aud that does not match the original (OIDC 12.2)"
+          )
+        }
+      }
+    }
+  }
+
+  # Validate essential claims in ID token (OIDC Core §5.5) ---------------------
+
+  # When claims_validation is enabled and the client requested essential claims
+  # for id_token, verify they are present in the decoded ID token payload.
+  # This applies to both initial login and refresh (if a new ID token is returned).
+  if (isTRUE(id_token_present)) {
+    id_payload <- tryCatch(
+      parse_jwt_payload(token_set[["id_token"]]),
+      error = function(e) NULL
+    )
+    if (!is.null(id_payload)) {
+      validate_essential_claims(client, id_payload, "id_token")
+    }
+  }
+
+  # Validate acr claim against required_acr_values (OIDC Core §2, §3.1.2.1) ----
+
+  # When the client specifies required_acr_values, verify the ID token's acr
+  # claim is present and matches one of the allowlisted values.  This runs on
+  # both initial login and refresh (when a new ID token is returned).
+  racr <- client@required_acr_values %||% character(0)
+  if (length(racr) > 0 && isTRUE(id_token_present)) {
+    acr_payload <- tryCatch(
+      parse_jwt_payload(token_set[["id_token"]]),
+      error = function(e) NULL
+    )
+    if (is.null(acr_payload)) {
+      err_id_token(
+        "Cannot parse ID token to verify acr claim"
+      )
+    }
+    acr_value <- acr_payload$acr
+    if (is.null(acr_value) || !is_valid_string(acr_value)) {
+      err_id_token(c(
+        "x" = "ID token missing required acr claim (OIDC Core \u00a72)",
+        "i" = paste0(
+          "Required one of: ",
+          paste(racr, collapse = ", ")
+        )
+      ))
+    }
+    if (!acr_value %in% racr) {
+      err_id_token(c(
+        "x" = paste0(
+          "ID token acr claim '",
+          acr_value,
+          "' is not in the required_acr_values allowlist"
+        ),
+        "i" = paste0(
+          "Allowed: ",
+          paste(racr, collapse = ", ")
+        )
+      ))
+    }
   }
 
   # Validate match between userinfo & ID token ---------------------------------
@@ -1428,6 +1630,9 @@ verify_token_set <- function(
       )
     }
   }
+
+  # Attach the validation flag so callers can propagate it to OAuthToken.
+  token_set[[".id_token_validated"]] <- id_token_validated
 
   return(token_set)
 }
@@ -1469,4 +1674,110 @@ verify_token_type_allowlist <- function(client, token_set) {
   }
 
   invisible(TRUE)
+}
+
+# Claims validation (OIDC Core §5.5) ------------------------------------------
+
+# Extract essential claim names from a claims specification for a given target
+# (either "id_token" or "userinfo"). Returns a character vector of claim names
+# that have essential = TRUE, or character(0) if none.
+extract_essential_claims <- function(claims_spec, target) {
+  if (is.null(claims_spec)) {
+    return(character(0))
+  }
+
+  # If claims_spec is a JSON string, parse it
+  if (is.character(claims_spec)) {
+    parsed <- tryCatch(
+      jsonlite::fromJSON(claims_spec, simplifyVector = FALSE),
+      error = function(e) NULL
+    )
+    if (is.null(parsed)) {
+      return(character(0))
+    }
+    claims_spec <- parsed
+  }
+
+  if (!is.list(claims_spec)) {
+    return(character(0))
+  }
+
+  target_claims <- claims_spec[[target]]
+  if (!is.list(target_claims) || length(target_claims) == 0) {
+    return(character(0))
+  }
+
+  essential_names <- character(0)
+  for (nm in names(target_claims)) {
+    entry <- target_claims[[nm]]
+    # A claim is essential if it has a list value with essential = TRUE.
+    # NULL entries (claim requested without parameters) are not essential.
+    if (is.list(entry) && isTRUE(entry$essential)) {
+      essential_names <- c(essential_names, nm)
+    }
+  }
+
+  essential_names
+}
+
+# Validate that essential claims are present in the response.
+# @param client OAuthClient
+# @param claims_present Named list (decoded ID token payload or userinfo response)
+# @param target "id_token" or "userinfo"
+validate_essential_claims <- function(client, claims_present, target) {
+  mode <- client@claims_validation %||% "none"
+  if (identical(mode, "none")) {
+    return(invisible(NULL))
+  }
+
+  essential <- extract_essential_claims(client@claims, target)
+  if (length(essential) == 0) {
+    return(invisible(NULL))
+  }
+
+  # claims_present must be a named list
+  if (!is.list(claims_present) || length(claims_present) == 0) {
+    # No claims at all - all essential claims are missing
+    missing_claims <- essential
+  } else {
+    present_names <- names(claims_present)
+    missing_claims <- setdiff(essential, present_names)
+  }
+
+  if (length(missing_claims) == 0) {
+    return(invisible(NULL))
+  }
+
+  target_label <- if (identical(target, "id_token")) "ID token" else "userinfo"
+  msg <- paste0(
+    "Essential claims missing from ",
+    target_label,
+    " response (OIDC Core \u00a75.5): ",
+    paste(missing_claims, collapse = ", ")
+  )
+
+  if (identical(mode, "strict")) {
+    if (identical(target, "id_token")) {
+      err_id_token(c(
+        "x" = msg,
+        "i" = "Set claims_validation = 'warn' or 'none' to allow missing essential claims"
+      ))
+    } else {
+      err_userinfo(c(
+        "x" = msg,
+        "i" = "Set claims_validation = 'warn' or 'none' to allow missing essential claims"
+      ))
+    }
+  } else if (identical(mode, "warn")) {
+    rlang::warn(
+      c(
+        "!" = msg,
+        "i" = "Set claims_validation = 'none' to suppress this warning"
+      ),
+      .frequency = "once",
+      .frequency_id = paste0("claims-validation-missing-", target)
+    )
+  }
+
+  invisible(NULL)
 }

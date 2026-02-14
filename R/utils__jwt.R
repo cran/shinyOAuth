@@ -3,10 +3,13 @@
 #' @keywords internal
 #' @noRd
 parse_jwt_payload <- function(jwt) {
-  parts <- strsplit(jwt, "\\.")[[1]]
-  if (length(parts) < 2) {
-    err_parse("Invalid JWT format")
+  # Count dots to enforce exactly 3 JWS segments (RFC 7515).
+  # strsplit drops trailing empty strings, so we count separators instead.
+  n_dots <- nchar(jwt) - nchar(gsub(".", "", jwt, fixed = TRUE))
+  if (n_dots != 2L) {
+    err_parse("Invalid JWT format: expected 3 dot-separated parts")
   }
+  parts <- strsplit(jwt, "\\.")[[1]]
   payload_raw <- base64url_decode(parts[2])
   # Normalize JSON parse failures to a consistent parse error class
   tryCatch(
@@ -25,10 +28,13 @@ parse_jwt_payload <- function(jwt) {
 #' @keywords internal
 #' @noRd
 parse_jwt_header <- function(jwt) {
-  parts <- strsplit(jwt, "\\.")[[1]]
-  if (length(parts) < 2) {
-    err_parse("Invalid JWT format")
+  # Count dots to enforce exactly 3 JWS segments (RFC 7515).
+  # strsplit drops trailing empty strings, so we count separators instead.
+  n_dots <- nchar(jwt) - nchar(gsub(".", "", jwt, fixed = TRUE))
+  if (n_dots != 2L) {
+    err_parse("Invalid JWT format: expected 3 dot-separated parts")
   }
+  parts <- strsplit(jwt, "\\.")[[1]]
   header_raw <- base64url_decode(parts[1])
   # Normalize JSON parse failures to a consistent parse error class
   tryCatch(
@@ -48,7 +54,14 @@ parse_jwt_header <- function(jwt) {
 #'
 #' @param expected_sub If provided, the `sub` claim MUST match this value.
 #'   Used during refresh to ensure the new ID token is for the same user
-#'   (OIDC Core Section 12.2 requirement).
+#'   (OIDC Core section 12.2 requirement).
+#' @param expected_access_token If provided and the ID token contains an
+#'   `at_hash` claim, the claim is validated against this access token per
+#'   OIDC Core section 3.1.3.8. When the claim is present but no access token is
+#'   supplied, validation fails.
+#' @param max_age If provided (numeric, seconds), validates that the ID token
+#'   contains an `auth_time` claim and that the elapsed time since authentication
+#'   does not exceed `max_age + leeway` (OIDC Core section 3.1.2.1 / section 2).
 #'
 #' @keywords internal
 #' @noRd
@@ -56,10 +69,26 @@ validate_id_token <- function(
   client,
   id_token,
   expected_nonce = NULL,
-  expected_sub = NULL
+  expected_sub = NULL,
+  expected_access_token = NULL,
+  max_age = NULL
 ) {
   S7::check_is_S7(client, class = OAuthClient)
   stopifnot(is_valid_string(id_token))
+
+  # Detect JWE (encrypted JWT): 5 dot-separated parts per RFC 7516 §3.
+  # OIDC Core §3.1.3.7 step 1: "If the ID Token is encrypted, decrypt it..."
+  # We do not support JWE decryption; surface a clear error rather than
+
+  # letting a confusing alg/typ/parse failure propagate.
+  n_parts <- length(strsplit(id_token, ".", fixed = TRUE)[[1]])
+  if (n_parts == 5L) {
+    err_id_token(c(
+      "x" = "ID token is an encrypted JWT (JWE)",
+      "i" = "Encrypted ID tokens (JWE) are not supported by shinyOAuth",
+      "i" = "Configure the provider to return signed-only (JWS) ID tokens"
+    ))
+  }
 
   prov <- client@provider
   issuer <- prov@issuer
@@ -113,6 +142,30 @@ validate_id_token <- function(
       ))
     }
   }
+  # RFC 7515 s4.1.11: reject tokens that carry critical header parameters we
+  # do not support.
+  # Allowlist of crit values this implementation understands (empty today).
+  supported_crit <- character()
+  crit <- header$crit
+  if (!is.null(crit)) {
+    if (
+      !is.character(crit) ||
+        length(crit) == 0L ||
+        anyNA(crit) ||
+        !all(nzchar(crit))
+    ) {
+      err_id_token(
+        "JWT crit header must be a non-empty character vector of extension names"
+      )
+    }
+    unsupported <- setdiff(crit, supported_crit)
+    if (length(unsupported) > 0L) {
+      err_id_token(paste0(
+        "JWT contains unsupported critical header parameter(s): ",
+        paste(unsupported, collapse = ", ")
+      ))
+    }
+  }
   alg <- toupper(header$alg %||% err_id_token("JWT header missing alg"))
   kid <- header$kid %||% NULL
   if (!isTRUE(skip_signature) && !(alg %in% allowed_algs)) {
@@ -163,7 +216,15 @@ validate_id_token <- function(
               jwks_cache,
               pins = pins,
               pin_mode = pin_mode,
-              min_interval = 30
+              min_interval = 30,
+              jwks_host_issuer_match = isTRUE(try(
+                prov@jwks_host_issuer_match,
+                silent = TRUE
+              )),
+              jwks_host_allow_only = {
+                ao <- try(prov@jwks_host_allow_only, silent = TRUE)
+                if (inherits(ao, "try-error")) NA_character_ else ao
+              }
             ))
           ) {
             did_force_refresh <- TRUE
@@ -294,15 +355,13 @@ validate_id_token <- function(
   }
 
   # Claims checks
-  # Normalize issuer comparison by trimming a single trailing slash on both
-  # sides to be robust to providers that vary only by a terminal '/'.
-  # We still require an exact, case-sensitive match after normalization.
+  # OIDC Core §3.1.3.7 step 2: iss MUST exactly match the Issuer Identifier.
+  # No normalization (e.g. trailing-slash trimming) is applied so that
+  # configuration or mix-up problems surface immediately.
   if (!is_valid_string(payload$iss)) {
     err_id_token("Issuer mismatch/invalid")
   }
-  iss_expected <- rtrim_slash(issuer)
-  iss_actual <- rtrim_slash(payload$iss)
-  if (!identical(iss_actual, iss_expected)) {
+  if (!identical(payload$iss, issuer)) {
     err_id_token("Issuer mismatch/invalid")
   }
   aud <- payload$aud
@@ -357,6 +416,38 @@ validate_id_token <- function(
   if (iat_val > (now + lwe)) {
     err_id_token("ID token issued in the future")
   }
+  # OIDC Core §3.1.3.7 rule 9: reject tokens with unreasonably long lifetimes.
+  # A misconfigured or malicious provider could issue an ID token valid for years.
+  max_lifetime <- getOption("shinyOAuth.max_id_token_lifetime", 86400)
+  if (
+    is.numeric(max_lifetime) &&
+      length(max_lifetime) == 1L &&
+      is.finite(max_lifetime)
+  ) {
+    if (max_lifetime <= 0) {
+      err_config(c(
+        "x" = "shinyOAuth.max_id_token_lifetime must be a positive number",
+        "i" = paste0("Got: ", max_lifetime)
+      ))
+    }
+    if ((exp_val - iat_val) > max_lifetime) {
+      err_id_token(c(
+        "x" = "ID token lifetime exceeds max_id_token_lifetime",
+        "i" = paste0(
+          "exp=",
+          exp_val,
+          ", iat=",
+          iat_val,
+          ", lifetime=",
+          exp_val - iat_val,
+          "s",
+          ", max_id_token_lifetime=",
+          max_lifetime,
+          "s"
+        )
+      ))
+    }
+  }
   if (!is.null(payload$nbf)) {
     if (!is_single_finite_number(payload$nbf)) {
       err_id_token("nbf claim must be a single finite number when present")
@@ -386,7 +477,111 @@ validate_id_token <- function(
   } else if (length(aud) > 1) {
     err_id_token("Multiple audiences but azp claim missing")
   }
+
+  # auth_time validation per OIDC Core §3.1.2.1 / §2:
+  # When max_age was requested, auth_time MUST be present. Validate
+  # that now - auth_time <= max_age + leeway.
+  if (!is.null(max_age)) {
+    max_age_val <- suppressWarnings(as.numeric(max_age))
+    if (
+      !is.numeric(max_age_val) ||
+        length(max_age_val) != 1L ||
+        !is.finite(max_age_val) ||
+        max_age_val < 0
+    ) {
+      err_id_token("max_age must be a non-negative finite number")
+    }
+    if (is.null(payload$auth_time)) {
+      err_id_token(
+        "ID token missing auth_time claim (required when max_age is requested, OIDC Core 3.1.2.1)"
+      )
+    }
+    if (!is_single_finite_number(payload$auth_time)) {
+      err_id_token("auth_time claim must be a single finite number")
+    }
+    auth_time_val <- as.numeric(payload$auth_time)
+    elapsed <- now - auth_time_val
+    if (elapsed > (max_age_val + lwe)) {
+      err_id_token(c(
+        "x" = "Authentication too old (auth_time exceeded max_age)",
+        "i" = paste0(
+          "auth_time=",
+          auth_time_val,
+          ", now=",
+          now,
+          ", elapsed=",
+          elapsed,
+          "s, max_age=",
+          max_age_val,
+          "s, leeway=",
+          lwe,
+          "s"
+        )
+      ))
+    }
+  }
+
+  # at_hash (Access Token hash) validation per OIDC Core §3.1.3.8 / §3.2.2.9:
+  # When the ID token contains an at_hash claim, verify the access token
+  # binding. This is a defense-in-depth measure against token substitution.
+  # When id_token_at_hash_required is TRUE, the claim MUST be present.
+  at_hash_required <- isTRUE(prov@id_token_at_hash_required)
+  if (at_hash_required && is.null(payload$at_hash)) {
+    err_id_token(
+      "ID token missing required at_hash claim (id_token_at_hash_required = TRUE)"
+    )
+  }
+  if (!is.null(payload$at_hash)) {
+    if (!is_valid_string(expected_access_token)) {
+      err_id_token(
+        "ID token contains at_hash claim but no access token was provided for validation"
+      )
+    }
+    computed <- compute_at_hash(expected_access_token, alg)
+    if (!constant_time_compare(computed, payload$at_hash)) {
+      err_id_token(
+        "at_hash claim does not match the access token (OIDC Core 3.1.3.8)"
+      )
+    }
+  }
+
   invisible(payload)
+}
+
+#' Compute at_hash value per OIDC Core section 3.1.3.8
+#'
+#' Takes the left-most half of the hash of the access token ASCII octets
+#' using the hash algorithm from the JWT alg header, then base64url-encodes it.
+#'
+#' @param access_token The access token string.
+#' @param alg The JWT algorithm (e.g., "RS256", "ES384", "PS512").
+#' @return A base64url-encoded string representing the at_hash.
+#' @keywords internal
+#' @noRd
+compute_at_hash <- function(access_token, alg) {
+  stopifnot(is_valid_string(access_token), is_valid_string(alg))
+  # Map JWT alg to hash function per RFC 7518:
+  # *256 -> SHA-256, *384 -> SHA-384, *512 -> SHA-512
+  # EdDSA is not covered by at_hash spec but use SHA-512 (Ed25519 companion)
+  hash_fn <- if (grepl("256", alg, fixed = TRUE)) {
+    openssl::sha256
+  } else if (grepl("384", alg, fixed = TRUE)) {
+    openssl::sha384
+  } else if (grepl("512", alg, fixed = TRUE)) {
+    openssl::sha512
+  } else if (toupper(alg) == "EDDSA") {
+    openssl::sha512
+  } else {
+    err_id_token(paste0(
+      "Cannot determine hash algorithm for at_hash from alg: ",
+      alg
+    ))
+  }
+  full_hash <- hash_fn(charToRaw(access_token))
+  # Take the left-most half of the hash octets
+  hash_bytes <- as.raw(full_hash)
+  left_half <- hash_bytes[seq_len(length(hash_bytes) %/% 2L)]
+  base64url_encode(left_half)
 }
 
 #' Build and sign OAuth client assertion (RFC 7523)
@@ -412,7 +607,12 @@ build_client_assertion <- function(client, aud) {
 
   style <- client@provider@token_auth_style %||% "header"
   alg_cfg <- client@client_assertion_alg %||% NA_character_
-  alg_chr <- as.character(alg_cfg[[1]])
+  # Defense-in-depth: ensure scalar before indexing (validator should already
+  # enforce this, but runtime callers may bypass validation).
+  if (!is.character(alg_cfg) || length(alg_cfg) != 1L) {
+    alg_cfg <- NA_character_ # nolint
+  }
+  alg_chr <- as.character(alg_cfg)
   alg <- toupper(ifelse(is.na(alg_chr), "", alg_chr))
   # Resolve default algorithm with key-aware logic for private_key_jwt.
   # Previous behavior always fell back to RS256 which breaks EC/OKP keys.
@@ -536,7 +736,11 @@ resolve_client_assertion_audience <- function(client, req) {
   S7::check_is_S7(client, class = OAuthClient)
 
   override <- client@client_assertion_audience %||% NA_character_
-  override_chr <- as.character(override[[1]])
+  # Defense-in-depth: ensure scalar before indexing.
+  if (!is.character(override) || length(override) != 1L) {
+    override <- NA_character_ # nolint
+  }
+  override_chr <- as.character(override)
   if (!is.na(override_chr) && nzchar(override_chr)) {
     return(override_chr)
   }

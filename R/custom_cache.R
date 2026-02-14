@@ -5,9 +5,8 @@
 #' `$get(key, missing)`, `$set(key, value)`, `$remove(key)`, and `$info()`.
 #'
 #' Use this helper when you want to plug a custom state store or JWKS cache
-#' into 'shinyOAuth', when [cachem::cache_mem()] or [cachem::cache_disk()]
-#' are not suitable. This may be useful specifically when you deploy
-#' a Shiny app to a multi-process environment with non-sticky workers.
+#' into 'shinyOAuth', when [cachem::cache_mem()] is not suitable (e.g.,
+#' multi-process deployments with non-sticky workers).
 #' In such cases, you may want to use a shared external cache (e.g., database,
 #' Redis, Memcached).
 #'
@@ -27,23 +26,34 @@
 #' @param set A function(key, value) -> invisible(NULL). Required.
 #' Should store the value under the given key
 #'
-#' @param remove A function(key) -> logical or sentinel. Required.
+#' @param remove A function(key) -> any. Required.
 #'
-#'   For state stores, this enforces single-use eviction. If your backend performs
-#'   an atomic "get-and-delete" (e.g., SQL DELETE .. RETURNING), you may supply
-#'   a function which does nothing here but returns `TRUE`. (The login flow will always attempt to call
-#'   `$remove()` after `$get()` as a best-effort cleanup.)
+#'   Deletes the entry for `key`. When `$take()` is provided, `$remove()` serves
+#'   only as a best-effort cleanup and its return value is ignored. When
+#'   `$take()` is not provided, 'shinyOAuth' falls back to
+#'   `$get()` + `$remove()` followed by a post-removal absence check via
+#'   `$get(key, missing = NA)`. In this fallback path the return value of
+#'   `$remove()` is not relied upon; the post-check is authoritative.
 #'
-#'   Recommended contract for interoperability and strong replay protection:
-#'   - Return `TRUE` when a key was actually deleted or if it already did not exist
-#'   - Return `FALSE` when they key could not be deleted or when it is unknown if
-#'   they key was deleted
+#' @param take A function(key, missing = NULL) -> value. Optional.
 #'
-#'   When the return value is not `TRUE`, 'shinyOAuth' will attempt to retrieve
-#'   the value from the state store to check if it may still be present; if that
-#'   fails (i.e., key is not present), it will treat the removal as succesful.
-#'   If it does find the key, it will produce an error indicating that removal
-#'   did not succeed.
+#'   An atomic get-and-delete operation. When provided, 'shinyOAuth' uses
+#'   `$take()` instead of separate `$get()` + `$remove()` calls to enforce
+#'   single-use state consumption. This prevents TOCTOU (time-of-check /
+#'   time-of-use) replay attacks in multi-worker deployments with shared state
+#'   stores.
+#'
+#'   Should return the stored value and atomically remove the entry, or
+#'   return the `missing` argument (default `NULL`) if the key is not present.
+#'
+#'   If your backend supports atomic get-and-delete natively
+#'   (e.g., Redis `GETDEL`, SQL `DELETE ... RETURNING`), wire it through this
+#'   parameter for replay-safe state stores.
+#'
+#'   When `take` is not provided and the state store is not a per-process cache
+#'   (like [cachem::cache_mem()]), 'shinyOAuth' will **error** at state
+#'   consumption time because non-atomic `$get()` + `$remove()` cannot
+#'   guarantee single-use under concurrent access in shared stores.
 #'
 #' @param info Function() -> list(max_age = seconds, ...). Optional
 #'
@@ -55,7 +65,7 @@
 #' @example inst/examples/custom_cache.R
 #'
 #' @export
-custom_cache <- function(get, set, remove, info = NULL) {
+custom_cache <- function(get, set, remove, take = NULL, info = NULL) {
   # Validate required functions
   if (!is.function(get)) {
     err_input(
@@ -72,6 +82,14 @@ custom_cache <- function(get, set, remove, info = NULL) {
       "cache_backend: `remove` must be a function(key) -> boolean result (see `?custom_cache`)"
     )
   }
+  # Validate optional take hook if provided
+  if (!is.null(take)) {
+    if (!is.function(take)) {
+      err_input(
+        "cache_backend: `take` must be a function(key, missing = NULL) for atomic get-and-delete (see `?custom_cache`)"
+      )
+    }
+  }
   # Validate optional info hook if provided
   if (is.null(info)) {
     info <- function() list()
@@ -84,11 +102,18 @@ custom_cache <- function(get, set, remove, info = NULL) {
   CacheCls <- R6::R6Class(
     classname = "shinyOAuthCustomCache",
     public = list(
-      initialize = function(.get, .set, .remove, .info) {
+      # Set to a function in initialize() when an atomic take implementation is
+      # provided; remains NULL otherwise.  Duck-typing check
+      # is.function(store$take) naturally returns TRUE/FALSE.
+      take = NULL,
+      initialize = function(.get, .set, .remove, .take, .info) {
         private$.get <- .get
         private$.set <- .set
         private$.remove <- .remove
         private$.info <- .info
+        if (!is.null(.take)) {
+          self$take <- function(key, missing = NULL) .take(key, missing)
+        }
       },
       get = function(key, missing = NULL) {
         private$.get(key, missing)
@@ -119,5 +144,5 @@ custom_cache <- function(get, set, remove, info = NULL) {
     )
   )
 
-  CacheCls$new(get, set, remove, info)
+  CacheCls$new(get, set, remove, take, info)
 }

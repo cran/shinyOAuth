@@ -53,21 +53,46 @@
 #' @param scopes Vector of scopes to request
 #'
 #' @param state_store State storage backend. Defaults to `cachem::cache_mem(max_age = 300)`.
-#'    Alternative backends could include `cachem::cache_disk()` or a custom
-#'    implementation (which you can create with [custom_cache()]. The backend
+#'    Alternative backends should use [custom_cache()] with an atomic `$take()`
+#'    method for replay-safe single-use state consumption. The backend
 #'    must implement cachem-like methods `$get(key, missing)`, `$set(key, value)`,
 #'    and `$remove(key)`; `$info()` is optional.
 #'
 #'    Trade-offs: `cache_mem` is in-memory and thus scoped to a single R process
-#'    (good default for a single Shiny process). `cache_disk` persists to disk
-#'    and can be shared across multiple R processes (useful for multi-process
-#'    deployments or when Shiny workers aren't sticky). A [custom_cache()]
-#'    backend could use a database or external store (e.g., Redis, Memcached).
+#'    (good default for a single Shiny process). For multi-process deployments,
+#'    use [custom_cache()] with an atomic `$take()` backed by a shared store
+#'    (e.g., Redis `GETDEL`, SQL `DELETE ... RETURNING`). Plain
+#'    `cachem::cache_disk()` is **not safe** as a shared state store because its
+#'    `$get()` + `$remove()` operations are not atomic; use it only if wrapped
+#'    in a [custom_cache()] that provides `$take()`.
 #'    See also `vignette("usage", package = "shinyOAuth")`.
 #'
 #'    The client automatically generates, persists (in `state_store`), and
 #'    validates the OAuth `state` parameter (and OIDC `nonce` when applicable)
 #'    during the authorization code flow
+#'
+#' @param claims OIDC claims request parameter (OIDC Core §5.5). Allows
+#'   requesting specific claims from the UserInfo Endpoint and/or in the ID
+#'   Token. Can be:
+#'   - `NULL` (default): no claims parameter is sent
+#'   - A list: automatically JSON-encoded (via [jsonlite::toJSON()] with
+#'     `auto_unbox = TRUE`) and URL-encoded into the authorization request.
+#'     The list should have top-level members `userinfo` and/or `id_token`,
+#'     each containing named lists of claims.
+#'     Use `NULL` to request a claim without parameters (per spec).
+#'     Example: `list(userinfo = list(email = NULL, given_name = list(essential = TRUE)), id_token = list(auth_time = list(essential = TRUE)))`
+#'
+#'     Note on single-element arrays: because `auto_unbox = TRUE` is used,
+#'     single-element R vectors are serialized as JSON scalars, not arrays.
+#'     The OIDC spec defines `values` as an array. To force array encoding
+#'     for a single-element vector, wrap it in [I()], e.g.,
+#'     `acr = list(values = I("urn:mace:incommon:iap:silver"))` produces
+#'     `{"values":["urn:mace:incommon:iap:silver"]}`. Multi-element vectors
+#'     are always encoded as arrays.
+#'   - A character string: pre-encoded JSON string (for advanced use). Must
+#'     be valid JSON. Use this when you need full control over JSON encoding.
+#'   Note: The `claims` parameter is OPTIONAL per OIDC Core §5.5. Not all
+#'   providers support it; consult your provider's documentation.
 #'
 #' @param state_payload_max_age Positive number of seconds. Maximum allowed age
 #'   for the decrypted state payload's `issued_at` timestamp during callback
@@ -119,6 +144,35 @@
 #'   - `"warn"`: Emits a warning but continues authentication if scopes are
 #'     missing.
 #'   - `"none"`: Skips scope validation entirely.
+#'
+#' @param claims_validation Controls validation of essential claims requested
+#'   via the `claims` parameter (OIDC Core §5.5). When `claims` includes
+#'   entries with `essential = TRUE` for `id_token` or `userinfo`, this setting
+#'   determines what happens if those essential claims are missing from the
+#'   returned ID token or userinfo response.
+#'
+#'   - `"none"` (default): Skips claims validation entirely. This is the
+#'     default because providers are expected to fulfil essential claims
+#'     requests or return an error.
+#'   - `"warn"`: Emits a warning but continues authentication if essential
+#'     claims are missing.
+#'   - `"strict"`: Throws an error if any requested essential claims are
+#'     missing from the response.
+#'
+#' @param required_acr_values Optional character vector of acceptable
+#'   Authentication Context Class Reference values (OIDC Core §2, §3.1.2.1).
+#'   When non-empty, the ID token returned by the provider must contain an
+#'   `acr` claim whose value is one of the specified entries; otherwise the
+#'   login fails with a `shinyOAuth_id_token_error`.
+#'
+#'   Additionally, when non-empty, the authorization request automatically
+#'   includes an `acr_values` query parameter (space-separated) as a voluntary
+#'   hint to the provider (OIDC Core §3.1.2.1).  Note that the provider is
+#'   not required to honour this hint; the client-side validation is the
+#'   authoritative enforcement.
+#'
+#'   Requires an OIDC-capable provider with `id_token_validation = TRUE` and
+#'   an `issuer` configured.  Default is `character(0)` (no enforcement).
 #'
 #' @param introspect If TRUE, the login flow will call the provider's token
 #'   introspection endpoint (RFC 7662) to validate the access token. The login
@@ -172,6 +226,15 @@ OAuthClient <- S7::new_class(
     ),
     redirect_uri = S7::class_character,
     scopes = S7::class_character,
+    # Optional OIDC claims request parameter (OIDC Core §5.5):
+    # can be NULL (no claims), a list (auto JSON-encoded), or a character
+    # string (pre-encoded JSON). When a list, it is JSON-encoded using
+    # jsonlite::toJSON(auto_unbox = TRUE, null = "null") during auth URL
+    # construction.
+    claims = S7::new_property(
+      S7::class_any,
+      default = NULL
+    ),
     state_store = S7::new_property(
       S7::class_any,
       default = quote(cachem::cache_mem(max_age = 300))
@@ -186,6 +249,17 @@ OAuthClient <- S7::new_class(
       S7::class_character,
       default = "strict"
     ),
+    claims_validation = S7::new_property(
+      S7::class_character,
+      default = "none"
+    ),
+
+    # OIDC acr enforcement (OIDC Core §2, §3.1.2.1): when non-empty, the ID
+    # token's acr claim must match one of these values.
+    required_acr_values = S7::new_property(
+      S7::class_character,
+      default = character(0)
+    ),
 
     # Token introspection settings (RFC 7662): control whether login validates
     # the access token via the provider's introspection endpoint.
@@ -196,8 +270,6 @@ OAuthClient <- S7::new_class(
     )
   ),
   validator = function(self) {
-    warn_about_oauth_client_created_in_shiny(state_key_missing = NA)
-
     if (!S7::S7_inherits(self@provider, OAuthProvider)) {
       return("OAuthClient: provider must be an OAuthProvider object")
     }
@@ -215,6 +287,13 @@ OAuthClient <- S7::new_class(
     ) {
       return(
         "OAuthClient: redirect_uri must be an absolute URL (including scheme and hostname)"
+      )
+    }
+
+    # RFC 6749 Section 3.1.2: redirect URI MUST NOT include a fragment
+    if (nzchar(parsed$fragment %||% "")) {
+      return(
+        "OAuthClient: redirect_uri must not contain a URI fragment (RFC 6749 Section 3.1.2)"
       )
     }
 
@@ -327,9 +406,13 @@ OAuthClient <- S7::new_class(
     # with the configured token authentication style so we fail fast with a
     # clear input error rather than later inside JWT signing.
     if (!is.null(self@client_assertion_alg)) {
-      alg_chr <- as.character((self@client_assertion_alg %||% NA_character_)[[
-        1
-      ]])
+      caa_raw <- self@client_assertion_alg
+      if (!is.character(caa_raw) || length(caa_raw) != 1L) {
+        return(
+          "OAuthClient: client_assertion_alg must be a scalar character string (or NULL to omit)"
+        )
+      }
+      alg_chr <- caa_raw
       if (!is.na(alg_chr) && nzchar(alg_chr)) {
         alg <- toupper(alg_chr)
         allowed_hmac <- c("HS256", "HS384", "HS512")
@@ -375,10 +458,14 @@ OAuthClient <- S7::new_class(
 
     # Validate client_assertion_audience when provided
     caa <- self@client_assertion_audience %||% NA_character_
-    caa_chr <- as.character(caa[[1]])
-    if (!is.na(caa_chr) && nzchar(caa_chr) && !is_valid_string(caa_chr)) {
+    if (!is.character(caa) || length(caa) != 1L) {
       return(
-        "OAuthClient: client_assertion_audience must be a non-empty string when provided"
+        "OAuthClient: client_assertion_audience must be a scalar character string (or NULL/NA to omit)"
+      )
+    }
+    if (!is.na(caa) && !nzchar(caa)) {
+      return(
+        "OAuthClient: client_assertion_audience must be non-empty when provided (use NULL or NA to omit)"
       )
     }
 
@@ -432,20 +519,18 @@ OAuthClient <- S7::new_class(
 
     # Robustness: verify method signatures/compatibility.
     # - $get must accept a named `missing` argument (or `...`).
-    #   Probe-call it with a sentinel key to detect unsupported signatures
-    #   early (avoids failing later during the login flow).
-    get_ok <- try(
-      self@state_store$get(
-        key = "__signature_probe__",
-        missing = NULL
-      ),
-      silent = TRUE
-    )
-    if (inherits(get_ok, "try-error")) {
-      return(paste0(
-        "OAuthClient: state_store$get must accept argument 'missing' (expected signature get(key, missing = NULL)); got error: ",
-        as.character(get_ok)
-      ))
+    #   Validated via formals inspection (no probe-call) to avoid triggering
+    #   side-effects in stateful backends or test wrappers.
+    get_formals <- try(formals(self@state_store$get), silent = TRUE)
+    get_args <- if (!inherits(get_formals, "try-error")) {
+      names(get_formals)
+    } else {
+      character()
+    }
+    if (!("..." %in% get_args || "missing" %in% get_args)) {
+      return(
+        "OAuthClient: state_store$get must accept argument 'missing' (expected signature get(key, missing = NULL))"
+      )
     }
 
     # - $set must accept (key, value) either explicitly or via "..."
@@ -474,10 +559,55 @@ OAuthClient <- S7::new_class(
       return("OAuthClient: state_store$remove must accept (key)")
     }
 
+    # Optional $take for atomic state consumption (preferred for shared stores)
+    # Validated via formals inspection (no probe-call) to avoid triggering
+    # side-effects in stateful backends or test wrappers.
+    if (
+      !is.null(self@state_store$take) &&
+        is.function(self@state_store$take)
+    ) {
+      take_formals <- try(formals(self@state_store$take), silent = TRUE)
+      take_args <- if (!inherits(take_formals, "try-error")) {
+        names(take_formals)
+      } else {
+        character()
+      }
+      if (!("..." %in% take_args || "missing" %in% take_args)) {
+        return(
+          "OAuthClient: state_store$take must accept argument 'missing' (expected signature take(key, missing = NULL))"
+        )
+      }
+    }
+
     # Validate scopes
     scopes_valid <- try(validate_scopes(self@scopes), silent = TRUE)
     if (inherits(scopes_valid, "try-error")) {
       return(paste0("OAuthClient: scopes validation error: ", scopes_valid))
+    }
+
+    # Validate claims
+    if (!is.null(self@claims)) {
+      # Must be either a list or a single non-empty character string
+      if (is.list(self@claims)) {
+        # Lists are valid; they will be JSON-encoded later
+      } else if (is.character(self@claims)) {
+        if (length(self@claims) != 1L || !nzchar(self@claims)) {
+          return(
+            "OAuthClient: claims must be a single non-empty character string when provided as character"
+          )
+        }
+        # Try to validate it's valid JSON
+        json_valid <- try(jsonlite::validate(self@claims), silent = TRUE)
+        if (inherits(json_valid, "try-error") || !isTRUE(json_valid)) {
+          return(
+            "OAuthClient: claims provided as character must be valid JSON"
+          )
+        }
+      } else {
+        return(
+          "OAuthClient: claims must be NULL, a list, or a character string"
+        )
+      }
     }
 
     # Validate scope_validation
@@ -488,6 +618,41 @@ OAuthClient <- S7::new_class(
       return(
         "OAuthClient: scope_validation must be one of 'strict', 'warn', or 'none'"
       )
+    }
+
+    # Validate claims_validation
+    if (
+      !is_valid_string(self@claims_validation) ||
+        !self@claims_validation %in% c("strict", "warn", "none")
+    ) {
+      return(
+        "OAuthClient: claims_validation must be one of 'strict', 'warn', or 'none'"
+      )
+    }
+
+    # Validate required_acr_values
+    racr <- self@required_acr_values
+    if (!is.character(racr)) {
+      return("OAuthClient: required_acr_values must be a character vector")
+    }
+    if (anyNA(racr)) {
+      return("OAuthClient: required_acr_values must not contain NA")
+    }
+    if (!all(nzchar(racr))) {
+      return("OAuthClient: required_acr_values must not contain empty strings")
+    }
+    if (length(racr) > 0) {
+      # acr enforcement requires an OIDC-capable provider (issuer + id_token_validation)
+      if (!is_valid_string(self@provider@issuer)) {
+        return(
+          "OAuthClient: required_acr_values requires the provider to have an issuer configured"
+        )
+      }
+      if (!isTRUE(self@provider@id_token_validation)) {
+        return(
+          "OAuthClient: required_acr_values requires id_token_validation = TRUE on the provider"
+        )
+      }
     }
 
     # Validate introspect
@@ -603,6 +768,7 @@ oauth_client <- function(
   client_secret = Sys.getenv("OAUTH_CLIENT_SECRET"),
   redirect_uri,
   scopes = character(0),
+  claims = NULL,
   state_store = cachem::cache_mem(max_age = 300),
   state_payload_max_age = 300,
   state_entropy = 64,
@@ -612,6 +778,8 @@ oauth_client <- function(
   client_assertion_alg = NULL,
   client_assertion_audience = NULL,
   scope_validation = c("strict", "warn", "none"),
+  claims_validation = c("none", "warn", "strict"),
+  required_acr_values = character(0),
   introspect = FALSE,
   introspect_elements = character(0)
 ) {
@@ -620,6 +788,7 @@ oauth_client <- function(
   )
 
   scope_validation <- match.arg(scope_validation)
+  claims_validation <- match.arg(claims_validation)
 
   # Normalize scopes early so callers can provide a single space-delimited
   # string (common in OAuth examples) while internal code consistently sees
@@ -640,6 +809,7 @@ oauth_client <- function(
     client_secret = client_secret,
     redirect_uri = redirect_uri,
     scopes = scopes,
+    claims = claims,
     state_store = state_store,
     state_payload_max_age = state_payload_max_age,
     state_entropy = state_entropy,
@@ -649,6 +819,8 @@ oauth_client <- function(
     client_assertion_alg = client_assertion_alg %||% NA_character_,
     client_assertion_audience = client_assertion_audience %||% NA_character_,
     scope_validation = scope_validation,
+    claims_validation = claims_validation,
+    required_acr_values = required_acr_values,
     introspect = introspect,
     introspect_elements = introspect_elements
   )

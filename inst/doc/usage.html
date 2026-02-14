@@ -419,7 +419,7 @@ function. You may place it near the top-level of your UI (e.g., inside
 <code>fluidPage()</code>, <code>tagList()</code>, or
 <code>bslib::page()</code>).</p>
 <p>Note also that you must access the app in a regular browser. This is
-because the necesarry redirects that the browser must perform can
+because the necessary redirects that the browser must perform can
 usually not be handled inside embedded viewers of IDEs like RStudio or
 Positron.</p>
 </div>
@@ -719,7 +719,12 @@ for details about audit and trace hooks.</p>
 leeway (seconds) for ID token
 <code>exp</code>/<code>iat</code>/<code>nbf</code> checks and state
 payload <code>issued_at</code> future check</li>
-<li><code>options(shinyOAuth.allowed_non_https_hosts = c(&quot;localhost&quot;, &quot;127.0.0.1&quot;, &quot;::1&quot;))</code>
+<li><code>options(shinyOAuth.max_id_token_lifetime = 86400)</code> –
+maximum allowed ID token lifetime in seconds (<code>exp - iat</code>).
+Tokens whose lifetime exceeds this cap are rejected (OIDC Core §3.1.3.7
+rule 9). Default <code>86400</code> (24 hours). Set to <code>Inf</code>
+to disable the check</li>
+<li><code>options(shinyOAuth.allowed_non_https_hosts = c(&quot;localhost&quot;, &quot;127.0.0.1&quot;, &quot;::1&quot;, &quot;[::1]&quot;))</code>
 - allows hosts to use <code>http://</code> scheme instead of
 <code>https://</code></li>
 <li><code>options(shinyOAuth.allowed_hosts = c())</code> – when
@@ -761,7 +766,7 @@ following options:</p>
 blocked: <code>response_type</code>, <code>client_id</code>,
 <code>redirect_uri</code>, <code>state</code>, <code>scope</code>,
 <code>code_challenge</code>, <code>code_challenge_method</code>,
-<code>nonce</code></li>
+<code>nonce</code>, <code>claims</code></li>
 <li><code>options(shinyOAuth.unblock_token_params = c(...))</code> –
 allows overriding the specified token exchange parameters. Default
 blocked: <code>grant_type</code>, <code>code</code>,
@@ -772,6 +777,37 @@ blocked: <code>grant_type</code>, <code>code</code>,
 – allows overriding the specified token exchange headers
 (case-insensitive). Default blocked: <code>Authorization</code>,
 <code>Cookie</code></li>
+</ul>
+</div>
+<div id="async-timeout-mirai" class="section level3">
+<h3>Async timeout (mirai)</h3>
+<ul>
+<li><code>options(shinyOAuth.async_timeout = 10000)</code> – per-task
+timeout in milliseconds for mirai async tasks. When using mirai with
+dispatcher (the default), timed-out tasks are automatically cancelled
+and resolve as a mirai error. Default is <code>NULL</code> (no timeout).
+Ignored when falling back to the ‘future’ backend</li>
+</ul>
+</div>
+<div id="async-condition-replay" class="section level3">
+<h3>Async condition replay</h3>
+<ul>
+<li><code>options(shinyOAuth.replay_async_conditions = FALSE)</code> –
+when <code>FALSE</code>, warnings and messages captured from async
+workers are silently discarded instead of being re-emitted on the main R
+process. Default is <code>TRUE</code> (replay all captured conditions).
+Useful if worker diagnostics are too noisy or handled separately via
+<code>trace_hook</code> / <code>audit_hook</code></li>
+</ul>
+</div>
+<div id="token-lifetime-fallback" class="section level3">
+<h3>Token lifetime fallback</h3>
+<ul>
+<li><code>options(shinyOAuth.default_expires_in = 3600)</code> –
+fallback token lifetime (in seconds) when the provider omits
+<code>expires_in</code> from the token response. Without this option the
+lifetime defaults to <code>Inf</code> and proactive refresh will never
+trigger. A warning is emitted in either case</li>
 </ul>
 </div>
 <div id="http-settings-timeout-retries-user-agent" class="section level3">
@@ -800,6 +836,27 @@ JWKS) refuse to follow redirects and reject 3xx responses. This prevents
 authorization codes, tokens, and PKCE verifiers from leaking to redirect
 targets. Only set to <code>TRUE</code> if your provider legitimately
 requires redirect-following</li>
+<li><code>options(shinyOAuth.max_body_bytes = 1048576)</code> – maximum
+response body size (bytes, default 1 MiB) accepted from OAuth endpoints
+(token, introspection, userinfo, discovery, JWKS). Curl aborts the
+transfer early when <code>Content-Length</code> exceeds this limit; a
+post-download guard catches chunked responses. Increase if a provider
+legitimately returns larger payloads</li>
+</ul>
+</div>
+<div id="state-store" class="section level3">
+<h3>State store</h3>
+<ul>
+<li><code>options(shinyOAuth.allow_non_atomic_state_store = TRUE)</code>
+– allow non-atomic <code>$get()</code> + <code>$remove()</code> fallback
+for shared state stores (e.g., <code>cachem::cache_disk()</code>) that
+do not implement <code>$take()</code>. By default, shinyOAuth errors
+when a non-<code>cachem::cache_mem()</code> store lacks
+<code>$take()</code>, because the non-atomic fallback cannot guarantee
+single-use state consumption under concurrent access (TOCTOU replay
+window). Setting this option to <code>TRUE</code> downgrades the error
+to a one-time warning and allows the fallback to proceed. Not
+recommended for production without additional replay protection.</li>
 </ul>
 </div>
 <div id="developmentdebugging" class="section level3">
@@ -809,6 +866,8 @@ requires redirect-following</li>
 browser cookie binding</li>
 <li><code>options(shinyOAuth.skip_id_sig = TRUE)</code> – skip ID token
 signature verification</li>
+<li><code>options(shinyOAuth.allow_unsigned_userinfo_jwt = TRUE)</code>
+– accept unsigned (<code>alg=none</code>) UserInfo JWTs</li>
 <li><code>options(shinyOAuth.debug = TRUE)</code> – re‑raise errors
 during token exchange</li>
 </ul>
@@ -852,6 +911,11 @@ maximum byte length of the <code>error</code> query parameter</li>
 <li><code>options(shinyOAuth.callback_max_error_description_bytes = 4096)</code>
 – maximum byte length of the <code>error_description</code> query
 parameter</li>
+<li><code>options(shinyOAuth.callback_max_error_uri_bytes = 2048)</code>
+– maximum byte length of the <code>error_uri</code> query parameter</li>
+<li><code>options(shinyOAuth.callback_max_iss_bytes = 2048)</code> –
+maximum byte length of the <code>iss</code> query parameter (RFC 9207
+issuer identification)</li>
 <li><code>options(shinyOAuth.callback_max_query_bytes = &lt;derived&gt;)</code>
 – maximum total byte length of the raw callback query string (pre-parse
 guard)</li>
@@ -889,10 +953,16 @@ mitigation is to sanitize user inputs before rendering them in the UI
 Shiny Server Pro, RStudio Connect, Docker/Kubernetes replicas, or any
 non‑sticky load balancer), you must ensure that:</p>
 <ul>
-<li>All workers share the same state store (e.g.,
-<code>cachem::cache_disk()</code> pointing at a shared directory, or a
-custom cachem backend; the default <code>cachem::cache_mem()</code> is
-per‑process only and is then not shared)</li>
+<li>All workers share the same state store with atomic single-use
+semantics. Use <code>custom_cache()</code> with an atomic
+<code>$take()</code> method backed by a shared store (e.g., Redis
+<code>GETDEL</code>, SQL <code>DELETE ... RETURNING</code>). Plain
+<code>cachem::cache_disk()</code> is not safe as a shared state store
+because its <code>$get()</code> + <code>$remove()</code> are not atomic
+and may allow replay attacks under concurrent access; the default
+<code>cachem::cache_mem()</code> is per‑process only and is not shared.
+See <code>?custom_cache</code> for details on implementing
+<code>$take()</code>.</li>
 <li>All workers share the same state key (e.g., read from environment
 variable; by default, a random key is generated per client instance
 which is then not shared)</li>
@@ -935,6 +1005,13 @@ expose tokens in UI or logs</li>
 monitor these logs</li>
 <li>Consider enabling automatic revocation on session end
 (<code>revoke_on_session_end = TRUE</code>)</li>
+<li>If your provider can return UserInfo as a signed JWT
+(<code>Content-Type: application/jwt</code>), set
+<code>userinfo_signed_jwt_required = TRUE</code> in your
+<code>OAuthProvider</code> to prevent downgrade to plain JSON. Without
+this flag, shinyOAuth verifies any JWT it receives, but a misconfigured
+provider or man-in-the-middle could return unsigned JSON claims instead,
+bypassing signature verification.</li>
 <li>Use a provider which enforces strong authentication (e.g.,
 multi-factor authentication)</li>
 <li>Set Content Security Policy (CSP) headers to restrict resource

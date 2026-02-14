@@ -17,6 +17,7 @@ oauth_provider(
   pkce_method = "S256",
   userinfo_required = NULL,
   userinfo_id_token_match = NULL,
+  userinfo_signed_jwt_required = FALSE,
   userinfo_id_selector = function(userinfo) userinfo$sub,
   id_token_required = NULL,
   id_token_validation = NULL,
@@ -32,7 +33,8 @@ oauth_provider(
   allowed_algs = c("RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256",
     "ES384", "ES512", "EdDSA"),
   allowed_token_types = c("Bearer"),
-  leeway = getOption("shinyOAuth.leeway", 30)
+  leeway = getOption("shinyOAuth.leeway", 30),
+  id_token_at_hash_required = FALSE
 )
 }
 \arguments{
@@ -92,6 +94,25 @@ the integrity of the user information by confirming that both sources agree on t
 For \code{\link[=oauth_provider]{oauth_provider()}}, when not explicitly supplied, this is inferred as
 \code{TRUE} only if both \code{userinfo_required} and \code{id_token_validation} are \code{TRUE};
 otherwise it defaults to \code{FALSE}.}
+
+\item{userinfo_signed_jwt_required}{Whether to require that the userinfo
+endpoint returns a signed JWT (\code{Content-Type: application/jwt}) whose
+signature can be verified against the provider's JWKS. When \code{TRUE}:
+\itemize{
+\item If the userinfo response is not \code{application/jwt}, authentication fails.
+\item If the JWT uses \code{alg=none} or an algorithm not in \code{allowed_algs},
+authentication fails.
+\item If signature verification fails (JWKS fetch error, no compatible keys,
+or invalid signature), authentication fails.
+}
+This prevents an attacker or misconfigured provider from bypassing signature
+verification by returning unsigned claims as plain JSON or \code{alg=none} JWTs.
+Requires \code{userinfo_required = TRUE} and a valid \code{issuer} (for JWKS).
+Defaults to \code{FALSE}.
+
+\code{oauth_provider_oidc_discover()} will automatically enable this when the
+OIDC discovery document advertises \code{userinfo_signing_alg_values_supported}
+with algorithms that overlap the caller's \code{allowed_algs}.}
 
 \item{userinfo_id_selector}{A function that extracts the user ID from the userinfo response.#'
 Should take a single argument (the userinfo list) and return the user ID
@@ -206,6 +227,13 @@ fails fast rather than misusing the token. Set \code{allowed_token_types = chara
 \item{leeway}{Clock skew leeway (seconds) applied to ID token \code{exp}/\code{iat}/\code{nbf} checks
 and state payload \code{issued_at} future check. Default 30. Can be globally
 overridden via option \code{shinyOAuth.leeway}}
+
+\item{id_token_at_hash_required}{Whether to require the \code{at_hash} (Access Token hash)
+claim in the ID token. When \code{TRUE}, login fails if the ID token does not
+contain an \code{at_hash} claim or if the claim does not match the access token.
+When \code{FALSE} (default), \code{at_hash} is validated only when present.
+Requires \code{id_token_validation = TRUE}. See OIDC Core section 3.1.3.8 and
+section 3.2.2.9.}
 }
 \value{
 \link{OAuthProvider} object

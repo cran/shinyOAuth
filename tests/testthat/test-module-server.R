@@ -474,7 +474,7 @@ testthat::test_that("indefinite_session keeps authenticated TRUE even when expir
   )
 })
 
-testthat::test_that("provider error in query sets error and authenticated FALSE", {
+testthat::test_that("provider error with valid state sets provider error and authenticated FALSE", {
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -499,7 +499,12 @@ testthat::test_that("provider error in query sets error and authenticated FALSE"
       # Flush any pending reactive events from module initialization
       session$flushReact()
 
-      values$.process_query("?error=access_denied&error_description=Nope")
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+      values$.process_query(paste0(
+        "?error=access_denied&error_description=Nope&state=",
+        enc
+      ))
       session$flushReact()
       testthat::expect_identical(values$error, "access_denied")
       testthat::expect_match(values$error_description, "Nope")
@@ -508,6 +513,112 @@ testthat::test_that("provider error in query sets error and authenticated FALSE"
       testthat::expect_true(
         any(seen == "shinyOAuth:clearQueryAndFixTitle"),
         info = "Expected clearQueryAndFixTitle on provider error response"
+      )
+    }
+  )
+})
+
+testthat::test_that("error_uri from provider error callback is surfaced", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session$flushReact()
+
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+
+      # Provider returns error + error_description + error_uri
+      values$.process_query(paste0(
+        "?error=access_denied",
+        "&error_description=Nope",
+        "&error_uri=https%3A%2F%2Fprovider.example%2Fhelp%2Faccess_denied",
+        "&state=",
+        enc
+      ))
+      session$flushReact()
+
+      testthat::expect_identical(values$error, "access_denied")
+      testthat::expect_match(values$error_description, "Nope")
+      testthat::expect_identical(
+        values$error_uri,
+        "https://provider.example/help/access_denied"
+      )
+      testthat::expect_false(values$authenticated)
+    }
+  )
+})
+
+testthat::test_that("error_uri is NULL when provider omits it", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session$flushReact()
+
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+
+      # Provider returns error without error_uri
+      values$.process_query(paste0(
+        "?error=server_error&state=",
+        enc
+      ))
+      session$flushReact()
+
+      testthat::expect_identical(values$error, "server_error")
+      testthat::expect_null(values$error_uri)
+    }
+  )
+})
+
+testthat::test_that("oversized error_uri in callback is rejected", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+
+      values$.process_query(
+        paste0(
+          "?error=access_denied&error_uri=",
+          strrep("x", 3000),
+          "&state=",
+          enc
+        )
+      )
+      session$flushReact()
+
+      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_match(
+        values$error_description %||% "",
+        "error_uri"
       )
     }
   )
@@ -603,7 +714,7 @@ testthat::test_that("oversized raw callback query string is rejected", {
         "?code=ok&state=",
         enc,
         "&pad=",
-        strrep("x", 20000)
+        strrep("x", 25000)
       )
 
       called <- FALSE
@@ -760,6 +871,97 @@ testthat::test_that("callback code/state clears query even when token exchange f
         any(seen == "shinyOAuth:clearQueryAndFixTitle"),
         info = "Expected clearQueryAndFixTitle on token-exchange error"
       )
+    }
+  )
+})
+
+testthat::test_that("callback params are cleared when token already exists", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  seen <- character(0)
+  sess <- shiny::MockShinySession$new()
+  orig <- sess$sendCustomMessage
+  sess$sendCustomMessage <- function(type, message) {
+    seen <<- c(seen, type)
+    orig(type, message)
+  }
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    session = sess,
+    expr = {
+      # Drain startup events and isolate this test's message capture.
+      session$flushReact()
+      seen <<- character(0)
+
+      t <- OAuthToken(
+        access_token = "existing",
+        refresh_token = NA_character_,
+        expires_at = as.numeric(Sys.time()) + 3600,
+        id_token = NA_character_
+      )
+      values$token <- t
+
+      values$.process_query("?code=abc&state=s1&foo=1")
+      session$flushReact()
+
+      testthat::expect_true(
+        any(seen == "shinyOAuth:clearQueryAndFixTitle"),
+        info = "Expected clearQueryAndFixTitle when callback params appear with existing token"
+      )
+      testthat::expect_identical(values$token@access_token, "existing")
+    }
+  )
+})
+
+testthat::test_that("query size cap enforced even when token already exists", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      # Seed an existing token so we enter the "already authenticated" branch.
+      t <- OAuthToken(
+        access_token = "existing",
+        refresh_token = NA_character_,
+        expires_at = as.numeric(Sys.time()) + 3600,
+        id_token = NA_character_
+      )
+      values$token <- t
+
+      # Build an oversized query that contains OAuth callback keys.
+      # The default derived cap is ~20480 bytes; use 30 000 to exceed it.
+      big_query <- paste0(
+        "?code=abc&state=s1&pad=",
+        strrep("x", 30000)
+      )
+
+      values$.process_query(big_query)
+      session$flushReact()
+
+      # The oversized query should be rejected before parsing.
+      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_match(
+        values$error_description %||% "",
+        "query string"
+      )
+      # Token must remain untouched.
+      testthat::expect_identical(values$token@access_token, "existing")
     }
   )
 })

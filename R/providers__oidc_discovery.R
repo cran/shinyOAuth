@@ -164,26 +164,39 @@ oauth_provider_oidc_discover <- function(
   # 10) Negotiate allowed ID token algs
   allowed_algs <- .discover_negotiate_algs(allowed_algs, disc, iss)
 
+  # 10b) Forward caller ... args (e.g. userinfo_signed_jwt_required)
+  #      Note: userinfo_signing_alg_values_supported in discovery indicates
+  #      provider *capability*, not that every client receives signed JWTs.
+  #      Whether the userinfo response is application/jwt depends on per-client
+  #      configuration at the provider. Therefore we do NOT auto-enable
+  #      userinfo_signed_jwt_required from discovery; callers must opt in.
+  dots <- list(...)
+
   # 11) Default provider name from issuer when needed
   name <- .discover_default_name(name, iss)
 
   # 12) Construct provider
-  oauth_provider(
-    name = name,
-    auth_url = endpoints$auth_url,
-    token_url = endpoints$token_url,
-    userinfo_url = endpoints$userinfo_url,
-    introspection_url = endpoints$introspection_url,
-    revocation_url = endpoints$revocation_url,
-    issuer = iss,
-    use_nonce = use_nonce,
-    id_token_validation = id_token_validation,
-    use_pkce = use_pkce,
-    token_auth_style = token_auth_style,
-    allowed_algs = allowed_algs,
-    allowed_token_types = allowed_token_types,
-    jwks_host_issuer_match = jwks_host_issuer_match,
-    ...
+  do.call(
+    oauth_provider,
+    c(
+      list(
+        name = name,
+        auth_url = endpoints$auth_url,
+        token_url = endpoints$token_url,
+        userinfo_url = endpoints$userinfo_url,
+        introspection_url = endpoints$introspection_url,
+        revocation_url = endpoints$revocation_url,
+        issuer = iss,
+        use_nonce = use_nonce,
+        id_token_validation = id_token_validation,
+        use_pkce = use_pkce,
+        token_auth_style = token_auth_style,
+        allowed_algs = allowed_algs,
+        allowed_token_types = allowed_token_types,
+        jwks_host_issuer_match = jwks_host_issuer_match
+      ),
+      dots
+    )
   )
 }
 
@@ -283,6 +296,7 @@ oauth_provider_oidc_discover <- function(
 #' @keywords internal
 #' @noRd
 .discover_parse_json <- function(resp) {
+  check_resp_body_size(resp, context = "oidc_discovery")
   ct <- tolower(httr2::resp_header(resp, "content-type") %||% "")
 
   if (!grepl("^application/json", ct)) {
@@ -387,18 +401,7 @@ oauth_provider_oidc_discover <- function(
     return(invisible(TRUE))
   }
 
-  jwks_host <- .discover_normalize_host(
-    httr2::url_parse(jwks_uri)[["hostname"]] %||% ""
-  )
-  if (!nzchar(jwks_host)) {
-    err_config(
-      c(
-        "x" = "Discovery jwks_host must be an absolute URL",
-        "i" = paste0("Got invalid jwks_uri: ", as.character(jwks_uri))
-      ),
-      context = list(jwks_uri = jwks_uri)
-    )
-  }
+  jwks_host <- parse_url_host(jwks_uri, "jwks_uri")
 
   opt_allowed <- getOption("shinyOAuth.allowed_hosts", default = NULL)
   jwks_ok <- if (!is.null(opt_allowed) && length(opt_allowed) > 0) {
@@ -451,19 +454,22 @@ oauth_provider_oidc_discover <- function(
   methods <- disc[["token_endpoint_auth_methods_supported"]] %||% character(0)
   methods <- tolower(as.character(methods))
 
-  # Public clients: if discovery advertises 'none' and PKCE is enabled, prefer
-  # secretless token requests regardless of other advertised methods. We model
-  # this as 'body' style without credentials (code_verifier only).
-  if ("none" %in% methods && isTRUE(use_pkce)) {
-    return("body")
-  }
+  # Conservative default: prefer confidential auth methods first so that
 
-  # Conservative default: prefer client_secret_basic, then client_secret_post.
+  # mixed metadata (e.g. 'none' + 'client_secret_basic') does not silently
+  # drift a confidential client to public-client-like behaviour.
   if ("client_secret_basic" %in% methods) {
     return("header")
   }
 
   if ("client_secret_post" %in% methods) {
+    return("body")
+  }
+
+  # Public clients: if discovery only advertises 'none' (no confidential
+  # methods matched above) and PKCE is enabled, use secretless token requests.
+  # We model this as 'body' style without credentials (code_verifier only).
+  if ("none" %in% methods && isTRUE(use_pkce)) {
     return("body")
   }
 
@@ -561,6 +567,7 @@ oauth_provider_oidc_discover <- function(
 
   overlap
 }
+
 
 #' Internal: derive default name from issuer
 #'

@@ -16,7 +16,8 @@
 #' clear error rather than silently leaking secrets.
 #'
 #' Behavior can be overridden via `options(shinyOAuth.allow_redirect = TRUE)`,
-#' but this is strongly discouraged in production as it undermines security.
+#' but this is gated to test/interactive mode by `allow_redirect()` and will
+#' raise a config error in production.
 #'
 #' @keywords internal
 #' @noRd
@@ -24,8 +25,8 @@ req_no_redirect <- function(req) {
   if (!inherits(req, "httr2_request")) {
     return(req)
   }
-  # Allow redirects only if explicitly enabled (default: FALSE for security)
-  if (isTRUE(getOption("shinyOAuth.allow_redirect", FALSE))) {
+  # Allow redirects only if explicitly enabled AND in test/interactive mode
+  if (allow_redirect()) {
     return(req)
   }
   httr2::req_options(req, followlocation = FALSE)
@@ -39,7 +40,7 @@ req_no_redirect <- function(req) {
 #' attack, or proxy behavior). We should fail rather than parse an empty/wrong
 #' response body.
 #'
-#' Skipped when `options(shinyOAuth.allow_redirect = TRUE)` is set.
+#' Skipped when `allow_redirect()` returns TRUE (test/interactive mode only).
 #'
 #' @param resp httr2 response object
 #' @param context Character string describing the operation for error messages
@@ -49,8 +50,8 @@ req_no_redirect <- function(req) {
 #' @keywords internal
 #' @noRd
 reject_redirect_response <- function(resp, context = "request") {
-  # Skip rejection if redirects are explicitly allowed
-  if (isTRUE(getOption("shinyOAuth.allow_redirect", FALSE))) {
+  # Skip rejection if redirects are explicitly allowed (gated to test/interactive)
+  if (allow_redirect()) {
     return(TRUE)
   }
   if (!inherits(resp, "httr2_response")) {
@@ -132,9 +133,80 @@ add_req_defaults <- function(req) {
       as.character(utils::packageVersion("httr2"))
     )
   }
+  # Max response body size (bytes). Curl aborts the transfer when the server
+  # advertises Content-Length exceeding this value, preventing large allocations
+  # from malicious or compromised endpoints. Default 1 MiB. Chunked responses
+  # without Content-Length are caught post-download by check_resp_body_size().
+  max_bytes <- resolve_max_body_bytes()
+
   req |>
     httr2::req_timeout(t) |>
-    httr2::req_user_agent(ua)
+    httr2::req_user_agent(ua) |>
+    httr2::req_options(maxfilesize = max_bytes)
+}
+
+#' Internal: resolve max body bytes from option
+#'
+#' @return Integer, validated max body bytes (default 1 MiB).
+#' @keywords internal
+#' @noRd
+resolve_max_body_bytes <- function() {
+  max_bytes <- suppressWarnings(
+    as.numeric(getOption("shinyOAuth.max_body_bytes", 1048576L))
+  )
+  if (!is.finite(max_bytes) || is.na(max_bytes) || max_bytes < 1024) {
+    max_bytes <- 1048576L
+  }
+  as.integer(max_bytes)
+}
+
+#' Internal: check response body size before parsing
+#'
+#' Defense-in-depth guard that prevents expensive parsing (JSON, JWT) of
+#' oversized response bodies. Works for both Content-Length and chunked
+#' transfer encoding because it checks the actual downloaded body length.
+#'
+#' @param resp httr2 response object.
+#' @param context Character label for error messages (e.g., "token", "userinfo").
+#' @param max_bytes Maximum allowed body size in bytes; defaults to
+#'   `getOption("shinyOAuth.max_body_bytes", 1048576L)`.
+#'
+#' @return Invisibly TRUE when body is within limits; raises
+#'   `shinyOAuth_parse_error` otherwise.
+#'
+#' @keywords internal
+#' @noRd
+check_resp_body_size <- function(
+  resp,
+  context = "response",
+  max_bytes = resolve_max_body_bytes()
+) {
+  if (!inherits(resp, "httr2_response")) {
+    return(invisible(TRUE))
+  }
+  body_len <- length(resp$body)
+  if (body_len > max_bytes) {
+    err_parse(
+      c(
+        "x" = paste0(
+          "Response body too large during ",
+          context,
+          " (",
+          body_len,
+          " bytes; limit ",
+          max_bytes,
+          ")"
+        ),
+        "i" = "Adjust via `options(shinyOAuth.max_body_bytes = <bytes>)` if the provider legitimately returns large payloads"
+      ),
+      context = list(
+        phase = context,
+        body_bytes = body_len,
+        max_bytes = max_bytes
+      )
+    )
+  }
+  invisible(TRUE)
 }
 
 #' Internal: Perform an httr2 request with retries
@@ -316,6 +388,7 @@ req_with_retry <- function(req) {
 #' @keywords internal
 #' @noRd
 parse_token_response <- function(resp) {
+  check_resp_body_size(resp, context = "token")
   ct <- tolower(httr2::resp_header(resp, "content-type") %||% "")
   body <- httr2::resp_body_string(resp)
 
