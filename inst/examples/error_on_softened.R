@@ -1,9 +1,13 @@
-# Throw an error if any developer-only softening options are enabled
+# Note: error_on_softened() is deprecated because it only checks a narrow subset
+# of shinyOAuth's security-relaxing options
+
+# Throw an error if any softening options that relax default safety
+# protections are enabled
 # Below call does not error if run with default options:
 error_on_softened()
 
 # Below call would error (is therefore not run):
-\dontrun{
-options(shinyOAuth.skip_id_sig = TRUE)
-error_on_softened()
+if (interactive()) {
+  options(shinyOAuth.skip_id_sig = TRUE)
+  error_on_softened()
 }

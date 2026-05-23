@@ -1,0 +1,2109 @@
+make_dpop_test_client <- function(
+  provider,
+  dpop_require_access_token = NULL,
+  dpop_private_key = openssl::rsa_keygen(),
+  dpop_private_key_kid = NULL,
+  dpop_signing_alg = NULL,
+  response_mode = NULL
+) {
+  args <- list(
+    provider = provider,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = character(0),
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    ),
+    dpop_private_key = dpop_private_key,
+    dpop_private_key_kid = dpop_private_key_kid,
+    dpop_signing_alg = dpop_signing_alg,
+    response_mode = response_mode
+  )
+
+  if (!is.null(dpop_require_access_token)) {
+    args$dpop_require_access_token <- dpop_require_access_token
+  }
+
+  do.call(oauth_client, args)
+}
+
+decode_dpop_header <- function(proof) {
+  parts <- strsplit(proof, ".", fixed = TRUE)[[1]]
+  jsonlite::fromJSON(shinyOAuth:::base64url_decode(parts[[1]]))
+}
+
+decode_dpop_payload <- function(proof) {
+  parts <- strsplit(proof, ".", fixed = TRUE)[[1]]
+  jsonlite::fromJSON(shinyOAuth:::base64url_decode(parts[[2]]))
+}
+
+verify_dpop_rs256_signature <- function(proof, pubkey) {
+  parts <- strsplit(proof, ".", fixed = TRUE)[[1]]
+  sig <- shinyOAuth:::base64url_decode_raw(parts[[3]])
+  signed_data <- charToRaw(paste(parts[1:2], collapse = "."))
+  digest <- openssl::sha2(signed_data, size = 256)
+  openssl::signature_verify(
+    digest,
+    sig,
+    hash = NULL,
+    pubkey = pubkey
+  )
+}
+
+test_that("prepare_call includes dpop_jkt in authorization request parameters", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  key <- openssl::rsa_keygen()
+  cli <- make_dpop_test_client(prov, dpop_private_key = key)
+
+  auth_url <- prepare_call(cli, valid_browser_token())
+  dpop_jkt <- parse_query_param(auth_url, "dpop_jkt", decode = TRUE)
+  expected_jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(key)
+  )
+
+  expect_identical(dpop_jkt, expected_jkt)
+})
+
+test_that("prepare_call can combine DPoP dpop_jkt with form_post response_mode", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  key <- openssl::rsa_keygen()
+  cli <- make_dpop_test_client(
+    prov,
+    dpop_private_key = key,
+    response_mode = "form_post"
+  )
+
+  auth_url <- prepare_call(cli, valid_browser_token())
+
+  expect_identical(
+    parse_query_param(auth_url, "response_mode", decode = TRUE),
+    "form_post"
+  )
+  expect_identical(
+    parse_query_param(auth_url, "dpop_jkt", decode = TRUE),
+    shinyOAuth:::compute_jwk_thumbprint(shinyOAuth:::dpop_public_jwk(key))
+  )
+})
+
+test_that("resource_req builds DPoP authorization and proof headers", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov, dpop_require_access_token = FALSE)
+  tok <- OAuthToken(
+    access_token = "access-token",
+    token_type = "DPoP",
+    userinfo = list()
+  )
+
+  req <- resource_req(
+    token = tok,
+    url = "https://resource.example.com/api",
+    oauth_client = cli
+  )
+
+  dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+  expect_identical(dry$headers$authorization, "DPoP access-token")
+  expect_true(nzchar(dry$headers$dpop))
+
+  payload <- decode_dpop_payload(dry$headers$dpop)
+  expect_identical(payload$htm, "GET")
+  expect_identical(payload$htu, "https://resource.example.com/api")
+  expect_true(nzchar(payload$ath))
+})
+
+test_that("resource_req rejects non-ASCII DPoP access tokens", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov)
+  tok <- OAuthToken(
+    access_token = "caf\u00e9",
+    token_type = "DPoP",
+    userinfo = list()
+  )
+
+  expect_error(
+    resource_req(
+      token = tok,
+      url = "https://resource.example.com/api",
+      oauth_client = cli
+    ),
+    class = "shinyOAuth_input_error",
+    regexp = "ASCII"
+  )
+})
+
+test_that("resource_req rejects DPoP cnf.jkt mismatches", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov)
+  wrong_key <- openssl::rsa_keygen()
+  wrong_jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(wrong_key)
+  )
+  tok <- OAuthToken(
+    access_token = "access-token",
+    token_type = "DPoP",
+    userinfo = list(),
+    cnf = list(jkt = wrong_jkt)
+  )
+
+  expect_error(
+    resource_req(
+      token = tok,
+      url = "https://resource.example.com/api",
+      oauth_client = cli
+    ),
+    class = "shinyOAuth_input_error",
+    regexp = "cnf\\.jkt thumbprint"
+  )
+})
+
+test_that("resource_req rejects strict DPoP JWTs without cnf.jkt", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov, dpop_require_access_token = TRUE)
+  tok <- OAuthToken(
+    access_token = build_dummy_jwt(list(sub = "user-1")),
+    token_type = "DPoP",
+    userinfo = list()
+  )
+
+  expect_error(
+    resource_req(
+      token = tok,
+      url = "https://resource.example.com/api",
+      oauth_client = cli
+    ),
+    class = "shinyOAuth_input_error",
+    regexp = "cnf\\.jkt"
+  )
+})
+
+test_that("resource_req keeps raw JWT access tokens on Bearer by default", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  key <- openssl::rsa_keygen()
+  cli <- make_dpop_test_client(prov, dpop_private_key = key)
+  jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(key)
+  )
+  raw_token <- build_dummy_jwt(list(
+    sub = "user-1",
+    cnf = list(jkt = jkt)
+  ))
+
+  req <- resource_req(
+    token = raw_token,
+    url = "https://resource.example.com/api",
+    oauth_client = cli
+  )
+
+  dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+  expect_identical(dry$headers$authorization, paste("Bearer", raw_token))
+  expect_null(dry$headers$dpop)
+})
+
+test_that("resource_req infers DPoP from explicit OAuthToken cnf.jkt", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  key <- openssl::rsa_keygen()
+  cli <- make_dpop_test_client(prov, dpop_private_key = key)
+  jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(key)
+  )
+  tok <- OAuthToken(
+    access_token = build_dummy_jwt(list(sub = "user-1")),
+    userinfo = list(),
+    cnf = list(jkt = jkt)
+  )
+
+  req <- resource_req(
+    token = tok,
+    url = "https://resource.example.com/api",
+    oauth_client = cli
+  )
+
+  dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+  expect_identical(dry$headers$authorization, paste("DPoP", tok@access_token))
+  expect_true(nzchar(dry$headers$dpop))
+})
+
+test_that("resource_req requires a DPoP-capable client for DPoP tokens", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  tok <- OAuthToken(
+    access_token = "access-token",
+    token_type = "DPoP",
+    userinfo = list()
+  )
+
+  expect_error(
+    resource_req(
+      token = tok,
+      url = "https://resource.example.com/api"
+    ),
+    regexp = "oauth_client must be an OAuthClient",
+    class = "shinyOAuth_input_error"
+  )
+
+  cli_no_dpop <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = character(0),
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    )
+  )
+
+  expect_error(
+    resource_req(
+      token = tok,
+      url = "https://resource.example.com/api",
+      oauth_client = cli_no_dpop
+    ),
+    regexp = "dpop_private_key",
+    class = "shinyOAuth_input_error"
+  )
+})
+
+test_that("oauth_client defaults to strict access-token enforcement for DPoP", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+
+  cli <- expect_no_warning(
+    oauth_client(
+      provider = prov,
+      client_id = "abc",
+      client_secret = "",
+      redirect_uri = "http://localhost:8100",
+      scopes = character(0),
+      state_store = cachem::cache_mem(max_age = 600),
+      state_key = paste0(
+        "0123456789abcdefghijklmnopqrstuvwxyz",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      ),
+      dpop_private_key = openssl::rsa_keygen()
+    )
+  )
+
+  expect_true(isTRUE(cli@dpop_require_access_token))
+})
+
+test_that("oauth_client does not warn when Bearer fallback is explicit for DPoP", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+
+  cli <- expect_no_warning(
+    oauth_client(
+      provider = prov,
+      client_id = "abc",
+      client_secret = "",
+      redirect_uri = "http://localhost:8100",
+      scopes = character(0),
+      state_store = cachem::cache_mem(max_age = 600),
+      state_key = paste0(
+        "0123456789abcdefghijklmnopqrstuvwxyz",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+      ),
+      dpop_private_key = openssl::rsa_keygen(),
+      dpop_require_access_token = FALSE
+    )
+  )
+
+  expect_false(isTRUE(cli@dpop_require_access_token))
+})
+
+test_that("resource_req ignores custom Authorization and DPoP headers", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov)
+  tok <- OAuthToken(
+    access_token = "access-token",
+    token_type = "DPoP",
+    userinfo = list()
+  )
+
+  expect_warning(
+    req <- resource_req(
+      token = tok,
+      url = "https://resource.example.com/api",
+      oauth_client = cli,
+      headers = list(
+        Authorization = "Bearer attacker-token",
+        DPoP = "attacker-proof",
+        `X-Test` = "ok"
+      )
+    ),
+    regexp = "Ignoring custom authentication headers",
+    fixed = TRUE
+  )
+
+  dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+  expect_identical(dry$headers$authorization, "DPoP access-token")
+  expect_true(nzchar(dry$headers$dpop))
+  expect_false(identical(dry$headers$dpop, "attacker-proof"))
+  expect_identical(dry$headers$`x-test`, "ok")
+
+  payload <- decode_dpop_payload(dry$headers$dpop)
+  expect_identical(
+    payload$ath,
+    shinyOAuth:::dpop_access_token_hash(
+      "access-token"
+    )
+  )
+})
+
+test_that("resource_req signs DPoP proof with method and target URI", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov)
+  tok <- OAuthToken(
+    access_token = "access-token",
+    token_type = "DPoP",
+    userinfo = list()
+  )
+
+  req <- resource_req(
+    token = tok,
+    url = "https://resource.example.com/api?from=url",
+    method = "patch",
+    query = list(a = 1),
+    oauth_client = cli
+  )
+
+  expect_identical(req$method, "PATCH")
+  expect_match(req$url, "from=url", fixed = TRUE)
+  expect_match(req$url, "a=1", fixed = TRUE)
+
+  dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+  payload <- decode_dpop_payload(dry$headers$dpop)
+
+  expect_identical(payload$htm, "PATCH")
+  expect_identical(payload$htu, "https://resource.example.com/api")
+  expect_identical(
+    payload$ath,
+    shinyOAuth:::dpop_access_token_hash(
+      "access-token"
+    )
+  )
+})
+
+test_that("dpop_target_uri normalizes scheme and host case and strips default ports", {
+  expect_identical(
+    shinyOAuth:::dpop_target_uri(
+      "HTTPS://API.EXAMPLE.COM:443/path?from=url#frag"
+    ),
+    "https://api.example.com/path"
+  )
+
+  expect_identical(
+    shinyOAuth:::dpop_target_uri("http://API.EXAMPLE.COM:80/path?a=1"),
+    "http://api.example.com/path"
+  )
+
+  expect_identical(
+    shinyOAuth:::dpop_target_uri("https://API.EXAMPLE.COM:8443/path?a=1"),
+    "https://api.example.com:8443/path"
+  )
+})
+
+test_that("build_dpop_proof creates a signed proof with bound claims", {
+  key <- openssl::rsa_keygen()
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(
+    prov,
+    dpop_private_key = key,
+    dpop_private_key_kid = "dpop-kid-1"
+  )
+
+  proof <- shinyOAuth:::build_dpop_proof(
+    cli,
+    method = "post",
+    url = "https://resource.example.com/api?ignored=true#frag",
+    access_token = "access-token",
+    nonce = "nonce-1"
+  )
+  proof2 <- shinyOAuth:::build_dpop_proof(
+    cli,
+    method = "POST",
+    url = "https://resource.example.com/api",
+    access_token = "access-token"
+  )
+
+  header <- decode_dpop_header(proof)
+  payload <- decode_dpop_payload(proof)
+  payload2 <- decode_dpop_payload(proof2)
+
+  expect_identical(header$typ, "dpop+jwt")
+  expect_identical(header$alg, "RS256")
+  expect_identical(header$kid, "dpop-kid-1")
+  expect_true(is.list(header$jwk))
+  expect_length(
+    intersect(
+      names(header$jwk),
+      c("d", "p", "q", "dp", "dq", "qi", "oth", "k")
+    ),
+    0L
+  )
+
+  pub <- openssl::read_pubkey(openssl::write_pem(key))
+  expect_true(verify_dpop_rs256_signature(proof, pub))
+
+  expect_identical(payload$htm, "POST")
+  expect_identical(payload$htu, "https://resource.example.com/api")
+  expect_identical(
+    payload$ath,
+    shinyOAuth:::dpop_access_token_hash("access-token")
+  )
+  expect_identical(payload$nonce, "nonce-1")
+  expect_true(nzchar(payload$jti))
+  expect_false(identical(payload$jti, payload2$jti))
+  expect_lte(abs(as.numeric(Sys.time()) - as.numeric(payload$iat)), 5)
+})
+
+test_that("build_dpop_proof rejects invalid nonce syntax", {
+  key <- openssl::rsa_keygen()
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(
+    prov,
+    dpop_private_key = key,
+    dpop_private_key_kid = "dpop-kid-1"
+  )
+
+  expect_error(
+    shinyOAuth:::build_dpop_proof(
+      cli,
+      method = "POST",
+      url = "https://resource.example.com/api",
+      nonce = "bad nonce"
+    ),
+    regexp = "DPoP nonce",
+    class = "shinyOAuth_input_error"
+  )
+})
+
+test_that("resp_get_dpop_nonce enforces RFC 9449 syntax and size bounds", {
+  valid_resp <- httr2::response(
+    url = "https://example.com/token",
+    status = 400,
+    headers = list("dpop-nonce" = "nonce-1"),
+    body = charToRaw("{}")
+  )
+  invalid_space_resp <- httr2::response(
+    url = "https://example.com/token",
+    status = 400,
+    headers = list("dpop-nonce" = "nonce with space"),
+    body = charToRaw("{}")
+  )
+  invalid_backslash_resp <- httr2::response(
+    url = "https://example.com/token",
+    status = 400,
+    headers = list("dpop-nonce" = "nonce\\value"),
+    body = charToRaw("{}")
+  )
+  oversized_resp <- httr2::response(
+    url = "https://example.com/token",
+    status = 400,
+    headers = list(
+      "dpop-nonce" = paste(rep("a", 513L), collapse = "")
+    ),
+    body = charToRaw("{}")
+  )
+
+  expect_identical(shinyOAuth:::resp_get_dpop_nonce(valid_resp), "nonce-1")
+  expect_true(is.na(shinyOAuth:::resp_get_dpop_nonce(invalid_space_resp)))
+  expect_true(is.na(shinyOAuth:::resp_get_dpop_nonce(invalid_backslash_resp)))
+  expect_true(is.na(shinyOAuth:::resp_get_dpop_nonce(oversized_resp)))
+})
+
+test_that("oauth_client rejects incompatible explicit DPoP signing algs", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+
+  expect_error(
+    make_dpop_test_client(
+      prov,
+      dpop_signing_alg = "eddsa"
+    ),
+    regexp = paste0(
+      "dpop_signing_alg 'EdDSA' is incompatible with DPoP"
+    )
+  )
+
+  key_ec <- try(openssl::ec_keygen(curve = "P-256"), silent = TRUE)
+  if (inherits(key_ec, "try-error")) {
+    testthat::skip("EC key generation not supported on this platform")
+  }
+
+  expect_error(
+    make_dpop_test_client(
+      prov,
+      dpop_private_key = key_ec,
+      dpop_signing_alg = "ES512"
+    ),
+    regexp = paste(
+      "dpop_signing_alg 'ES512' is incompatible",
+      "with the provided dpop_private_key"
+    )
+  )
+
+  key_ed <- try(openssl::ed25519_keygen(), silent = TRUE)
+  if (inherits(key_ed, "try-error")) {
+    testthat::skip("Ed25519 key generation not supported on this platform")
+  }
+
+  expect_error(
+    make_dpop_test_client(
+      prov,
+      dpop_private_key = key_ed
+    ),
+    regexp = paste(
+      "outbound DPoP proofs currently support RSA and ECDSA",
+      "private keys only"
+    )
+  )
+})
+
+test_that("oauth_client enforces provider-advertised DPoP signing algs", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  prov@dpop_signing_alg_values_supported <- "ES256"
+
+  expect_error(
+    make_dpop_test_client(
+      prov,
+      dpop_signing_alg = "RS256"
+    ),
+    regexp = paste0(
+      "dpop_signing_alg 'RS256' is not supported by provider ",
+      "dpop_signing_alg_values_supported"
+    )
+  )
+
+  expect_error(
+    make_dpop_test_client(prov),
+    regexp = paste0(
+      "dpop_signing_alg 'RS256' is not supported by provider ",
+      "dpop_signing_alg_values_supported"
+    )
+  )
+
+  key_ec <- try(openssl::ec_keygen(curve = "P-256"), silent = TRUE)
+  if (inherits(key_ec, "try-error")) {
+    testthat::skip("EC key generation not supported on this platform")
+  }
+
+  cli <- make_dpop_test_client(
+    prov,
+    dpop_private_key = key_ec,
+    dpop_signing_alg = "ES256"
+  )
+
+  testthat::expect_s3_class(cli, "shinyOAuth::OAuthClient")
+})
+
+test_that("build_dpop_proof rejects incompatible resolved algs", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov)
+
+  testthat::local_mocked_bindings(
+    resolve_dpop_alg = function(client) {
+      "EdDSA"
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    shinyOAuth:::build_dpop_proof(
+      cli,
+      method = "GET",
+      url = "https://resource.example.com/api"
+    ),
+    regexp = paste(
+      "dpop_signing_alg 'EdDSA' is incompatible",
+      "with the configured dpop_private_key"
+    )
+  )
+})
+
+test_that("verify_token_type_allowlist enforces DPoP client requirements", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  prov@allowed_token_types <- c("Bearer", "DPoP")
+
+  cli_no_dpop <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = character(0),
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    )
+  )
+
+  expect_error(
+    shinyOAuth:::verify_token_type_allowlist(
+      cli_no_dpop,
+      list(access_token = "t", token_type = "DPoP")
+    ),
+    regexp = "dpop_private_key",
+    class = "shinyOAuth_token_error"
+  )
+
+  cli_strict <- make_dpop_test_client(
+    prov,
+    dpop_require_access_token = TRUE
+  )
+
+  cli_default <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = character(0),
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    ),
+    dpop_private_key = openssl::rsa_keygen()
+  )
+
+  cli_optional <- make_dpop_test_client(
+    prov,
+    dpop_require_access_token = FALSE
+  )
+
+  expect_error(
+    shinyOAuth:::verify_token_type_allowlist(
+      cli_default,
+      list(access_token = "t", token_type = "Bearer")
+    ),
+    regexp = "Expected token_type = DPoP",
+    class = "shinyOAuth_token_error"
+  )
+
+  expect_silent(
+    shinyOAuth:::verify_token_type_allowlist(
+      cli_optional,
+      list(access_token = "t", token_type = "Bearer")
+    )
+  )
+
+  expect_error(
+    shinyOAuth:::verify_token_type_allowlist(
+      cli_strict,
+      list(access_token = "t", token_type = "Bearer")
+    ),
+    regexp = "Expected token_type = DPoP",
+    class = "shinyOAuth_token_error"
+  )
+})
+
+test_that("verify_token_type_allowlist accepts DPoP when client enables it", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  expect_false(any(tolower(prov@allowed_token_types) == "dpop"))
+
+  cli <- make_dpop_test_client(prov)
+
+  expect_silent(
+    shinyOAuth:::verify_token_type_allowlist(
+      cli,
+      list(access_token = "t", token_type = "DPoP")
+    )
+  )
+})
+
+test_that("verify_token_set rejects DPoP cnf.jkt mismatches during exchange and refresh", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov)
+  wrong_key <- openssl::rsa_keygen()
+  wrong_jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(wrong_key)
+  )
+
+  expect_mismatch <- function(is_refresh) {
+    expect_error(
+      shinyOAuth:::verify_token_set(
+        cli,
+        token_set = list(
+          access_token = "at-1",
+          token_type = "DPoP",
+          expires_in = 60,
+          cnf = list(jkt = wrong_jkt)
+        ),
+        nonce = NULL,
+        is_refresh = is_refresh,
+        requested_scopes = character(0),
+        prior_granted_scopes = character(0)
+      ),
+      class = "shinyOAuth_token_error",
+      regexp = "cnf\\.jkt thumbprint"
+    )
+  }
+
+  expect_mismatch(FALSE)
+  expect_mismatch(TRUE)
+})
+
+test_that("verify_token_set rejects JWT DPoP access tokens without cnf.jkt in strict mode", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  raw_token <- build_dummy_jwt(list(sub = "user-1"))
+
+  expect_error(
+    shinyOAuth:::verify_token_set(
+      make_dpop_test_client(prov, dpop_require_access_token = TRUE),
+      token_set = list(
+        access_token = raw_token,
+        token_type = "DPoP",
+        expires_in = 60
+      ),
+      nonce = NULL,
+      is_refresh = FALSE,
+      requested_scopes = character(0),
+      prior_granted_scopes = character(0)
+    ),
+    class = "shinyOAuth_token_error",
+    regexp = "cnf\\.jkt"
+  )
+
+  expect_silent(
+    shinyOAuth:::verify_token_set(
+      make_dpop_test_client(prov, dpop_require_access_token = FALSE),
+      token_set = list(
+        access_token = raw_token,
+        token_type = "DPoP",
+        expires_in = 60
+      ),
+      nonce = NULL,
+      is_refresh = FALSE,
+      requested_scopes = character(0),
+      prior_granted_scopes = character(0)
+    )
+  )
+})
+
+test_that("strict DPoP rejects introspection results without cnf.jkt", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  cli <- make_dpop_test_client(prov, dpop_require_access_token = TRUE)
+  tok <- OAuthToken(
+    access_token = "opaque-access-token",
+    token_type = "DPoP",
+    userinfo = list()
+  )
+
+  expect_error(
+    shinyOAuth:::validate_observed_dpop_cnf_required(
+      oauth_client = cli,
+      token = tok,
+      introspection_result = list(raw = list(active = TRUE)),
+      error_context = "token",
+      phase = "exchange_code"
+    ),
+    class = "shinyOAuth_token_error",
+    regexp = "cnf\\.jkt"
+  )
+})
+
+test_that("DPoP nonce cache is bounded by age and entry count", {
+  info <- shinyOAuth:::dpop_nonce_cache$info()
+
+  expect_identical(info$max_age, 300)
+  expect_identical(info$max_n, 256)
+  expect_identical(info$evict, "lru")
+})
+
+test_that("swap_code_for_token_set retries DPoP nonce challenges once", {
+  state <- new.env(parent = emptyenv())
+  state$count <- 0L
+  state$first_has_nonce <- NA
+  state$second_nonce <- NA_character_
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, idempotent = TRUE) {
+      state$count <- state$count + 1L
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+      if (state$count == 1L) {
+        state$first_has_nonce <- "nonce" %in% names(payload)
+      } else {
+        state$second_nonce <- payload$nonce %||% NA_character_
+      }
+
+      if (state$count == 1L) {
+        return(httr2::response(
+          url = as.character(req$url),
+          status = 400,
+          headers = list(
+            "content-type" = "application/json",
+            "www-authenticate" = 'DPoP error="use_dpop_nonce"',
+            "dpop-nonce" = "nonce-1"
+          ),
+          body = charToRaw('{"error":"use_dpop_nonce"}')
+        ))
+      }
+
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list(
+          "content-type" = "application/json"
+        ),
+        body = charToRaw(
+          '{"access_token":"at-1","token_type":"DPoP","expires_in":60}'
+        )
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  token_set <- shinyOAuth:::swap_code_for_token_set(
+    cli,
+    code = "code-1",
+    code_verifier = "verifier-1"
+  )
+
+  expect_identical(token_set$access_token, "at-1")
+  expect_identical(token_set$token_type, "DPoP")
+  expect_identical(state$count, 2L)
+  expect_false(isTRUE(state$first_has_nonce))
+  expect_identical(state$second_nonce, "nonce-1")
+})
+
+test_that("swap_code_for_token_set rebuilds JWT client assertions on DPoP nonce challenges", {
+  request_body_text <- function(req) {
+    body <- req$body %||% NULL
+    if (is.null(body)) {
+      return(NA_character_)
+    }
+    if (identical(body$type, "raw")) {
+      return(rawToChar(body$data))
+    }
+    if (identical(body$type, "form")) {
+      data <- body$data %||% list()
+      if (!length(data)) {
+        return("")
+      }
+
+      parts <- unlist(
+        lapply(seq_along(data), function(i) {
+          nm <- names(data)[[i]]
+          paste0(
+            nm,
+            "=",
+            utils::URLencode(as.character(data[[i]])[[1]], reserved = TRUE)
+          )
+        }),
+        use.names = FALSE
+      )
+      return(paste(parts, collapse = "&"))
+    }
+
+    NA_character_
+  }
+
+  state <- new.env(parent = emptyenv())
+  state$count <- 0L
+  state$assertion_jtis <- character()
+  state$proof_nonces <- character()
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "private_key_jwt"
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    client_private_key = openssl::rsa_keygen(),
+    redirect_uri = "http://localhost:8100",
+    scopes = character(0),
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    ),
+    dpop_private_key = openssl::rsa_keygen()
+  )
+
+  testthat::local_mocked_bindings(
+    req_perform = function(req) {
+      state$count <- state$count + 1L
+      body_text <- request_body_text(req)
+      assertion <- parse_query_param(
+        paste0("https://example.com/?", body_text),
+        "client_assertion",
+        decode = TRUE
+      )
+      payload <- shinyOAuth:::parse_jwt_payload(assertion)
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      proof_payload <- decode_dpop_payload(dry$headers$dpop)
+      state$assertion_jtis <- c(
+        state$assertion_jtis,
+        payload$jti %||% NA_character_
+      )
+      state$proof_nonces <- c(
+        state$proof_nonces,
+        proof_payload$nonce %||% ""
+      )
+
+      if (state$count == 1L) {
+        return(httr2::response(
+          url = as.character(req$url),
+          status = 400,
+          headers = list(
+            "content-type" = "application/json",
+            "www-authenticate" = 'DPoP error="use_dpop_nonce"',
+            "dpop-nonce" = "nonce-1"
+          ),
+          body = charToRaw('{"error":"use_dpop_nonce"}')
+        ))
+      }
+
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list(
+          "content-type" = "application/json"
+        ),
+        body = charToRaw(
+          '{"access_token":"at-1","token_type":"DPoP","expires_in":60}'
+        )
+      )
+    },
+    .package = "httr2"
+  )
+
+  token_set <- shinyOAuth:::swap_code_for_token_set(
+    cli,
+    code = "code-1",
+    code_verifier = "verifier-1"
+  )
+
+  expect_identical(token_set$access_token, "at-1")
+  expect_identical(token_set$token_type, "DPoP")
+  expect_length(unique(state$assertion_jtis), 2L)
+  expect_identical(state$proof_nonces, c("", "nonce-1"))
+})
+
+test_that("req_with_dpop_retry retries nonce challenges for non-idempotent requests", {
+  state <- new.env(parent = emptyenv())
+  state$count <- 0L
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  req <- httr2::request(prov@token_url) |>
+    httr2::req_method("POST") |>
+    httr2::req_body_form(grant_type = "authorization_code")
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, idempotent = TRUE) {
+      state$count <- state$count + 1L
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+
+      if (state$count == 2L) {
+        return(httr2::response(
+          url = as.character(req$url),
+          status = 200,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw(jsonlite::toJSON(
+            list(
+              request_count = state$count,
+              proof_nonce = payload$nonce %||% NA_character_
+            ),
+            auto_unbox = TRUE
+          ))
+        ))
+      }
+
+      httr2::response(
+        url = as.character(req$url),
+        status = 400,
+        headers = list(
+          "content-type" = "application/json",
+          "www-authenticate" = 'DPoP error="use_dpop_nonce"',
+          "dpop-nonce" = paste0("nonce-", state$count)
+        ),
+        body = charToRaw(jsonlite::toJSON(
+          list(
+            error = "use_dpop_nonce",
+            request_count = state$count,
+            proof_nonce = payload$nonce %||% NA_character_
+          ),
+          auto_unbox = TRUE
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  resp <- shinyOAuth:::req_with_dpop_retry(req, cli, idempotent = FALSE)
+
+  expect_identical(state$count, 2L)
+  expect_identical(
+    jsonlite::fromJSON(rawToChar(resp$body), simplifyVector = TRUE)$proof_nonce,
+    "nonce-1"
+  )
+})
+
+test_that("req_with_dpop_retry preserves the caller idempotency setting", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = "https://example.com/userinfo",
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  req <- httr2::request(prov@userinfo_url) |>
+    httr2::req_method("GET")
+
+  run_case <- function(idempotent) {
+    state <- new.env(parent = emptyenv())
+    state$count <- 0L
+    state$idempotent <- logical()
+    state$nonces <- character()
+
+    testthat::local_mocked_bindings(
+      req_add_dpop_proof = function(
+        req,
+        client,
+        access_token = NULL,
+        nonce = NULL
+      ) {
+        state$nonces <- c(
+          state$nonces,
+          if (is.null(nonce)) "" else as.character(nonce)
+        )
+        req
+      },
+      req_with_retry = function(req, idempotent = TRUE) {
+        state$count <- state$count + 1L
+        state$idempotent <- c(state$idempotent, idempotent)
+
+        if (state$count == 1L) {
+          return(httr2::response(
+            url = as.character(req$url),
+            status = 401,
+            headers = list(
+              "content-type" = "application/json",
+              "www-authenticate" = 'DPoP error="use_dpop_nonce"',
+              "dpop-nonce" = "nonce-1"
+            ),
+            body = charToRaw('{"error":"use_dpop_nonce"}')
+          ))
+        }
+
+        httr2::response(
+          url = as.character(req$url),
+          status = 200,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw("{}")
+        )
+      },
+      .package = "shinyOAuth"
+    )
+
+    shinyOAuth:::req_with_dpop_retry(req, cli, idempotent = idempotent)
+
+    list(
+      idempotent = state$idempotent,
+      nonces = state$nonces
+    )
+  }
+
+  idempotent_case <- run_case(TRUE)
+  expect_identical(idempotent_case$idempotent, c(TRUE, TRUE))
+  expect_identical(idempotent_case$nonces, c("", "nonce-1"))
+
+  non_idempotent_case <- run_case(FALSE)
+  expect_identical(non_idempotent_case$idempotent, c(FALSE, FALSE))
+  expect_identical(non_idempotent_case$nonces, c("", "nonce-1"))
+})
+
+test_that("req_with_dpop_retry regenerates DPoP proofs for transient retries", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = "https://example.com/userinfo",
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  req <- httr2::request(prov@userinfo_url) |>
+    httr2::req_method("GET")
+
+  state <- new.env(parent = emptyenv())
+  state$jtis <- character()
+  state$proofs <- character()
+
+  withr::local_options(list(
+    shinyOAuth.retry_max_tries = 2L,
+    shinyOAuth.retry_backoff_base = 0.01,
+    shinyOAuth.retry_backoff_cap = 0.01
+  ))
+
+  testthat::local_mocked_bindings(
+    req_perform = function(request) {
+      dry <- httr2::req_dry_run(request, quiet = TRUE, redact_headers = FALSE)
+      proof <- dry$headers$dpop
+      payload <- decode_dpop_payload(proof)
+      state$jtis <- c(state$jtis, payload$jti)
+      state$proofs <- c(state$proofs, proof)
+
+      if (length(state$jtis) == 1L) {
+        return(httr2::response(
+          url = as.character(request$url),
+          status = 500,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw("{}")
+        ))
+      }
+
+      httr2::response(
+        url = as.character(request$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw("{}")
+      )
+    },
+    .package = "httr2"
+  )
+  testthat::local_mocked_bindings(
+    Sys.sleep = function(time) invisible(NULL),
+    .package = "base"
+  )
+
+  resp <- shinyOAuth:::req_with_dpop_retry(
+    req,
+    cli,
+    access_token = "at-1",
+    idempotent = TRUE
+  )
+
+  expect_identical(httr2::resp_status(resp), 200L)
+  expect_length(unique(state$jtis), 2L)
+  expect_length(unique(state$proofs), 2L)
+})
+
+test_that("req_with_dpop_retry preserves existing prepare-attempt hooks", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = "https://example.com/userinfo",
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  req <- httr2::request(prov@userinfo_url) |>
+    httr2::req_method("POST") |>
+    httr2::req_body_form(marker = "initial")
+  req$shinyOAuth_prepare_attempt <- function(attempt_req, attempt) {
+    httr2::req_body_form(attempt_req, marker = paste0("marker-", attempt))
+  }
+
+  state <- new.env(parent = emptyenv())
+  state$markers <- character()
+  state$proof_jtis <- character()
+
+  withr::local_options(list(
+    shinyOAuth.retry_max_tries = 2L,
+    shinyOAuth.retry_backoff_base = 0.01,
+    shinyOAuth.retry_backoff_cap = 0.01
+  ))
+
+  testthat::local_mocked_bindings(
+    req_perform = function(request) {
+      dry <- httr2::req_dry_run(request, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+      state$markers <- c(
+        state$markers,
+        as.character(request$body$data$marker %||% NA_character_)
+      )
+      state$proof_jtis <- c(state$proof_jtis, payload$jti)
+
+      if (length(state$markers) == 1L) {
+        return(httr2::response(
+          url = as.character(request$url),
+          status = 500,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw("{}")
+        ))
+      }
+
+      httr2::response(
+        url = as.character(request$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw("{}")
+      )
+    },
+    .package = "httr2"
+  )
+  testthat::local_mocked_bindings(
+    Sys.sleep = function(time) invisible(NULL),
+    .package = "base"
+  )
+
+  resp <- shinyOAuth:::req_with_dpop_retry(
+    req,
+    cli,
+    access_token = "at-1",
+    idempotent = TRUE
+  )
+
+  expect_identical(httr2::resp_status(resp), 200L)
+  expect_identical(state$markers, c("marker-1", "marker-2"))
+  expect_length(unique(state$proof_jtis), 2L)
+})
+
+test_that("req_with_dpop_retry reuses a nonce learned from a successful response", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  req <- httr2::request(prov@token_url) |>
+    httr2::req_method("POST")
+
+  state <- new.env(parent = emptyenv())
+  state$proof_nonces <- character()
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, idempotent = TRUE) {
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+      state$proof_nonces <- c(state$proof_nonces, payload$nonce %||% "")
+
+      headers <- list("content-type" = "application/json")
+      if (length(state$proof_nonces) == 1L) {
+        headers[["dpop-nonce"]] <- "success-nonce-1"
+      }
+
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = headers,
+        body = charToRaw("{}")
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  shinyOAuth:::req_with_dpop_retry(req, cli, idempotent = FALSE)
+  shinyOAuth:::req_with_dpop_retry(req, cli, idempotent = FALSE)
+
+  expect_identical(state$proof_nonces, c("", "success-nonce-1"))
+})
+
+test_that("req_with_dpop_retry reuses a nonce across same-origin resource endpoints", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = "https://example.com/userinfo",
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  userinfo_req <- httr2::request(prov@userinfo_url)
+  resource_req <- httr2::request("https://example.com/profile")
+
+  state <- new.env(parent = emptyenv())
+  state$seen <- list()
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, idempotent = TRUE) {
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+      state$seen[[length(state$seen) + 1L]] <<- list(
+        url = as.character(req$url),
+        nonce = payload$nonce %||% ""
+      )
+
+      headers <- list("content-type" = "application/json")
+      if (identical(as.character(req$url), prov@userinfo_url)) {
+        headers[["dpop-nonce"]] <- "resource-nonce-1"
+      }
+
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = headers,
+        body = charToRaw("{}")
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  shinyOAuth:::req_with_dpop_retry(
+    userinfo_req,
+    cli,
+    access_token = "at-1",
+    idempotent = TRUE
+  )
+  shinyOAuth:::req_with_dpop_retry(
+    resource_req,
+    cli,
+    access_token = "at-1",
+    idempotent = TRUE
+  )
+
+  expect_identical(state$seen[[1]]$url, prov@userinfo_url)
+  expect_identical(state$seen[[1]]$nonce, "")
+  expect_identical(state$seen[[2]]$url, "https://example.com/profile")
+  expect_identical(state$seen[[2]]$nonce, "resource-nonce-1")
+})
+
+test_that("req_with_dpop_retry keeps token and resource nonces separate on the same origin", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = "https://example.com/userinfo",
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  token_req <- httr2::request(prov@token_url) |>
+    httr2::req_method("POST")
+  userinfo_req <- httr2::request(prov@userinfo_url)
+
+  state <- new.env(parent = emptyenv())
+  state$seen <- list()
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, idempotent = TRUE) {
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+      state$seen[[length(state$seen) + 1L]] <<- list(
+        url = as.character(req$url),
+        nonce = payload$nonce %||% ""
+      )
+
+      headers <- list("content-type" = "application/json")
+      if (identical(as.character(req$url), prov@token_url)) {
+        headers[["dpop-nonce"]] <- "token-nonce-1"
+      }
+
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = headers,
+        body = charToRaw("{}")
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  shinyOAuth:::req_with_dpop_retry(token_req, cli, idempotent = FALSE)
+  shinyOAuth:::req_with_dpop_retry(
+    userinfo_req,
+    cli,
+    access_token = "at-1",
+    idempotent = TRUE
+  )
+
+  expect_identical(state$seen[[1]]$url, prov@token_url)
+  expect_identical(state$seen[[1]]$nonce, "")
+  expect_identical(state$seen[[2]]$url, prov@userinfo_url)
+  expect_identical(state$seen[[2]]$nonce, "")
+})
+
+test_that("handle_callback enforces strict DPoP token_type after exchange", {
+  testthat::skip_if_not_installed("webfakes")
+
+  app <- webfakes::new_app()
+  app$post("/token", function(req, res) {
+    if (!nzchar(req$get_header("dpop") %||% "")) {
+      res$set_status(400)
+      res$set_type("application/json")
+      res$send(jsonlite::toJSON(
+        list(error = "missing_dpop"),
+        auto_unbox = TRUE
+      ))
+      return()
+    }
+
+    res$set_type("application/json")
+    res$send(jsonlite::toJSON(
+      list(
+        access_token = "at-1",
+        token_type = "Bearer",
+        expires_in = 60
+      ),
+      auto_unbox = TRUE
+    ))
+  })
+  srv <- webfakes::local_app_process(app)
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = paste0(srv$url(), "/token"),
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov, dpop_require_access_token = TRUE)
+  browser_token <- paste(rep("a", 128), collapse = "")
+  auth_url <- prepare_call(cli, browser_token = browser_token)
+  payload <- utils::URLdecode(sub(".*[?&]state=([^&]+).*", "\\1", auth_url))
+
+  expect_error(
+    shinyOAuth:::handle_callback(
+      oauth_client = cli,
+      code = "code-1",
+      payload = payload,
+      browser_token = browser_token
+    ),
+    regexp = "Expected token_type = DPoP",
+    class = "shinyOAuth_token_error"
+  )
+})
+
+test_that("refresh_token sends DPoP proof and preserves DPoP token_type", {
+  testthat::skip_if_not_installed("webfakes")
+
+  app <- webfakes::new_app()
+  app$post("/token", function(req, res) {
+    proof <- req$get_header("dpop")
+    if (!nzchar(proof %||% "")) {
+      res$set_status(400)
+      res$set_type("application/json")
+      res$send(jsonlite::toJSON(
+        list(error = "missing_dpop"),
+        auto_unbox = TRUE
+      ))
+      return()
+    }
+
+    res$set_type("application/json")
+    res$send(jsonlite::toJSON(
+      list(
+        access_token = proof,
+        token_type = "DPoP",
+        refresh_token = "new-refresh",
+        expires_in = 60
+      ),
+      auto_unbox = TRUE
+    ))
+  })
+  srv <- webfakes::local_app_process(app)
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = paste0(srv$url(), "/token"),
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov, dpop_require_access_token = FALSE)
+  tok <- OAuthToken(
+    access_token = "old-access",
+    token_type = "DPoP",
+    refresh_token = "refresh-1",
+    userinfo = list()
+  )
+
+  refreshed <- refresh_token(cli, tok)
+  payload <- decode_dpop_payload(refreshed@access_token)
+
+  expect_identical(refreshed@refresh_token, "new-refresh")
+  expect_identical(refreshed@token_type, "DPoP")
+  expect_identical(payload$htm, "POST")
+  expect_identical(payload$htu, paste0(sub("/+$", "", srv$url()), "/token"))
+})
+
+test_that("refresh_token retries DPoP nonce challenges once", {
+  state <- new.env(parent = emptyenv())
+  state$count <- 0L
+  state$first_has_nonce <- NA
+  state$second_nonce <- NA_character_
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  tok <- OAuthToken(
+    access_token = "old-access",
+    token_type = "DPoP",
+    refresh_token = "refresh-1",
+    userinfo = list()
+  )
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, idempotent = TRUE) {
+      state$count <- state$count + 1L
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+      if (state$count == 1L) {
+        state$first_has_nonce <- "nonce" %in% names(payload)
+      } else {
+        state$second_nonce <- payload$nonce %||% NA_character_
+      }
+
+      if (state$count == 1L) {
+        return(httr2::response(
+          url = as.character(req$url),
+          status = 400,
+          headers = list(
+            "content-type" = "application/json",
+            "www-authenticate" = 'DPoP error="use_dpop_nonce"',
+            "dpop-nonce" = "refresh-nonce-1"
+          ),
+          body = charToRaw('{"error":"use_dpop_nonce"}')
+        ))
+      }
+
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(
+          paste0(
+            '{"access_token":"new-access","token_type":"DPoP",',
+            '"refresh_token":"new-refresh","expires_in":60}'
+          )
+        )
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  refreshed <- refresh_token(cli, tok)
+
+  expect_identical(refreshed@access_token, "new-access")
+  expect_identical(refreshed@refresh_token, "new-refresh")
+  expect_identical(state$count, 2L)
+  expect_false(isTRUE(state$first_has_nonce))
+  expect_identical(state$second_nonce, "refresh-nonce-1")
+})
+
+test_that("refresh_token reuses a nonce learned from a successful token exchange", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = NA_character_,
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+
+  state <- new.env(parent = emptyenv())
+  state$request_nonces <- character()
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, idempotent = TRUE) {
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+      state$request_nonces <- c(state$request_nonces, payload$nonce %||% "")
+
+      if (length(state$request_nonces) == 1L) {
+        return(httr2::response(
+          url = as.character(req[["url"]]),
+          status = 200,
+          headers = list(
+            "content-type" = "application/json",
+            "dpop-nonce" = "success-nonce-1"
+          ),
+          body = charToRaw(
+            '{"access_token":"at-1","token_type":"DPoP","refresh_token":"refresh-1","expires_in":60}'
+          )
+        ))
+      }
+
+      httr2::response(
+        url = as.character(req[["url"]]),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(
+          '{"access_token":"at-2","token_type":"DPoP","refresh_token":"refresh-2","expires_in":60}'
+        )
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  token_set <- shinyOAuth:::swap_code_for_token_set(
+    cli,
+    code = "code-1",
+    code_verifier = "verifier-1"
+  )
+  tok <- OAuthToken(
+    access_token = token_set$access_token,
+    token_type = token_set$token_type,
+    refresh_token = token_set$refresh_token,
+    userinfo = list()
+  )
+
+  refreshed <- refresh_token(cli, tok)
+
+  expect_identical(state$request_nonces, c("", "success-nonce-1"))
+  expect_identical(refreshed@refresh_token, "refresh-2")
+})
+
+test_that("revoke_token and introspect_token skip DPoP proofs while get_userinfo still sends one", {
+  testthat::skip_if_not_installed("webfakes")
+
+  app <- webfakes::new_app()
+  app$post("/revoke", function(req, res) {
+    if (nzchar(req$get_header("dpop") %||% "")) {
+      res$set_status(400)
+      res$send("")
+      return()
+    }
+    res$set_status(200)
+    res$send("")
+  })
+  app$post("/introspect", function(req, res) {
+    if (nzchar(req$get_header("dpop") %||% "")) {
+      res$set_status(400)
+      res$set_type("application/json")
+      res$send(jsonlite::toJSON(
+        list(active = FALSE),
+        auto_unbox = TRUE
+      ))
+      return()
+    }
+    res$set_type("application/json")
+    res$send(jsonlite::toJSON(
+      list(active = TRUE),
+      auto_unbox = TRUE
+    ))
+  })
+  app$get("/userinfo", function(req, res) {
+    auth <- req$get_header("authorization") %||% ""
+    proof <- req$get_header("dpop") %||% ""
+    if (!identical(auth, "DPoP at-1") || !nzchar(proof)) {
+      res$set_status(401)
+      res$set_type("application/json")
+      res$send(jsonlite::toJSON(
+        list(error = "missing_dpop"),
+        auto_unbox = TRUE
+      ))
+      return()
+    }
+    res$set_type("application/json")
+    res$send(jsonlite::toJSON(
+      list(sub = "user-1"),
+      auto_unbox = TRUE
+    ))
+  })
+  srv <- webfakes::local_app_process(app)
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = paste0(srv$url(), "/userinfo"),
+    introspection_url = paste0(srv$url(), "/introspect"),
+    revocation_url = paste0(srv$url(), "/revoke"),
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  tok <- OAuthToken(
+    access_token = "at-1",
+    token_type = "DPoP",
+    refresh_token = "rt-1",
+    userinfo = list()
+  )
+
+  revoke_res <- revoke_token(cli, tok, which = "access")
+  intro_res <- introspect_token(cli, tok, which = "access")
+  userinfo <- get_userinfo(cli, token = "at-1", token_type = "DPoP")
+
+  expect_true(isTRUE(revoke_res$supported))
+  expect_true(isTRUE(intro_res$active))
+  expect_identical(userinfo$sub, "user-1")
+})
+
+test_that("get_userinfo retries a resource DPoP nonce challenge", {
+  testthat::skip_if_not_installed("webfakes")
+
+  state <- new.env(parent = emptyenv())
+  state$count <- 0L
+  state$first_has_nonce <- NA
+  state$second_nonce <- NA_character_
+
+  app <- webfakes::new_app()
+  app$get("/userinfo", function(req, res) {
+    state$count <- state$count + 1L
+    payload <- decode_dpop_payload(req$get_header("dpop"))
+    if (state$count == 1L) {
+      state$first_has_nonce <- "nonce" %in% names(payload)
+      res$set_status(401)
+      res$set_header("WWW-Authenticate", "DPoP error=\"use_dpop_nonce\"")
+      res$set_header("DPoP-Nonce", "resource-nonce-1")
+      res$set_type("application/json")
+      res$send(jsonlite::toJSON(
+        list(error = "use_dpop_nonce"),
+        auto_unbox = TRUE
+      ))
+      return()
+    }
+
+    state$second_nonce <- payload$nonce %||% NA_character_
+    res$set_type("application/json")
+    res$send(jsonlite::toJSON(
+      list(
+        sub = "user-1",
+        request_count = state$count,
+        first_has_nonce = isTRUE(state$first_has_nonce),
+        second_nonce = state$second_nonce
+      ),
+      auto_unbox = TRUE
+    ))
+  })
+  srv <- webfakes::local_app_process(app)
+
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = paste0(srv$url(), "/userinfo"),
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+
+  userinfo <- get_userinfo(cli, token = "at-1", token_type = "DPoP")
+
+  expect_identical(userinfo$sub, "user-1")
+  expect_identical(userinfo$request_count, 2L)
+  expect_false(isTRUE(userinfo$first_has_nonce))
+  expect_identical(userinfo$second_nonce, "resource-nonce-1")
+})
+
+test_that("get_userinfo retries a DPoP nonce challenge for raw JWT tokens with explicit token_type", {
+  state <- new.env(parent = emptyenv())
+  state$count <- 0L
+  state$first_has_nonce <- NA
+  state$second_nonce <- NA_character_
+
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  prov@userinfo_url <- "https://example.com/userinfo"
+  key <- openssl::rsa_keygen()
+  cli <- make_dpop_test_client(prov, dpop_private_key = key)
+  raw_token <- build_dummy_jwt(list(
+    sub = "user-1",
+    cnf = list(
+      jkt = shinyOAuth:::compute_jwk_thumbprint(
+        shinyOAuth:::dpop_public_jwk(key)
+      )
+    )
+  ))
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      state$count <<- state$count + 1L
+      dry <- httr2::req_dry_run(req, quiet = TRUE, redact_headers = FALSE)
+      payload <- decode_dpop_payload(dry$headers$dpop)
+
+      if (state$count == 1L) {
+        state$first_has_nonce <<- "nonce" %in% names(payload)
+        return(httr2::response(
+          url = "https://example.com/userinfo",
+          status = 401,
+          headers = list(
+            "content-type" = "application/json",
+            "www-authenticate" = 'DPoP error="use_dpop_nonce"',
+            "dpop-nonce" = "resource-nonce-raw"
+          ),
+          body = charToRaw('{"error":"use_dpop_nonce"}')
+        ))
+      }
+
+      state$second_nonce <<- payload$nonce %||% NA_character_
+      httr2::response(
+        url = "https://example.com/userinfo",
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"sub":"user-1","request_count":2}')
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  userinfo <- get_userinfo(cli, token = raw_token, token_type = "DPoP")
+
+  expect_identical(userinfo$sub, "user-1")
+  expect_identical(userinfo$request_count, 2L)
+  expect_false(isTRUE(state$first_has_nonce))
+  expect_identical(state$second_nonce, "resource-nonce-raw")
+})
+
+test_that("get_userinfo keeps DPoP resource requests idempotent", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = "https://example.com/userinfo",
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  seen <- new.env(parent = emptyenv())
+  seen$idempotent <- NA
+  seen$access_token <- NA_character_
+
+  testthat::local_mocked_bindings(
+    req_with_dpop_retry = function(
+      req,
+      client,
+      access_token = NULL,
+      idempotent = TRUE
+    ) {
+      seen$idempotent <- idempotent
+      seen$access_token <- access_token %||% NA_character_
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"sub":"user-1"}')
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  userinfo <- get_userinfo(cli, token = "at-1", token_type = "DPoP")
+
+  expect_true(isTRUE(seen$idempotent))
+  expect_identical(seen$access_token, "at-1")
+  expect_identical(userinfo$sub, "user-1")
+})
+
+test_that("get_userinfo lets an explicit override repair missing OAuthToken token_type", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = "https://example.com/userinfo",
+    introspection_url = NA_character_,
+    revocation_url = NA_character_,
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+  cli <- make_dpop_test_client(prov)
+  tok <- OAuthToken(
+    access_token = "at-1",
+    token_type = NA_character_,
+    userinfo = list()
+  )
+  seen <- new.env(parent = emptyenv())
+  seen$helper <- NA_character_
+
+  testthat::local_mocked_bindings(
+    req_with_dpop_retry = function(
+      req,
+      client,
+      access_token = NULL,
+      idempotent = TRUE
+    ) {
+      seen$helper <- "dpop"
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"sub":"user-1"}')
+      )
+    },
+    req_with_retry = function(req, idempotent = TRUE) {
+      seen$helper <- "bearer"
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"sub":"user-1"}')
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  userinfo <- get_userinfo(cli, token = tok, token_type = "DPoP")
+
+  expect_identical(seen$helper, "dpop")
+  expect_identical(userinfo$sub, "user-1")
+})

@@ -19,30 +19,43 @@ introspect_token(
 
 \item{which}{Which token to introspect: "access" (default) or "refresh".}
 
-\item{async}{Logical, default FALSE. If TRUE and the \link[mirai:mirai]{mirai::mirai} package is
-available, the operation is performed off the main R session using
-\code{mirai::mirai()} and this function returns a mirai (which implements
-\code{as.promise()}) that resolves to the result list. Requires mirai
-daemons to be configured with \code{\link[mirai:daemons]{mirai::daemons()}}.}
+\item{async}{Logical, default FALSE. If TRUE and an async backend is
+configured, the operation is dispatched through shinyOAuth's async
+promise path and this function returns a promise-compatible async result
+that resolves to the result list. \link[mirai:mirai]{mirai} is preferred when daemons are
+configured via \code{\link[mirai:daemons]{mirai::daemons()}}; otherwise the current \link[future:future]{future} plan is
+used. Non-sequential future plans run off the main R session;
+\code{future::sequential()} stays in-process.}
 
 \item{shiny_session}{Optional pre-captured Shiny session context (from
 \code{capture_shiny_session_context()}) to include in audit events. Used when
 calling from async workers that lack access to the reactive domain.}
 }
 \value{
-A list with fields: supported, active, raw, status
+A list with fields:
+\itemize{
+\item \code{supported}: logical, \code{TRUE} when an introspection endpoint is configured.
+\item \code{active}: logical or \code{NA}, where \code{NA} means the provider did not return a
+usable RFC 7662 \code{active} value.
+\item \code{raw}: parsed introspection response list, or \code{NULL} when the endpoint is
+unsupported or the response could not be parsed.
+\item \code{status}: machine-readable status such as \code{"ok"},
+\code{"introspection_unsupported"}, \code{"missing_token"}, \code{"invalid_json"},
+\code{"missing_active"}, \code{"invalid_active"}, or \code{"http_<code>"}.
+}
 }
 \description{
-Introspects an access or refresh token using RFC 7662 when the
-provider exposes an introspection endpoint. Returns a list including at least
-\code{supported} (logical) and \code{active} (logical|NA) and the parsed response (if
-any) under \code{raw}.
+Introspects an access or refresh token when the provider exposes an
+introspection endpoint (RFC 7662). Returns a small result object describing
+whether introspection is supported and, when known, whether the token is
+active.
 
 Authentication to the introspection endpoint mirrors the provider's
 \code{token_auth_style}:
 \itemize{
 \item "header" (default): HTTP Basic with \code{client_id}/\code{client_secret}.
 \item "body": form fields \code{client_id} and (when available) \code{client_secret}.
+\item "public": form field \code{client_id} only; \code{client_secret} is never sent.
 \item "client_secret_jwt" / "private_key_jwt": a signed JWT client assertion
 is generated (RFC 7523) and sent via \code{client_assertion_type} and
 \code{client_assertion}, with \code{aud} resolved via
@@ -77,26 +90,26 @@ set to \code{NA}.
 
 # Example requires a real token from a completed OAuth flow
 # (code is therefore not run; would error with placeholder values below)
-\dontrun{
-# Define client
-client <- oauth_client(
-  provider = oauth_provider_github(),
-  client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
-  client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
-  redirect_uri = "http://127.0.0.1:8100"
-)
+if (interactive()) {
+  # Define client
+  client <- oauth_client(
+    provider = oauth_provider_github(),
+    client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
+    client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+    redirect_uri = "http://127.0.0.1:8100"
+  )
 
-# Have a valid OAuthToken object; fake example below
-# (typically provided by `oauth_module_server()` or `handle_callback()`)
-token <- handle_callback(client, "<code>", "<payload>", "<browser_token>")
+  # Have a valid OAuthToken object; fake example below
+  # (typically provided by `oauth_module_server()` or `handle_callback()`)
+  token <- handle_callback(client, "<code>", "<payload>", "<browser_token>")
 
-# Get userinfo
-user_info <- get_userinfo(client, token)
+  # Get userinfo
+  user_info <- get_userinfo(client, token)
 
-# Introspect token (if supported by provider)
-introspection <- introspect_token(client, token)
+  # Introspect token (if supported by provider)
+  introspection <- introspect_token(client, token)
 
-# Refresh token
-new_token <- refresh_token(client, token, introspect = TRUE)
+  # Refresh token
+  new_token <- refresh_token(client, token, introspect = TRUE)
 }
 }

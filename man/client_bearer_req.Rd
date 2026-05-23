@@ -2,7 +2,7 @@
 % Please edit documentation in R/methods__client_bearer_req.R
 \name{client_bearer_req}
 \alias{client_bearer_req}
-\title{Build an authorized httr2 request with Bearer token}
+\title{Alias for \code{resource_req()}}
 \usage{
 client_bearer_req(
   token,
@@ -11,7 +11,10 @@ client_bearer_req(
   headers = NULL,
   query = NULL,
   follow_redirect = FALSE,
-  check_url = TRUE
+  check_url = TRUE,
+  oauth_client = NULL,
+  token_type = NULL,
+  dpop_nonce = NULL
 )
 }
 \arguments{
@@ -19,56 +22,53 @@ client_bearer_req(
 
 \item{url}{The absolute URL to call.}
 
-\item{method}{Optional HTTP method (character). Defaults to "GET".}
+\item{method}{Optional HTTP method (character). Defaults to "GET". When
+the effective token type is \code{DPoP}, this must be the final request method
+because the proof is signed against it.}
 
 \item{headers}{Optional named list or named character vector of extra
 headers to set on the request. Header names are case-insensitive.
-Any user-supplied \code{Authorization}
-header is ignored to ensure the Bearer token set by this function is not
-overridden.}
+Any user-supplied \code{Authorization} or \code{DPoP} header is ignored to ensure
+the token authentication set by this function is not overridden.}
 
 \item{query}{Optional named list of query parameters to append to the URL.}
 
 \item{follow_redirect}{Logical. If \code{FALSE} (the default), HTTP redirects
-are disabled to prevent leaking the Bearer token to unexpected hosts.
+are disabled to prevent leaking the access token to unexpected hosts.
 Set to \code{TRUE} only if you trust all possible redirect targets and
 understand the security implications.}
 
 \item{check_url}{Logical. If \code{TRUE} (the default), validates \code{url} against
-\code{\link[=is_ok_host]{is_ok_host()}} before attaching the Bearer token. This rejects relative
-URLs, plain HTTP to non-loopback hosts, and – when
-\code{options(shinyOAuth.allowed_hosts)} is set – hosts outside the allowlist.
+\code{\link[=is_ok_host]{is_ok_host()}} before attaching the access token. This rejects relative
+URLs, plain HTTP to non-loopback hosts, and when
+\code{options(shinyOAuth.allowed_hosts)} is set, hosts outside the allowlist.
 Set to \code{FALSE} only if you have already validated the URL and understand
 the security implications.}
+
+\item{oauth_client}{Optional \link{OAuthClient}. Required when the effective
+token type is \code{DPoP}, because the client carries the configured DPoP proof
+key, and also when using sender-constrained mTLS / certificate-bound
+tokens so shinyOAuth can attach the configured client certificate and
+validate any \code{cnf} thumbprint from an \link{OAuthToken} and observe any \code{cnf}
+thumbprint carried on a raw JWT access-token string.}
+
+\item{token_type}{Optional override for the access token type when \code{token}
+is supplied as a raw string. Supported values are \code{Bearer} and \code{DPoP}.
+Invalid or multi-valued inputs are rejected. When omitted, shinyOAuth
+preserves \code{OAuthToken@token_type}, and may infer \code{DPoP} from explicit
+\code{OAuthToken@cnf$jkt} metadata. Raw access-token strings default to
+\code{Bearer} unless you pass \code{token_type = "DPoP"} explicitly.}
+
+\item{dpop_nonce}{Optional DPoP nonce to embed in the proof for this
+request. This is primarily useful after a resource server challenges with
+\code{DPoP-Nonce}.}
 }
 \value{
-An httr2 request object, ready to be further customized or
-performed with \code{\link[httr2:req_perform]{httr2::req_perform()}}.
+Same value as \code{\link[=resource_req]{resource_req()}}.
 }
 \description{
-Convenience helper to reduce boilerplate when calling downstream APIs.
-It creates an \code{\link[httr2:request]{httr2::request()}} for the given URL, attaches the
-\verb{Authorization: Bearer <token>} header, and applies the package's standard
-HTTP defaults (timeout and User-Agent).
+\ifelse{html}{\href{https://lifecycle.r-lib.org/articles/stages.html#deprecated}{\figure{lifecycle-deprecated.svg}{options: alt='[Deprecated]'}}}{\strong{[Deprecated]}}
 
-Accepts either a raw access token string or an \link{OAuthToken} object.
-}
-\examples{
-# Make request using OAuthToken object
-# (code is not run because it requires a real token from user interaction)
-\dontrun{
-# Get an OAuthToken
-# (typically provided as reactive return value by `oauth_module_server()`)
-token <- OAuthToken()
-
-# Build request
-request <- client_bearer_req(
-  token, 
-  "https://api.example.com/resource", 
-  query = list(limit = 5)
-)
-
-# Perform request
-response <- httr2::req_perform(request)
-}
+Deprecated alias for \code{resource_req()} to avoid a breaking change in the public API.
+Use \code{resource_req()} for Bearer, DPoP, and mTLS-protected resource requests instead.
 }

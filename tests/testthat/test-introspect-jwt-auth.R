@@ -1,6 +1,6 @@
 testthat::test_that("introspect_token uses JWT client assertion for client_secret_jwt with introspection aud", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
-  cli@client_secret <- "s3cr3t"
+  cli@client_secret <- strrep("s", 32L)
   cli@provider@introspection_url <- "https://example.com/introspect"
   cli@provider@token_auth_style <- "client_secret_jwt"
   t <- OAuthToken(
@@ -19,7 +19,7 @@ testthat::test_that("introspect_token uses JWT client assertion for client_secre
       got_aud <<- aud
       return("jwt-assertion")
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       # Return a minimal successful response body
       httr2::response(
         url = as.character(req$url),
@@ -61,7 +61,7 @@ testthat::test_that("introspect_token uses JWT client assertion for private_key_
       got_aud <<- aud
       return("jwt-assertion")
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,

@@ -8,25 +8,25 @@ custom_cache(get, set, remove, take = NULL, info = NULL)
 }
 \arguments{
 \item{get}{A function(key, missing = NULL) -> value. Required.
-Should return the stored value, or the \code{missing} argument if the key is not present.
-The \code{missing} parameter is mandatory because both \code{OAuthClient} and
-\code{OAuthProvider} validators will pass it explicitly.}
+Should return the stored value, or the \code{missing} argument if the key is not
+present. The \code{missing} parameter is required because shinyOAuth passes it
+explicitly.}
 
 \item{set}{A function(key, value) -> invisible(NULL). Required.
-Should store the value under the given key}
+Should store the value under the given key.}
 
 \item{remove}{A function(key) -> any. Required.
 
 Deletes the entry for \code{key}. When \verb{$take()} is provided, \verb{$remove()} serves
 only as a best-effort cleanup and its return value is ignored. When
-\verb{$take()} is not provided, 'shinyOAuth' falls back to
+\verb{$take()} is not provided, shinyOAuth falls back to
 \verb{$get()} + \verb{$remove()} followed by a post-removal absence check via
 \verb{$get(key, missing = NA)}. In this fallback path the return value of
 \verb{$remove()} is not relied upon; the post-check is authoritative.}
 
 \item{take}{A function(key, missing = NULL) -> value. Optional.
 
-An atomic get-and-delete operation. When provided, 'shinyOAuth' uses
+An atomic get-and-delete operation. When provided, shinyOAuth uses
 \verb{$take()} instead of separate \verb{$get()} + \verb{$remove()} calls to enforce
 single-use state consumption. This prevents TOCTOU (time-of-check /
 time-of-use) replay attacks in multi-worker deployments with shared state
@@ -40,33 +40,40 @@ If your backend supports atomic get-and-delete natively
 parameter for replay-safe state stores.
 
 When \code{take} is not provided and the state store is not a per-process cache
-(like \code{\link[cachem:cache_mem]{cachem::cache_mem()}}), 'shinyOAuth' will \strong{error} at state
+(like \code{\link[cachem:cache_mem]{cachem::cache_mem()}}), shinyOAuth will \strong{error} at state
 consumption time because non-atomic \verb{$get()} + \verb{$remove()} cannot
 guarantee single-use under concurrent access in shared stores.}
 
 \item{info}{Function() -> list(max_age = seconds, ...). Optional
 
-This may be provided to because TTL information from \verb{$info()} is used to
-align browser cookie max age in \code{oauth_module_server()}}
+TTL information from \verb{$info()} is used to align browser cookie max age in
+\code{\link[=oauth_module_server]{oauth_module_server()}}.}
 }
 \value{
 An R6 object exposing cachem-like \verb{$get/$set/$remove/$info} methods
 }
 \description{
-Builds a minimal cachem-like cache backend object that exposes cachem-compatible methods:
-\verb{$get(key, missing)}, \verb{$set(key, value)}, \verb{$remove(key)}, and \verb{$info()}.
+Builds a small cachem-like backend object with methods compatible with what
+shinyOAuth needs: \verb{$get(key, missing)}, \verb{$set(key, value)}, \verb{$remove(key)},
+and optional \verb{$info()}.
 
 Use this helper when you want to plug a custom state store or JWKS cache
-into 'shinyOAuth', when \code{\link[cachem:cache_mem]{cachem::cache_mem()}} is not suitable (e.g.,
+into shinyOAuth, when \code{\link[cachem:cache_mem]{cachem::cache_mem()}} is not suitable (e.g.,
 multi-process deployments with non-sticky workers).
 In such cases, you may want to use a shared external cache (e.g., database,
 Redis, Memcached).
 
-The resulting object can be used in both places where 'shinyOAuth' accepts a cache-like object:
+The resulting object can be used in both places where shinyOAuth accepts a cache-like object:
 \itemize{
 \item OAuthClient@state_store (requires \verb{$get}, \verb{$set}, \verb{$remove}; optional \verb{$info})
 \item OAuthProvider@jwks_cache (requires \verb{$get}, \verb{$set}; optional \verb{$remove}, \verb{$info})
 }
+
+For \code{OAuthClient@state_store}, stored values are small lists. \code{browser_token}
+must always round-trip as a non-empty string. \code{pkce_code_verifier} and
+\code{nonce} are required only when the provider enables PKCE or nonce
+validation; otherwise stores may preserve them as \code{NULL} or omit them when
+serializing.
 
 The \verb{$info()} method is optional, but if provided and it returns a list with
 \code{max_age} (seconds), shinyOAuth will align browser cookie max-age in

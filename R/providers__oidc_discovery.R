@@ -1,17 +1,28 @@
-# OIDC discovery ----------------------------------------------------------
+# This file contains helpers for OpenID Connect discovery
+# OpenID Connect discovery is the standard metadata document that tells a
+# client which endpoints and settings a provider supports
+# Used for building provider objects from that metadata and checking it for
+# safety
+
+# 1 OIDC discovery -------------------------------------------------------------
+
+## 1.1 Provider construction ---------------------------------------------------
 
 #' @title
 #' Discover and create an OpenID Connect (OIDC) [OAuthProvider]
 #'
 #' @description
-#' Uses the OpenID Connect discovery document at
-#' `/.well-known/openid-configuration` to auto-configure an [OAuthProvider].
-#' When present, `introspection_endpoint` is wired into the resulting provider
-#' for RFC 7662 support.
+#' Builds an [OAuthProvider] from the provider's OpenID Connect discovery
+#' document at `/.well-known/openid-configuration`. When present,
+#' `introspection_endpoint` is also wired into the resulting provider.
 #'
 #' @details
+#' Most users can accept the defaults here. The points below are mainly
+#' reference for advanced provider setups or for understanding why discovery
+#' might fail early.
+#'
 #' - ID token algorithms: by default this helper accepts common asymmetric
-#'   algorithms RSA (RS*), RSA-PSS (PS*), ECDSA (ES*), and EdDSA. When the
+#'   algorithms RSA (RS*), ECDSA (ES*), and EdDSA. When the
 #'   provider advertises its supported ID token signing algorithms via
 #'   `id_token_signing_alg_values_supported`, the helper uses the intersection
 #'   with the caller-provided `allowed_algs`. If there is no overlap, discovery
@@ -20,27 +31,96 @@
 #'
 #' - Token endpoint authentication methods: supports `client_secret_basic`
 #'   (header), `client_secret_post` (body), public clients using `none`
-#'   (with PKCE), as well as JWT-based methods `private_key_jwt` and
-#'   `client_secret_jwt` per RFC 7523.
+#'   (mapped to `token_auth_style = "public"` when PKCE is enabled), as well as
+#'   JWT-based methods `private_key_jwt` and
+#'   `client_secret_jwt` per RFC 7523. Discovery also preserves RFC 8705 mTLS
+#'   metadata (`mtls_endpoint_aliases` and
+#'   `tls_client_certificate_bound_access_tokens`) and supports explicit
+#'   `tls_client_auth` / `self_signed_tls_client_auth` selection.
+#'
+#' - PAR metadata: when the discovery document advertises
+#'   `pushed_authorization_request_endpoint` or
+#'   `require_pushed_authorization_requests`, the resulting provider stores that
+#'   PAR capability and policy metadata so authorization requests can use RFC
+#'   9126 PAR and fail fast on PAR-only provider policies.
+#'
+#' - Request Object metadata: when the discovery document advertises
+#'   `request_object_signing_alg_values_supported` or
+#'   `require_signed_request_object`, the resulting provider stores that
+#'   metadata so `OAuthClient` can fail fast when a request-object algorithm is
+#'   unsupported or when the provider requires signed Request Objects. When the
+#'   discovery document also advertises
+#'   `request_object_encryption_alg_values_supported` or
+#'   `request_object_encryption_enc_values_supported`, the resulting provider
+#'   stores that encryption metadata so Request Object JWE configuration can be
+#'   validated early as well.
+#'
+#' - Authorization request transport metadata: when the discovery document
+#'   advertises `request_parameter_supported`,
+#'   `request_uri_parameter_supported`, or
+#'   `require_request_uri_registration`, the resulting provider stores that
+#'   metadata so shinyOAuth can fail fast when a provider explicitly disallows
+#'   the front-channel `request` transport used by JAR or caller-managed
+#'   `request_uri` values. The registration requirement itself remains
+#'   deployment-specific: shinyOAuth stores
+#'   `require_request_uri_registration` for caller awareness, but it cannot
+#'   independently verify whether the provider has already registered a
+#'   matching public `request_uri` or wildcard prefix for the client. When PAR
+#'   is configured, shinyOAuth sends signed Request Objects to the PAR endpoint
+#'   and the browser redirect only carries the PAR-issued `request_uri`
+#'   handle, regardless of `request_uri_parameter_supported` or
+#'   `require_request_uri_registration`. When discovery omits these booleans,
+#'   this helper applies the OpenID Connect defaults instead of storing `NA`.
+#'
+#' - Response mode metadata: when the discovery document advertises
+#'   `response_modes_supported`, the resulting provider stores it so explicit
+#'   `response_mode` requests can fail fast when unsupported. When the metadata
+#'   is omitted, this helper applies the OAuth/OIDC metadata default of
+#'   `c("query", "fragment")`.
+#'
+#' - Token endpoint JWT auth metadata: when the discovery document advertises
+#'   `token_endpoint_auth_signing_alg_values_supported`, the resulting provider
+#'   stores that metadata so `OAuthClient` can fail fast when a JWT client
+#'   assertion algorithm is unsupported.
+#'
+#' - DPoP metadata: when the discovery document advertises
+#'   `dpop_signing_alg_values_supported`, the resulting provider stores that
+#'   metadata so `OAuthClient` can fail fast when an explicit or inferred DPoP
+#'   proof signing algorithm is unsupported.
+#'
+#' - RFC 9207 callback issuer metadata: when the discovery document advertises
+#'   `authorization_response_iss_parameter_supported = true`, the resulting
+#'   provider stores that metadata so [oauth_client()] can auto-enable callback
+#'   issuer enforcement unless you explicitly opt out.
+#'
+#' - PKCE method discovery: this helper keeps `S256` as the default and does not
+#'   silently downgrade to `plain`. If discovery metadata explicitly omits
+#'   `S256`, discovery fails with a configuration error unless you explicitly
+#'   opt into `pkce_method = "plain"`.
 #'
 #'   Important: discovery metadata lists methods supported across the provider,
 #'   not per-client provisioning. This helper does not automatically select
 #'   JWT-based methods just because they are advertised. By default it prefers
 #'   `client_secret_basic` (header) when available, otherwise
-#'   `client_secret_post` (body), and only uses public `none` for PKCE clients.
+#'   `client_secret_post` (body), and maps public `none` to
+#'   `token_auth_style = "public"` only for PKCE clients.
 #'   If a provider advertises only JWT methods, you must explicitly set
 #'   `token_auth_style` and configure the corresponding credentials on your
 #'   [OAuthClient] (a private key for `private_key_jwt`, or a sufficiently
 #'   strong `client_secret` for `client_secret_jwt`).
 #'
-#' - Host policy: by default, discovered endpoints must be absolute URLs whose
-#'   host matches the issuer host exactly. Subdomains are NOT implicitly allowed.
-#'   If you want to allow subdomains, add a leading-dot or glob in
-#'   `options(shinyOAuth.allowed_hosts)`, e.g., `.example.com` or `*.example.com`.
-#'   If a global whitelist is supplied via `options(shinyOAuth.allowed_hosts)`,
-#'   discovery will restrict endpoints to that whitelist. Scheme policy (https/http for
-#'   loopback) is delegated to `is_ok_host()`, so you may allow non-HTTPS hosts
-#'   with `options(shinyOAuth.allowed_non_https_hosts)` (see `?is_ok_host`).
+#' - Host policy: by default, discovered standard endpoints must be absolute
+#'   URLs whose host matches the issuer host exactly. Subdomains are NOT
+#'   implicitly allowed. If you want to allow subdomains, add a leading-dot or
+#'   glob in `options(shinyOAuth.allowed_hosts)`, e.g., `.example.com` or
+#'   `*.example.com`. If a global whitelist is supplied via
+#'   `options(shinyOAuth.allowed_hosts)`, discovery will restrict endpoints to
+#'   that whitelist. RFC 8705 `mtls_endpoint_aliases` are validated separately:
+#'   they may use a different host or port by default, but an explicit
+#'   `shinyOAuth.allowed_hosts` whitelist still constrains them. Scheme policy
+#'   (https/http for loopback) is delegated to `is_ok_host()`, so you may allow
+#'   non-HTTPS hosts with `options(shinyOAuth.allowed_non_https_hosts)` (see
+#'   `?is_ok_host`).
 #'
 #' @param issuer The OIDC issuer base URL (including scheme), e.g.,
 #'   "https://login.example.com"
@@ -53,38 +133,42 @@
 #' @param id_token_validation Logical, whether to validate ID tokens automatically
 #'   for this provider. Defaults to TRUE
 #' @param token_auth_style Authentication style for token requests: "header"
-#'   (client_secret_basic) or "body" (client_secret_post). If NULL (default),
-#'   it is inferred conservatively from discovery. When PKCE is enabled and the
-#'   provider advertises support for public clients via `none`, a secretless
-#'   flow is preferred (modeled as `"body"` without credentials). Otherwise,
+#'   (client_secret_basic), "body" (client_secret_post), or "public"
+#'   (public client; send `client_id` only). The alias `"none"` is also
+#'   accepted for `"public"`. If NULL (default), it is inferred conservatively
+#'   from discovery. When PKCE is enabled and the provider advertises support
+#'   for public clients via `none`, discovery selects `"public"`. Otherwise,
 #'   the helper prefers `"header"` (client_secret_basic) when available, then
 #'   `"body"` (client_secret_post). JWT-based methods are not auto-selected
-#'   unless explicitly requested
+#'   unless explicitly requested.
 #' @param allowed_algs Character vector of allowed ID token signing algorithms.
-#'  Defaults to a broad set of common algorithms, including RSA (RS*), RSA-PSS
-#'  (PS*), ECDSA (ES*), and EdDSA. If the discovery document advertises
+#'  Defaults to a broad set of common algorithms, including RSA (RS*), ECDSA
+#'  (ES*), and EdDSA. If the discovery document advertises
 #'  supported algorithms, the intersection of advertised and caller-provided
 #'  algorithms is used to avoid runtime mismatches. If there's no overlap,
-#'  discovery fails with a configuration error (no fallback)
+#'  discovery fails with a configuration error (no fallback).
 #' @param allowed_token_types Character vector of allowed token types for
 #'  access tokens issued by this provider. Defaults to 'Bearer'
 #' @param jwks_host_issuer_match When TRUE (default), enforce that the JWKS host
-#'  discovered from the provider matches the issuer host (or a subdomain). For
+#'  discovered from the provider matches the issuer host exactly. For
 #'  providers that serve JWKS from a different host, set
 #'  `jwks_host_allow_only` to the exact hostname instead of disabling this.
 #'  Disabling (`FALSE`) is not recommended unless you also pin JWKS via
-#'  `jwks_host_allow_only` or `jwks_pins`
+#'  `jwks_host_allow_only` or `jwks_pins`.
 #' @param issuer_match Character scalar controlling how strictly to validate the
 #'  discovery document's `issuer` against the input `issuer`.
 #'
-#'  - `"url"` (default): require the full issuer URL to match after
-#'    trailing-slash normalization (recommended).
+#'  - `"url"` (default): require the issuer used for discovery to match
+#'    exactly, after removing one trailing slash for discovery URL construction
+#'    (recommended).
 #'  - `"host"`: compare only scheme + host (explicit opt-out; not recommended).
 #'  - `"none"`: do not validate issuer consistency.
 #'
 #'  Prefer `"url"` and tighten hosts via `options(shinyOAuth.allowed_hosts)`
 #'  when feasible.
-#' @param ... Additional fields passed to [oauth_provider()]
+#' @param ... Additional fields passed to [oauth_provider()] (for example,
+#'   `pkce_method = "plain"` when a provider explicitly advertises only plain
+#'   PKCE support and you intentionally want to allow that downgrade).
 #'
 #' @return [OAuthProvider] object configured from discovery
 #'
@@ -102,9 +186,6 @@ oauth_provider_oidc_discover <- function(
     "RS256",
     "RS384",
     "RS512",
-    "PS256",
-    "PS384",
-    "PS512",
     "ES256",
     "ES384",
     "ES512",
@@ -116,6 +197,18 @@ oauth_provider_oidc_discover <- function(
   ...
 ) {
   issuer_match <- match.arg(issuer_match)
+
+  # If callers explicitly turn off ID
+  # token validation and do not explicitly opt back into nonce handling,
+  # discovery should not require JWKS just because use_nonce's formal default
+  # is TRUE
+  if (
+    missing(use_nonce) &&
+      !missing(id_token_validation) &&
+      isFALSE(id_token_validation)
+  ) {
+    use_nonce <- FALSE
+  }
 
   # 1) Validate issuer input
   .discover_assert_valid_issuer(issuer)
@@ -141,15 +234,42 @@ oauth_provider_oidc_discover <- function(
   )
 
   # 6) Determine allowed hosts and validate endpoints
-  allowed_hosts_vec <- .discover_compute_allowed_hosts(iss_host)
+  allowed_hosts_vec <- .discover_allowed_hosts(iss_host)
   .discover_validate_endpoints(endpoints, allowed_hosts_vec)
 
-  # 7) Enforce JWKS host pinning if enabled
-  if (isTRUE(jwks_host_issuer_match)) {
-    .discover_enforce_jwks_pinning(disc, iss, iss_host, allowed_hosts_vec)
+  # 6a) Read caller overrides before any JWKS-dependent policy checks so
+  # both presence requirements and host pinning see the same values.
+  dots <- list(...)
+  jwks_host_allow_only <- dots$jwks_host_allow_only %||% NULL
+
+  # 6b) Any mode that verifies ID-token or UserInfo JWT signatures needs JWKS.
+  .discover_require_jwks_uri(
+    disc = disc,
+    iss = iss,
+    id_token_validation = id_token_validation,
+    use_nonce = use_nonce,
+    userinfo_signed_jwt_required = isTRUE(dots$userinfo_signed_jwt_required)
+  )
+
+  .discover_validate_jwks_uri(
+    disc = disc,
+    allowed_hosts_vec = allowed_hosts_vec,
+    jwks_host_allow_only = jwks_host_allow_only
+  )
+
+  # 8) Enforce JWKS host pinning if enabled or explicitly configured.
+  if (isTRUE(jwks_host_issuer_match) || is_valid_string(jwks_host_allow_only)) {
+    .discover_enforce_jwks_pinning(
+      disc = disc,
+      iss = iss,
+      iss_host = iss_host,
+      allowed_hosts_vec = allowed_hosts_vec,
+      jwks_host_allow_only = jwks_host_allow_only,
+      jwks_host_issuer_match = jwks_host_issuer_match
+    )
   }
 
-  # 8) Infer token auth style when not set
+  # 9) Infer token auth style when not set
   token_auth_style <- .discover_infer_token_auth_style(
     token_auth_style,
     disc,
@@ -158,51 +278,160 @@ oauth_provider_oidc_discover <- function(
     endpoints$token_url
   )
 
-  # 9) Optional PKCE S256 warning
-  .discover_warn_pkce_s256(disc, use_pkce, iss_host)
+  # 10) Resolve PKCE method against discovery metadata
+  pkce_method <- .discover_resolve_pkce_method(
+    disc = disc,
+    use_pkce = use_pkce,
+    iss = iss,
+    iss_host = iss_host,
+    pkce_method = dots$pkce_method %||% NULL
+  )
 
-  # 10) Negotiate allowed ID token algs
+  # 11) Negotiate allowed ID token algs
   allowed_algs <- .discover_negotiate_algs(allowed_algs, disc, iss)
+  require_pushed_authorization_requests <- .discover_parse_optional_boolean(
+    disc,
+    "require_pushed_authorization_requests"
+  )
+  request_object_signing_alg_values_supported <- toupper(as.character(
+    unlist(
+      disc[["request_object_signing_alg_values_supported"]] %||% character(0),
+      use.names = FALSE
+    )
+  ))
+  request_object_encryption_alg_values_supported <- toupper(as.character(
+    unlist(
+      disc[["request_object_encryption_alg_values_supported"]] %||%
+        character(0),
+      use.names = FALSE
+    )
+  ))
+  request_object_encryption_enc_values_supported <- toupper(as.character(
+    unlist(
+      disc[["request_object_encryption_enc_values_supported"]] %||%
+        character(0),
+      use.names = FALSE
+    )
+  ))
+  require_signed_request_object <- .discover_parse_optional_boolean(
+    disc,
+    "require_signed_request_object"
+  )
+  request_parameter_supported <- .discover_parse_nullable_boolean(
+    disc,
+    "request_parameter_supported",
+    default = FALSE
+  )
+  request_uri_parameter_supported <- .discover_parse_nullable_boolean(
+    disc,
+    "request_uri_parameter_supported",
+    default = TRUE
+  )
+  require_request_uri_registration <- .discover_parse_nullable_boolean(
+    disc,
+    "require_request_uri_registration",
+    default = FALSE
+  )
+  response_modes_supported <- tolower(trimws(as.character(unlist(
+    disc[["response_modes_supported"]] %||% c("query", "fragment"),
+    use.names = FALSE
+  ))))
+  token_endpoint_auth_signing_alg_values_supported <- toupper(as.character(
+    unlist(
+      disc[["token_endpoint_auth_signing_alg_values_supported"]] %||%
+        character(0),
+      use.names = FALSE
+    )
+  ))
+  dpop_signing_alg_values_supported <- toupper(as.character(
+    unlist(
+      disc[["dpop_signing_alg_values_supported"]] %||% character(0),
+      use.names = FALSE
+    )
+  ))
+  authorization_response_iss_parameter_supported <-
+    .discover_parse_optional_boolean(
+      disc,
+      "authorization_response_iss_parameter_supported"
+    )
+  mtls_endpoint_aliases <- .discover_extract_mtls_endpoint_aliases(disc)
+  .discover_validate_endpoint_aliases(
+    mtls_endpoint_aliases,
+    .discover_allowed_alias_hosts()
+  )
+  tls_client_certificate_bound_access_tokens <-
+    .discover_parse_optional_boolean(
+      disc,
+      "tls_client_certificate_bound_access_tokens"
+    )
 
-  # 10b) Forward caller ... args (e.g. userinfo_signed_jwt_required)
+  # 11b) Forward caller ... args (e.g. userinfo_signed_jwt_required)
   #      Note: userinfo_signing_alg_values_supported in discovery indicates
   #      provider *capability*, not that every client receives signed JWTs.
   #      Whether the userinfo response is application/jwt depends on per-client
   #      configuration at the provider. Therefore we do NOT auto-enable
   #      userinfo_signed_jwt_required from discovery; callers must opt in.
-  dots <- list(...)
+  dots$pkce_method <- pkce_method
 
-  # 11) Default provider name from issuer when needed
+  # 12) Default provider name from issuer when needed
   name <- .discover_default_name(name, iss)
 
-  # 12) Construct provider
-  do.call(
-    oauth_provider,
-    c(
-      list(
-        name = name,
-        auth_url = endpoints$auth_url,
-        token_url = endpoints$token_url,
-        userinfo_url = endpoints$userinfo_url,
-        introspection_url = endpoints$introspection_url,
-        revocation_url = endpoints$revocation_url,
-        issuer = iss,
-        use_nonce = use_nonce,
-        id_token_validation = id_token_validation,
-        use_pkce = use_pkce,
-        token_auth_style = token_auth_style,
-        allowed_algs = allowed_algs,
-        allowed_token_types = allowed_token_types,
-        jwks_host_issuer_match = jwks_host_issuer_match
-      ),
-      dots
-    )
+  # 13) Construct provider. Allow explicit caller overrides in ... to replace
+  # discovered defaults without passing duplicate named formals through do.call().
+  provider_args <- list(
+    name = name,
+    auth_url = endpoints$auth_url,
+    token_url = endpoints$token_url,
+    userinfo_url = endpoints$userinfo_url,
+    introspection_url = endpoints$introspection_url,
+    revocation_url = endpoints$revocation_url,
+    par_url = endpoints$par_url,
+    require_pushed_authorization_requests = require_pushed_authorization_requests,
+    request_object_signing_alg_values_supported = request_object_signing_alg_values_supported,
+    request_object_encryption_alg_values_supported = request_object_encryption_alg_values_supported,
+    request_object_encryption_enc_values_supported = request_object_encryption_enc_values_supported,
+    require_signed_request_object = require_signed_request_object,
+    request_parameter_supported = request_parameter_supported,
+    request_uri_parameter_supported = request_uri_parameter_supported,
+    require_request_uri_registration = require_request_uri_registration,
+    response_modes_supported = response_modes_supported,
+    token_endpoint_auth_signing_alg_values_supported = token_endpoint_auth_signing_alg_values_supported,
+    dpop_signing_alg_values_supported = dpop_signing_alg_values_supported,
+    authorization_response_iss_parameter_supported = authorization_response_iss_parameter_supported,
+    mtls_endpoint_aliases = mtls_endpoint_aliases,
+    tls_client_certificate_bound_access_tokens = tls_client_certificate_bound_access_tokens,
+    issuer = iss,
+    issuer_match = issuer_match,
+    use_nonce = use_nonce,
+    id_token_validation = id_token_validation,
+    use_pkce = use_pkce,
+    token_auth_style = token_auth_style,
+    allowed_algs = allowed_algs,
+    allowed_token_types = allowed_token_types,
+    jwks_host_issuer_match = jwks_host_issuer_match
   )
+  duplicate_dot_names <- intersect(
+    names(provider_args),
+    names(dots) %||% character(0)
+  )
+  if (length(duplicate_dot_names) > 0) {
+    provider_args[duplicate_dot_names] <- NULL
+  }
+
+  do.call(oauth_provider, c(provider_args, dots))
 }
 
-# Helpers -----------------------------------------------------------------
+# 2 Discovery helpers ----------------------------------------------------------
+
+## 2.1 Input validation --------------------------------------------------------
 
 #' Internal: validate issuer input
+#'
+#' Used by [oauth_provider_oidc_discover()] before any network call is made.
+#'
+#' @param issuer Issuer URL string.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
+#'   typed input or configuration error.
 #'
 #' @keywords internal
 #' @noRd
@@ -235,10 +464,24 @@ oauth_provider_oidc_discover <- function(
     )
   }
 
+  if (length(parsed$query) > 0L || nzchar(parsed$fragment %||% "")) {
+    err_input(
+      c(
+        "x" = "issuer must not contain query or fragment components",
+        "i" = paste0("Got issuer: ", as.character(issuer))
+      )
+    )
+  }
+
   invisible(TRUE)
 }
 
 #' Internal: build httr2 request for discovery
+#'
+#' Used by [oauth_provider_oidc_discover()] after the issuer has been validated.
+#'
+#' @param issuer Issuer URL string.
+#' @return httr2 request object for the discovery document.
 #'
 #' @keywords internal
 #' @noRd
@@ -254,7 +497,17 @@ oauth_provider_oidc_discover <- function(
   req
 }
 
+
+## 2.2 Transport and parsing ---------------------------------------------------
+
 #' Internal: fetch discovery response with retry and structured errors
+#'
+#' Used by [oauth_provider_oidc_discover()] to execute the discovery HTTP request.
+#'
+#' @param req httr2 request object.
+#' @param issuer Issuer string used for error context.
+#' @return Successful httr2 response. Otherwise this function raises a typed
+#'   HTTP error.
 #'
 #' @keywords internal
 #' @noRd
@@ -293,13 +546,18 @@ oauth_provider_oidc_discover <- function(
 
 #' Internal: parse discovery JSON and normalize to list
 #'
+#' Used by [oauth_provider_oidc_discover()] after a successful discovery fetch.
+#'
+#' @param resp Discovery HTTP response.
+#' @return Parsed discovery document as a named list.
+#'
 #' @keywords internal
 #' @noRd
 .discover_parse_json <- function(resp) {
   check_resp_body_size(resp, context = "oidc_discovery")
   ct <- tolower(httr2::resp_header(resp, "content-type") %||% "")
 
-  if (!grepl("^application/json", ct)) {
+  if (!grepl("^application/json(?:\\s*;|$)", ct, perl = TRUE)) {
     err_parse(
       "Discovery response was not JSON",
       context = list(content_type = ct)
@@ -307,6 +565,7 @@ oauth_provider_oidc_discover <- function(
   }
 
   body <- httr2::resp_body_string(resp)
+  reject_duplicate_json_object_members(body, "Discovery JSON")
   disc <- try(jsonlite::fromJSON(body, simplifyVector = FALSE), silent = TRUE)
 
   if (inherits(disc, "try-error")) {
@@ -325,6 +584,11 @@ oauth_provider_oidc_discover <- function(
 
 #' Internal: extract endpoints from discovery doc
 #'
+#' Used by [oauth_provider_oidc_discover()] to pull the provider URLs it needs later.
+#'
+#' @param disc Parsed discovery document.
+#' @return Named list of endpoint URLs and PAR metadata.
+#'
 #' @keywords internal
 #' @noRd
 .discover_extract_endpoints <- function(disc) {
@@ -340,16 +604,38 @@ oauth_provider_oidc_discover <- function(
 
   revocation_url <- disc[["revocation_endpoint"]] %||% NA_character_
 
+  par_url <- disc[["pushed_authorization_request_endpoint"]] %||% NA_character_
+
+  require_pushed_authorization_requests <- .discover_parse_optional_boolean(
+    disc,
+    "require_pushed_authorization_requests"
+  )
+
+  if (require_pushed_authorization_requests && !is_valid_string(par_url)) {
+    err_parse(
+      "Discovery requires PAR but is missing pushed_authorization_request_endpoint"
+    )
+  }
+
   list(
     auth_url = auth_url,
     token_url = token_url,
     userinfo_url = userinfo_url,
     introspection_url = introspection_url,
-    revocation_url = revocation_url
+    revocation_url = revocation_url,
+    par_url = par_url
   )
 }
 
+
+## 2.3 Endpoint and host policy ------------------------------------------------
+
 #' Internal: normalize and sanitize hostname
+#'
+#' Used by the host-policy helpers in this file so host comparisons are consistent.
+#'
+#' @param host Host string to normalize.
+#' @return Normalized lowercase host string.
 #'
 #' @keywords internal
 #' @noRd
@@ -358,11 +644,20 @@ oauth_provider_oidc_discover <- function(
   sub("\\.$", "", h)
 }
 
-#' Internal: compute allowed hosts vector for endpoint validation
+#' Internal: compute the host allowlist used during OIDC discovery
 #'
+#' Used by [oauth_provider_oidc_discover()] before validating discovered endpoints.
+#'
+#' Takes the normalized issuer host and returns the host vector that discovery
+#' should trust for both normal endpoints and RFC 8705 mTLS endpoint aliases.
+#' If the package-level `shinyOAuth.allowed_hosts` option is set, that wins;
+#' otherwise discovery falls back to trusting the issuer host only.
+#'
+#' @param iss_host Normalized issuer host.
+#' @return Host vector that discovery is allowed to trust.
 #' @keywords internal
 #' @noRd
-.discover_compute_allowed_hosts <- function(iss_host) {
+.discover_allowed_hosts <- function(iss_host) {
   opt_allowed <- getOption("shinyOAuth.allowed_hosts", default = NULL)
 
   if (!is.null(opt_allowed) && length(opt_allowed) > 0) {
@@ -372,7 +667,36 @@ oauth_provider_oidc_discover <- function(
   c(iss_host)
 }
 
+#' Internal: compute the host allowlist used for discovered mTLS aliases
+#'
+#' RFC 8705 allows `mtls_endpoint_aliases` to live on a different host or port
+#' than the issuer. Discovery therefore applies the explicit
+#' `shinyOAuth.allowed_hosts` allowlist when present, but otherwise falls back
+#' to the general `is_ok_host()` policy instead of implicitly pinning aliases to
+#' the issuer host.
+#'
+#' @return Host vector that discovered mTLS aliases are allowed to trust, or
+#'   `NULL` when the general host policy should apply.
+#' @keywords internal
+#' @noRd
+.discover_allowed_alias_hosts <- function() {
+  opt_allowed <- getOption("shinyOAuth.allowed_hosts", default = NULL)
+
+  if (!is.null(opt_allowed) && length(opt_allowed) > 0) {
+    return(opt_allowed)
+  }
+
+  NULL
+}
+
 #' Internal: validate all endpoints against host policy
+#'
+#' Used by [oauth_provider_oidc_discover()] after endpoint extraction.
+#'
+#' @param endpoints Endpoint list.
+#' @param allowed_hosts_vec Allowed host vector.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
+#'   host-policy error.
 #'
 #' @keywords internal
 #' @noRd
@@ -382,11 +706,129 @@ oauth_provider_oidc_discover <- function(
   validate_endpoint(endpoints$userinfo_url, allowed_hosts_vec)
   validate_endpoint(endpoints$introspection_url, allowed_hosts_vec)
   validate_endpoint(endpoints$revocation_url, allowed_hosts_vec)
+  validate_endpoint(endpoints$par_url, allowed_hosts_vec)
 
   invisible(TRUE)
 }
 
+
+## 2.4 Capability negotiation --------------------------------------------------
+
+#' Internal: require jwks_uri when runtime verification depends on JWKS
+#'
+#' Used by [oauth_provider_oidc_discover()] when the resulting provider will
+#' verify ID tokens or signed UserInfo JWTs via the provider's JWKS.
+#'
+#' @param disc Discovery document.
+#' @param iss Issuer string.
+#' @param id_token_validation Whether ID token validation is enabled.
+#' @param use_nonce Whether nonce-based ID token validation is enabled.
+#' @param userinfo_signed_jwt_required Whether signed UserInfo JWT verification
+#'   is required.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
+#'   configuration error.
+#'
+#' @keywords internal
+#' @noRd
+.discover_require_jwks_uri <- function(
+  disc,
+  iss,
+  id_token_validation,
+  use_nonce,
+  userinfo_signed_jwt_required
+) {
+  needs_jwks <- isTRUE(id_token_validation) ||
+    isTRUE(use_nonce) ||
+    isTRUE(userinfo_signed_jwt_required)
+
+  if (!needs_jwks) {
+    return(invisible(TRUE))
+  }
+
+  jwks_uri <- disc[["jwks_uri"]] %||% ""
+  if (
+    is_valid_string(jwks_uri) &&
+      nzchar(trimws(jwks_uri))
+  ) {
+    return(invisible(TRUE))
+  }
+
+  err_config(
+    c(
+      "x" = "Discovery document missing jwks_uri",
+      "i" = paste0(
+        "Issuer: ",
+        iss
+      ),
+      "i" = paste0(
+        paste(
+          "jwks_uri is required when discovery enables id_token_validation,",
+          "use_nonce, or userinfo_signed_jwt_required because those modes",
+          "verify signatures against the provider's JWKS"
+        )
+      )
+    ),
+    context = list(
+      issuer = iss,
+      id_token_validation = id_token_validation,
+      use_nonce = use_nonce,
+      userinfo_signed_jwt_required = userinfo_signed_jwt_required
+    )
+  )
+}
+
+#' Internal: validate jwks_uri against the discovery URL policy
+#'
+#' Used by [oauth_provider_oidc_discover()] to fail fast when discovery returns
+#' a malformed or disallowed JWKS URL.
+#'
+#' @param disc Discovery document.
+#' @param allowed_hosts_vec Allowed host vector used for endpoint validation.
+#' @param jwks_host_allow_only Optional exact JWKS host override.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
+#'   configuration error.
+#'
+#' @keywords internal
+#' @noRd
+.discover_validate_jwks_uri <- function(
+  disc,
+  allowed_hosts_vec,
+  jwks_host_allow_only = NULL
+) {
+  jwks_uri <- disc[["jwks_uri"]] %||% ""
+  if (!nzchar(jwks_uri)) {
+    return(invisible(TRUE))
+  }
+
+  jwks_allowed_hosts <- allowed_hosts_vec
+  if (is_valid_string(jwks_host_allow_only)) {
+    pinned_host <- tolower(trimws(jwks_host_allow_only))
+    if (grepl("://", pinned_host, fixed = TRUE)) {
+      pinned_host <- parse_url_host(
+        pinned_host,
+        label = "jwks_host_allow_only"
+      )
+    }
+    pinned_host <- sub("\\.$", "", pinned_host)
+    jwks_allowed_hosts <- unique(c(jwks_allowed_hosts, pinned_host))
+  }
+
+  validate_endpoint(jwks_uri, jwks_allowed_hosts)
+  invisible(TRUE)
+}
+
 #' Internal: enforce JWKS pinning per issuer/allowed hosts
+#'
+#' Used by [oauth_provider_oidc_discover()] to make sure signing keys come from an allowed host.
+#'
+#' @param disc Discovery document.
+#' @param iss Issuer string.
+#' @param iss_host Normalized issuer host.
+#' @param allowed_hosts_vec Allowed host vector used for endpoint validation.
+#' @param jwks_host_allow_only Optional exact JWKS host override.
+#' @param jwks_host_issuer_match Whether JWKS host must match the issuer host.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
+#'   configuration error.
 #'
 #' @keywords internal
 #' @noRd
@@ -394,7 +836,9 @@ oauth_provider_oidc_discover <- function(
   disc,
   iss,
   iss_host,
-  allowed_hosts_vec
+  allowed_hosts_vec,
+  jwks_host_allow_only = NULL,
+  jwks_host_issuer_match = TRUE
 ) {
   jwks_uri <- disc[["jwks_uri"]] %||% ""
   if (!nzchar(jwks_uri)) {
@@ -403,19 +847,52 @@ oauth_provider_oidc_discover <- function(
 
   jwks_host <- parse_url_host(jwks_uri, "jwks_uri")
 
+  if (is_valid_string(jwks_host_allow_only)) {
+    pinned_host <- tolower(trimws(jwks_host_allow_only))
+    if (grepl("://", pinned_host, fixed = TRUE)) {
+      normalized_host <- try(
+        parse_url_host(pinned_host, label = "jwks_host_allow_only"),
+        silent = TRUE
+      )
+      if (!inherits(normalized_host, "try-error")) {
+        pinned_host <- normalized_host
+      }
+    }
+    pinned_host <- sub("\\.$", "", pinned_host)
+
+    if (!identical(jwks_host, pinned_host)) {
+      err_config(
+        c(
+          "x" = "jwks_uri host must equal configured jwks_host_allow_only",
+          "!" = sprintf("Got '%s' but expected '%s'", jwks_host, pinned_host),
+          "i" = "Set `jwks_host_allow_only` to the exact host, or clear it to use issuer-based checks"
+        ),
+        context = list(
+          issuer = iss,
+          jwks_uri = jwks_uri,
+          issuer_host = iss_host,
+          jwks_host = jwks_host,
+          jwks_host_allow_only = pinned_host
+        )
+      )
+    }
+
+    return(invisible(TRUE))
+  }
+
   opt_allowed <- getOption("shinyOAuth.allowed_hosts", default = NULL)
   jwks_ok <- if (!is.null(opt_allowed) && length(opt_allowed) > 0) {
     is_ok_host(paste0("https://", jwks_host, "/"), allowed_hosts = opt_allowed)
+  } else if (isTRUE(jwks_host_issuer_match)) {
+    identical(jwks_host, iss_host)
   } else {
-    # Allow exact match or subdomain of issuer host
-    identical(jwks_host, iss_host) ||
-      (nzchar(iss_host) && endsWith(jwks_host, paste0(".", iss_host)))
+    TRUE
   }
 
   if (!jwks_ok) {
     err_config(
       c(
-        "x" = "JWKS host must match issuer host or subdomain (or allowed host)",
+        "x" = "JWKS host must match issuer host exactly (or allowed host)",
         "i" = paste0("Issuer host: ", iss_host),
         "i" = paste0("JWKS host: ", jwks_host),
         "i" = paste0(
@@ -438,6 +915,16 @@ oauth_provider_oidc_discover <- function(
 
 #' Internal: infer token auth style from discovery
 #'
+#' Used by [oauth_provider_oidc_discover()] when the caller did not choose a token auth style explicitly.
+#'
+#' @param token_auth_style Requested token auth style, or `NULL`.
+#' @param disc Discovery document.
+#' @param use_pkce Whether PKCE is enabled for the client.
+#' @param iss Discovery issuer.
+#' @param token_url Token endpoint URL from discovery.
+#' @return Normalized token auth style. Otherwise this function raises a
+#'   configuration error.
+#'
 #' @keywords internal
 #' @noRd
 .discover_infer_token_auth_style <- function(
@@ -447,12 +934,18 @@ oauth_provider_oidc_discover <- function(
   iss,
   token_url
 ) {
-  if (!is.null(token_auth_style)) {
-    return(token_auth_style)
-  }
-
   methods <- disc[["token_endpoint_auth_methods_supported"]] %||% character(0)
   methods <- tolower(as.character(methods))
+
+  if (!is.null(token_auth_style)) {
+    return(.discover_validate_requested_token_auth_style(
+      token_auth_style = token_auth_style,
+      methods = methods,
+      use_pkce = use_pkce,
+      iss = iss,
+      token_url = token_url
+    ))
+  }
 
   # Conservative default: prefer confidential auth methods first so that
 
@@ -468,9 +961,9 @@ oauth_provider_oidc_discover <- function(
 
   # Public clients: if discovery only advertises 'none' (no confidential
   # methods matched above) and PKCE is enabled, use secretless token requests.
-  # We model this as 'body' style without credentials (code_verifier only).
+  # Map this to the dedicated public-client auth style.
   if ("none" %in% methods && isTRUE(use_pkce)) {
-    return("body")
+    return("public")
   }
 
   # Public clients: if 'none' is advertised but PKCE is disabled, surface a
@@ -482,6 +975,27 @@ oauth_provider_oidc_discover <- function(
         "i" = "Enable PKCE to use this provider (set `use_pkce = TRUE`)"
       ),
       context = list(issuer = iss, token_endpoint = token_url)
+    )
+  }
+
+  # If only mTLS methods are advertised, do not auto-select them because the
+  # client certificate is provisioned per app registration. Require explicit
+  # opt-in just like JWT-based methods.
+  if (any(MTLS_TOKEN_AUTH_STYLES %in% methods)) {
+    err_config(
+      c(
+        "x" = "OIDC discovery advertises only mutual TLS client authentication methods",
+        "i" = paste(
+          "Set `token_auth_style = 'tls_client_auth'` or",
+          "`token_auth_style = 'self_signed_tls_client_auth'` explicitly"
+        ),
+        "i" = "Configure tls_client_cert_file and tls_client_key_file on your OAuthClient"
+      ),
+      context = list(
+        issuer = iss,
+        token_endpoint = token_url,
+        methods = methods
+      )
     )
   }
 
@@ -506,36 +1020,304 @@ oauth_provider_oidc_discover <- function(
   "header"
 }
 
-#' Internal: warn if PKCE S256 not advertised
+#' Validate an explicitly requested token auth style
+#'
+#' Confirms that the caller-requested token auth style is compatible with the
+#' client authentication methods advertised by OIDC discovery.
+#' Used by `.discover_infer_token_auth_style()` when the caller sets
+#' `token_auth_style` explicitly.
+#'
+#' @param token_auth_style Requested token auth style.
+#' @param methods Advertised token endpoint auth methods.
+#' @param use_pkce Whether PKCE is enabled for the client.
+#' @param iss Discovery issuer.
+#' @param token_url Token endpoint URL from discovery.
+#' @return The normalized token auth style. Otherwise this function raises a
+#'   configuration error.
+#' @keywords internal
+#' @noRd
+.discover_validate_requested_token_auth_style <- function(
+  token_auth_style,
+  methods,
+  use_pkce,
+  iss,
+  token_url
+) {
+  token_auth_style <- normalize_token_auth_style(token_auth_style)
+
+  if (length(methods) == 0L) {
+    return(token_auth_style)
+  }
+
+  is_supported <- switch(
+    token_auth_style,
+    header = "client_secret_basic" %in% methods,
+    body = "client_secret_post" %in% methods,
+    public = ("none" %in% methods && isTRUE(use_pkce)),
+    client_secret_jwt = "client_secret_jwt" %in% methods,
+    private_key_jwt = "private_key_jwt" %in% methods,
+    tls_client_auth = "tls_client_auth" %in% methods,
+    self_signed_tls_client_auth = "self_signed_tls_client_auth" %in% methods,
+    FALSE
+  )
+
+  if (isTRUE(is_supported)) {
+    return(token_auth_style)
+  }
+
+  err_config(
+    c(
+      "x" = "Requested token_auth_style is not advertised by OIDC discovery",
+      "i" = paste0("Requested: ", token_auth_style),
+      "i" = paste0("Advertised methods: ", paste(methods, collapse = ", "))
+    ),
+    context = list(
+      issuer = iss,
+      token_endpoint = token_url,
+      requested_token_auth_style = token_auth_style,
+      methods = methods
+    )
+  )
+}
+
+
+## 2.5 mTLS discovery metadata -------------------------------------------------
+
+#' Extract discovered mTLS endpoint aliases
+#'
+#' Reads the optional `mtls_endpoint_aliases` object from the discovery
+#' document and maps supported alias names onto shinyOAuth's internal endpoint
+#' names.
+#' Used by [oauth_provider_oidc_discover()] before mTLS alias host validation.
+#'
+#' @param disc Parsed discovery document.
+#' @return A named list of mTLS alias URLs.
+#' @keywords internal
+#' @noRd
+.discover_extract_mtls_endpoint_aliases <- function(disc) {
+  aliases <- disc[["mtls_endpoint_aliases"]] %||% list()
+  if (is.null(aliases)) {
+    return(list())
+  }
+  if (is.data.frame(aliases)) {
+    aliases <- as.list(aliases)
+  }
+  if (!is.list(aliases)) {
+    err_parse("Discovery mtls_endpoint_aliases must be a JSON object")
+  }
+
+  alias_name_map <- c(
+    token_endpoint = "token_endpoint",
+    userinfo_endpoint = "userinfo_endpoint",
+    introspection_endpoint = "introspection_endpoint",
+    revocation_endpoint = "revocation_endpoint",
+    pushed_authorization_request_endpoint = "par_endpoint",
+    device_authorization_endpoint = "device_authorization_endpoint"
+  )
+  alias_names <- intersect(
+    names(aliases) %||% character(0),
+    names(alias_name_map)
+  )
+  if (length(alias_names) == 0L) {
+    return(list())
+  }
+
+  out <- list()
+  for (name in alias_names) {
+    value <- aliases[[name]]
+    target_name <- alias_name_map[[name]]
+    if (is.null(value)) {
+      out[[target_name]] <- NULL
+      next
+    }
+
+    if (!is.character(value) || length(value) != 1L || is.na(value)) {
+      err_parse(
+        paste0("Discovery mtls_endpoint_aliases$", name, " must be a string")
+      )
+    }
+    out[[target_name]] <- as.character(value)
+  }
+
+  out[!vapply(out, is.null, logical(1))]
+}
+
+#' Parse an optional discovery boolean field
+#'
+#' Used by [oauth_provider_oidc_discover()] and its helper functions when
+#' discovery metadata contains optional boolean feature flags.
+#'
+#' @param disc Parsed discovery document.
+#' @param field Field name to read.
+#' @return `TRUE` or `FALSE`.
+#' @keywords internal
+#' @noRd
+.discover_parse_optional_boolean <- function(disc, field) {
+  value <- disc[[field]]
+  if (is.null(value)) {
+    return(FALSE)
+  }
+  if (!is.logical(value) || length(value) != 1L || is.na(value)) {
+    err_parse(sprintf("Discovery %s must be a JSON boolean", field))
+  }
+
+  value
+}
+
+#' Parse discovery boolean metadata with an explicit default
+#'
+#' Used by [oauth_provider_oidc_discover()] for optional booleans whose
+#' omission has a defined OpenID Connect default.
+#'
+#' @param disc Parsed discovery document.
+#' @param field Field name to read.
+#' @param default Logical scalar returned when the metadata is omitted.
+#' @return `TRUE` or `FALSE`.
+#' @keywords internal
+#' @noRd
+.discover_parse_nullable_boolean <- function(disc, field, default) {
+  if (!is.logical(default) || length(default) != 1L || is.na(default)) {
+    err_input("default must be a single non-NA logical")
+  }
+
+  value <- disc[[field]]
+  if (is.null(value)) {
+    return(default)
+  }
+  if (!is.logical(value) || length(value) != 1L || is.na(value)) {
+    err_parse(sprintf("Discovery %s must be a JSON boolean", field))
+  }
+
+  value
+}
+
+#' Validate discovered mTLS endpoint aliases
+#'
+#' Applies host validation to discovered mTLS aliases.
+#'
+#' By default this uses the package's general `is_ok_host()` policy so RFC 8705
+#' aliases may live on a different host or port than the issuer. When callers
+#' configure an explicit host allowlist, aliases must satisfy that allowlist.
+#'
+#' @param mtls_endpoint_aliases Named list of discovered mTLS alias URLs.
+#' @param allowed_hosts_vec Optional host vector used for endpoint validation.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
+#'   validation error.
+#' @keywords internal
+#' @noRd
+.discover_validate_endpoint_aliases <- function(
+  mtls_endpoint_aliases,
+  allowed_hosts_vec
+) {
+  if (!length(mtls_endpoint_aliases)) {
+    return(invisible(TRUE))
+  }
+
+  for (alias_url in unname(mtls_endpoint_aliases)) {
+    validate_endpoint(alias_url, allowed_hosts_vec)
+  }
+
+  invisible(TRUE)
+}
+
+
+## 2.6 PKCE and algorithm negotiation ------------------------------------------
+
+#' Internal: resolve PKCE method against discovery metadata
+#'
+#' Used by [oauth_provider_oidc_discover()] to keep PKCE choices aligned with provider metadata.
+#'
+#' @param disc Discovery document.
+#' @param use_pkce Whether PKCE is enabled.
+#' @param iss Discovery issuer.
+#' @param iss_host Normalized issuer host.
+#' @param pkce_method Optional requested PKCE method.
+#' @return Chosen PKCE method. Otherwise this function raises a configuration
+#'   error.
 #'
 #' @keywords internal
 #' @noRd
-.discover_warn_pkce_s256 <- function(disc, use_pkce, iss_host) {
+.discover_resolve_pkce_method <- function(
+  disc,
+  use_pkce,
+  iss,
+  iss_host,
+  pkce_method = NULL
+) {
   if (!isTRUE(use_pkce)) {
-    return(invisible(FALSE))
+    return(pkce_method)
   }
 
   cc_methods <- disc[["code_challenge_methods_supported"]] %||% character(0)
   cc_methods <- toupper(as.character(cc_methods))
-
-  if (length(cc_methods) > 0 && !("S256" %in% cc_methods)) {
-    if (!.is_test()) {
-      rlang::warn(
-        c(
-          "!" = "Discovery does not advertise PKCE S256 support",
-          "i" = "Provider may accept only 'plain' code challenge; explore if enabling it is possible with the provider"
-        ),
-        .frequency = "once",
-        .frequency_id = paste0("pkce-s256-", iss_host)
+  pkce_method <- normalize_pkce_method(pkce_method %||% NULL, default = NULL)
+  if (
+    !is.null(pkce_method) &&
+      !identical(pkce_method, "S256") &&
+      !identical(pkce_method, "plain")
+  ) {
+    err_config(
+      c(
+        "x" = "pkce_method must be 'S256' or 'plain'",
+        "i" = paste0("Received: ", as.character(pkce_method))
+      ),
+      context = list(
+        issuer = iss,
+        issuer_host = iss_host,
+        pkce_method = pkce_method
       )
-    }
-    return(invisible(TRUE))
+    )
   }
 
-  invisible(FALSE)
+  # When the provider does not advertise methods, preserve the historical
+  # default and let oauth_provider() choose S256 unless the caller explicitly
+  # requests plain.
+  if (length(cc_methods) == 0L) {
+    return(pkce_method)
+  }
+
+  requested_method <- toupper(pkce_method %||% "S256")
+
+  if (!(requested_method %in% cc_methods)) {
+    remediation <- if ("PLAIN" %in% cc_methods) {
+      "Discovery will not silently downgrade; pass `pkce_method = 'plain'` explicitly only if you intend to allow plain PKCE"
+    } else {
+      "Adjust the provider or discovery configuration so it supports PKCE S256"
+    }
+
+    err_config(
+      c(
+        "x" = paste0(
+          "OIDC discovery does not advertise PKCE ",
+          requested_method,
+          " support"
+        ),
+        "!" = paste0(
+          "Advertised methods: ",
+          paste(cc_methods, collapse = ", ")
+        ),
+        "i" = remediation
+      ),
+      context = list(
+        issuer = iss,
+        issuer_host = iss_host,
+        code_challenge_methods_supported = cc_methods,
+        requested_pkce_method = requested_method
+      )
+    )
+  }
+
+  pkce_method
 }
 
 #' Internal: intersect allowed ID token algs with discovery
+#'
+#' Used by [oauth_provider_oidc_discover()] to keep ID token verification settings compatible with the provider.
+#'
+#' @param allowed_algs Caller allowlist of supported algorithms.
+#' @param disc Discovery document.
+#' @param iss Discovery issuer.
+#' @return Negotiated algorithm vector.
 #'
 #' @keywords internal
 #' @noRd
@@ -569,7 +1351,15 @@ oauth_provider_oidc_discover <- function(
 }
 
 
+## 2.7 Naming ------------------------------------------------------------------
+
 #' Internal: derive default name from issuer
+#'
+#' Used by [oauth_provider_oidc_discover()] when the caller did not supply a friendly provider name.
+#'
+#' @param name Optional provider name.
+#' @param iss Issuer URL.
+#' @return Chosen provider name string.
 #'
 #' @keywords internal
 #' @noRd

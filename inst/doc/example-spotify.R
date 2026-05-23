@@ -1,7 +1,7 @@
 ## ----eval = FALSE-------------------------------------------------------------
-# # Example Shiny app using shinyOAuth to connect to Spotify API
+# # Example Shiny app using 'shinyOAuth' to connect to Spotify API
 # #
-# # This app demonstrates logging into Spotify with shinyOAuth and fetching
+# # This app demonstrates logging into Spotify with 'shinyOAuth' and fetching
 # # various user statistics via the Spotify Web API. We then build a simple
 # # dashboard to display this information
 # #
@@ -46,8 +46,7 @@
 # spotify_get <- function(token, path, query = list()) {
 #   url <- paste0("https://api.spotify.com", path)
 # 
-#   req <- client_bearer_req(token, url, query = query)
-#   resp <- httr2::req_perform(req)
+#   resp <- perform_resource_req(token, url, query = query)
 # 
 #   if (httr2::resp_is_error(resp)) {
 #     msg <- sprintf("Spotify API error: HTTP %s", httr2::resp_status(resp))
@@ -61,8 +60,7 @@
 # spotify_get_maybe_empty <- function(token, path, query = list()) {
 #   url <- paste0("https://api.spotify.com", path)
 # 
-#   req <- client_bearer_req(token, url, query = query)
-#   resp <- httr2::req_perform(req)
+#   resp <- perform_resource_req(token, url, query = query)
 # 
 #   status <- httr2::resp_status(resp)
 #   if (status == 204L) {
@@ -507,7 +505,12 @@
 # server <- function(input, output, session) {
 #   # Handle Spotify login -------------------------------------------------------
 # 
-#   auth <- oauth_module_server("auth", client, auto_redirect = FALSE)
+#   auth <- oauth_module_server(
+#     "auth",
+#     client,
+#     auto_redirect = FALSE,
+#     refresh_proactively = TRUE
+#   )
 # 
 #   # Expose auth state to JS for our conditionalPanel
 #   output$isAuthenticated <- shiny::reactive({
@@ -524,14 +527,28 @@
 #     auth$logout()
 #   })
 # 
-#   output$oauth_error <- renderUI({
-#     if (!is.null(auth$error)) {
-#       msg <- auth$error
-#       if (!is.null(auth$error_description)) {
-#         msg <- paste0(msg, ": ", auth$error_description)
-#       }
-#       div(class = "alert alert-danger", role = "alert", msg)
+#   observeEvent(list(auth$error, auth$error_description), {
+#     if (interactive() && !is.null(auth$error_description)) {
+#       rlang::inform(c(
+#         "OAuth error details",
+#         "i" = paste0("error: ", auth$error),
+#         "i" = paste0("error_description: ", auth$error_description)
+#       ))
 #     }
+#   }, ignoreInit = TRUE)
+# 
+#   output$oauth_error <- renderUI({
+#     if (is.null(auth$error) || identical(auth$error, "logged_out")) {
+#       return(NULL)
+#     }
+# 
+#     msg <- if (identical(auth$error, "access_denied")) {
+#       "Sign-in was canceled or denied. Please try again."
+#     } else {
+#       "Authentication failed. Please try again."
+#     }
+# 
+#     div(class = "alert alert-danger", role = "alert", msg)
 #   })
 # 
 #   # Show user profile ----------------------------------------------------------
@@ -972,7 +989,7 @@
 # 
 #     ggplot(counts_df, aes_string(x = "plays", y = "artist")) +
 #       geom_col(fill = "#1DB954", width = 0.65) +
-#       geom_text(aes(label = plays), hjust = -0.2, color = "#F5F6F8", size = 4) +
+#       geom_text(aes_string(label = "plays"), hjust = -0.2, color = "#F5F6F8", size = 4) +
 #       scale_x_continuous(expand = expansion(mult = c(0, 0.08))) +
 #       labs(x = x_lab, y = NULL) +
 #       theme_minimal(base_family = "Inter", base_size = 13) +

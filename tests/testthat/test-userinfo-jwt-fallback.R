@@ -8,9 +8,9 @@ make_unsigned_jwt <- function(payload_list, alg = "none") {
   header <- jsonlite::toJSON(list(alg = alg, typ = "JWT"), auto_unbox = TRUE)
   payload <- jsonlite::toJSON(payload_list, auto_unbox = TRUE)
   paste0(
-    shinyOAuth:::b64url_encode(charToRaw(as.character(header))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(header))),
     ".",
-    shinyOAuth:::b64url_encode(charToRaw(as.character(payload))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(payload))),
     "."
   )
 }
@@ -26,12 +26,14 @@ test_that("decode_userinfo_jwt rejects malformed header (fail-closed)", {
 
   claims <- list(sub = "user-badheader", name = "Bad Header")
   payload <- jsonlite::toJSON(claims, auto_unbox = TRUE)
-  bad_header <- shinyOAuth:::b64url_encode(charToRaw("NOT{JSON"))
-  good_payload <- shinyOAuth:::b64url_encode(charToRaw(as.character(payload)))
+  bad_header <- shinyOAuth:::base64url_encode(charToRaw("NOT{JSON"))
+  good_payload <- shinyOAuth:::base64url_encode(charToRaw(as.character(
+    payload
+  )))
   jwt_body <- paste0(bad_header, ".", good_payload, ".")
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -60,12 +62,14 @@ test_that("decode_userinfo_jwt errors for malformed header when require_signed =
 
   claims <- list(sub = "user-badheader-req", name = "Bad Header Req")
   payload <- jsonlite::toJSON(claims, auto_unbox = TRUE)
-  bad_header <- shinyOAuth:::b64url_encode(charToRaw("NOT{JSON"))
-  good_payload <- shinyOAuth:::b64url_encode(charToRaw(as.character(payload)))
+  bad_header <- shinyOAuth:::base64url_encode(charToRaw("NOT{JSON"))
+  good_payload <- shinyOAuth:::base64url_encode(charToRaw(as.character(
+    payload
+  )))
   jwt_body <- paste0(bad_header, ".", good_payload, ".")
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -95,7 +99,7 @@ test_that("unsupported alg (HS256) is rejected even when require_signed = FALSE"
   jwt_body <- make_unsigned_jwt(claims, alg = "HS256")
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -115,8 +119,8 @@ test_that("unsupported alg (HS256) is rejected even when require_signed = FALSE"
 })
 
 test_that("unsupported alg (PS384 not in allowed_algs) is rejected", {
-  # PS384 IS an asymmetric alg but NOT in this provider's allowed_algs
-  # (RS256, ES256). Always rejected.
+  # PS384 is not supported by the current verifier and is not in this
+  # provider's allowed_algs (RS256, ES256). Always rejected.
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
   cli@provider@userinfo_url <- "https://example.com/userinfo"
   cli@provider@issuer <- "https://issuer.example.com"
@@ -125,7 +129,7 @@ test_that("unsupported alg (PS384 not in allowed_algs) is rejected", {
   jwt_body <- make_unsigned_jwt(claims, alg = "PS384")
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -156,7 +160,7 @@ test_that("alg=none is always rejected even when issuer is set and require_signe
   jwt_body <- make_unsigned_jwt(claims, alg = "none")
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -187,14 +191,14 @@ test_that("JWT with missing alg field is rejected even when require_signed = FAL
   claims <- list(sub = "user-no-alg", name = "No Alg")
   payload <- jsonlite::toJSON(claims, auto_unbox = TRUE)
   jwt_body <- paste0(
-    shinyOAuth:::b64url_encode(charToRaw(as.character(header))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(header))),
     ".",
-    shinyOAuth:::b64url_encode(charToRaw(as.character(payload))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(payload))),
     "."
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -205,11 +209,11 @@ test_that("JWT with missing alg field is rejected even when require_signed = FAL
     .package = "shinyOAuth"
   )
 
-  # Fail-closed: missing alg is treated as alg=none and rejected
+  # Fail-closed: missing alg is rejected as an invalid JOSE header.
   expect_error(
     get_userinfo(cli, token = "access-token"),
     class = "shinyOAuth_userinfo_error",
-    regexp = "alg=none.*not allowed"
+    regexp = "header missing alg"
   )
 })
 
@@ -224,14 +228,14 @@ test_that("JWT with missing alg field is rejected when require_signed = TRUE", {
   claims <- list(sub = "user-no-alg-req")
   payload <- jsonlite::toJSON(claims, auto_unbox = TRUE)
   jwt_body <- paste0(
-    shinyOAuth:::b64url_encode(charToRaw(as.character(header))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(header))),
     ".",
-    shinyOAuth:::b64url_encode(charToRaw(as.character(payload))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(payload))),
     "."
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -245,7 +249,7 @@ test_that("JWT with missing alg field is rejected when require_signed = TRUE", {
   expect_error(
     get_userinfo(cli, token = "access-token"),
     class = "shinyOAuth_userinfo_error",
-    regexp = "alg=none|unsigned|not allowed"
+    regexp = "header missing alg"
   )
 })
 
@@ -267,15 +271,15 @@ test_that("RS256 JWT is rejected when provider has no issuer (fail-closed)", {
   )
   payload <- jsonlite::toJSON(claims, auto_unbox = TRUE)
   jwt_body <- paste0(
-    shinyOAuth:::b64url_encode(charToRaw(as.character(header))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(header))),
     ".",
-    shinyOAuth:::b64url_encode(charToRaw(as.character(payload))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(payload))),
     ".",
     "fake-sig"
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,

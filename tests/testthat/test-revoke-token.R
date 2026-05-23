@@ -15,17 +15,15 @@ testthat::test_that("revoke_token handles unsupported and missing tokens", {
   testthat::expect_true(is.na(res$revoked))
   testthat::expect_identical(res$status, "revocation_unsupported")
 
-  # 2) Supported but missing token -> revoked = NA, status = "missing_token"
+  # 2) Supported but missing refresh token -> revoked = NA, status = "missing_token"
   cli@provider@revocation_url <- "https://example.com/revoke"
-  t@access_token <- NA_character_
-  res2 <- revoke_token(cli, t, which = "access", async = FALSE)
-  testthat::expect_true(isTRUE(res2$supported))
-  testthat::expect_true(is.na(res2$revoked))
-  testthat::expect_identical(res2$status, "missing_token")
-
-  t@access_token <- "at"
-  t@refresh_token <- NA_character_
-  res3 <- revoke_token(cli, t, which = "refresh", async = FALSE)
+  t_missing_refresh <- OAuthToken(
+    access_token = "at",
+    refresh_token = NA_character_,
+    expires_at = as.numeric(Sys.time()) + 60,
+    id_token = NA_character_
+  )
+  res3 <- revoke_token(cli, t_missing_refresh, which = "refresh", async = FALSE)
   testthat::expect_true(isTRUE(res3$supported))
   testthat::expect_true(is.na(res3$revoked))
   testthat::expect_identical(res3$status, "missing_token")
@@ -43,7 +41,7 @@ testthat::test_that("revoke_token returns ok on 2xx and status on http error", {
 
   # HTTP error -> revoked = NA, status = "http_<code>"
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 400,
@@ -60,7 +58,7 @@ testthat::test_that("revoke_token returns ok on 2xx and status on http error", {
 
   # Success -> revoked = TRUE
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -92,7 +90,7 @@ testthat::test_that("revoke_token async returns a resolved promise", {
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -113,7 +111,7 @@ testthat::test_that("revoke_token async returns a resolved promise", {
   testthat::expect_s3_class(p, "promise")
   val <- NULL
   p$then(function(x) {
-    val <<- shinyOAuth:::replay_async_conditions(x)
+    val <<- x
   })
   deadline <- Sys.time() + 5
   while (is.null(val) && Sys.time() < deadline) {
@@ -121,5 +119,6 @@ testthat::test_that("revoke_token async returns a resolved promise", {
     Sys.sleep(0.02)
   }
   testthat::expect_type(val, "list")
+  testthat::expect_false(isTRUE(val$.shinyOAuth_async_wrapped))
   testthat::expect_true(isTRUE(val$revoked))
 })

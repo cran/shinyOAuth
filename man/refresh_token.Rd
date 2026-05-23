@@ -17,16 +17,21 @@ refresh_token(
 
 \item{token}{\link{OAuthToken} object containing the refresh token}
 
-\item{async}{Logical, default FALSE. If TRUE and the \link[mirai:mirai]{mirai::mirai} package is
-available, the refresh is performed off the main R session using
-\code{mirai::mirai()} and this function returns a mirai (which implements
-\code{as.promise()}) that resolves to an updated \code{OAuthToken}. Requires mirai
-daemons to be configured with \code{\link[mirai:daemons]{mirai::daemons()}}.}
+\item{async}{Logical, default FALSE. If TRUE and an async backend is
+configured, the refresh is dispatched through shinyOAuth's async promise
+path and this function returns a promise-compatible async result that
+resolves to an updated \code{OAuthToken}. \link[mirai:mirai]{mirai} is preferred when daemons are
+configured via \code{\link[mirai:daemons]{mirai::daemons()}}; otherwise the current \link[future:future]{future} plan is
+used. Non-sequential future plans run off the main R session;
+\code{future::sequential()} stays in-process.}
 
 \item{introspect}{Logical, default FALSE. After a successful refresh, if the
-provider exposes an introspection endpoint, perform a best-effort
-introspection of the new access token for audit/diagnostics. The result
-is not stored on the token object.}
+provider exposes an introspection endpoint, introspect the new access
+token for validation and audit/diagnostics. When enabled, refresh fails
+if introspection is unsupported, inactive, or missing required
+\code{introspect_elements}. The raw introspection result is not stored
+separately, but a successful introspection response may backfill
+\code{token@cnf}.}
 
 \item{shiny_session}{Optional pre-captured Shiny session context (from
 \code{capture_shiny_session_context()}) to include in audit events. Used when
@@ -38,11 +43,18 @@ An updated \link{OAuthToken} object with refreshed credentials.
 \strong{What changes:}
 \itemize{
 \item \code{access_token}: Always updated to the fresh token
-\item \code{expires_at}: Computed from \code{expires_in} when provided; otherwise \code{Inf}
+\item \code{expires_at}: Computed from \code{expires_in} when provided; otherwise a
+finite fallback expiry from \code{resolve_missing_expires_in()}
 \item \code{refresh_token}: Updated if the provider rotates it; otherwise preserved
 \item \code{id_token}: Updated only if the provider returns one (and it validates);
 otherwise the original from login is preserved
 \item \code{userinfo}: Refreshed if \code{userinfo_required = TRUE}; otherwise preserved
+\item \code{cnf}: Updated from the token response when present, and may be
+backfilled from refresh-time introspection when enabled. When the
+refresh response omits new observable \code{cnf}, shinyOAuth does not carry
+forward a prior \code{x5t#S256} thumbprint onto the refreshed token; mTLS
+sender-constrained state is kept only when the new token or its
+introspection response supplies fresh \code{cnf}
 }
 
 \strong{Validation failures cause errors:} If the provider returns a new ID
@@ -52,8 +64,8 @@ token, the refresh fails with an error. In \code{oauth_module_server()}, this
 clears the session and sets \code{authenticated = FALSE}.
 }
 \description{
-Refreshes an OAuth session by obtaining a fresh access token using the
-refresh token. When configured, also re-fetches userinfo and validates any
+Refreshes an OAuth session by obtaining a new access token with the refresh
+token. When configured, shinyOAuth also re-fetches userinfo and validates any
 new ID token returned by the provider.
 
 Per OIDC Core Section 12.2, providers may omit the ID token from refresh
@@ -70,8 +82,11 @@ fully validated (signature and claims) in addition to the OIDC 12.2 \code{sub}
 continuity check.
 
 When \code{userinfo_required = TRUE}, userinfo is re-fetched using the fresh
-access token. If both a new ID token and fresh userinfo are present and
-\code{userinfo_id_token_match = TRUE}, their subjects are verified to match.
+access token. Whenever shinyOAuth has both refreshed userinfo and a
+validated ID token baseline, it checks that their \code{sub} claims still match.
+If \code{userinfo_id_token_match = TRUE}, the absence of a trustworthy ID token
+baseline is treated as an error instead of silently accepting unbound
+userinfo data.
 }
 \examples{
 # Please note: `get_userinfo()`, `introspect_token()`, and `refresh_token()`
@@ -82,26 +97,26 @@ access token. If both a new ID token and fresh userinfo are present and
 
 # Example requires a real token from a completed OAuth flow
 # (code is therefore not run; would error with placeholder values below)
-\dontrun{
-# Define client
-client <- oauth_client(
-  provider = oauth_provider_github(),
-  client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
-  client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
-  redirect_uri = "http://127.0.0.1:8100"
-)
+if (interactive()) {
+  # Define client
+  client <- oauth_client(
+    provider = oauth_provider_github(),
+    client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
+    client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+    redirect_uri = "http://127.0.0.1:8100"
+  )
 
-# Have a valid OAuthToken object; fake example below
-# (typically provided by `oauth_module_server()` or `handle_callback()`)
-token <- handle_callback(client, "<code>", "<payload>", "<browser_token>")
+  # Have a valid OAuthToken object; fake example below
+  # (typically provided by `oauth_module_server()` or `handle_callback()`)
+  token <- handle_callback(client, "<code>", "<payload>", "<browser_token>")
 
-# Get userinfo
-user_info <- get_userinfo(client, token)
+  # Get userinfo
+  user_info <- get_userinfo(client, token)
 
-# Introspect token (if supported by provider)
-introspection <- introspect_token(client, token)
+  # Introspect token (if supported by provider)
+  introspection <- introspect_token(client, token)
 
-# Refresh token
-new_token <- refresh_token(client, token, introspect = TRUE)
+  # Refresh token
+  new_token <- refresh_token(client, token, introspect = TRUE)
 }
 }

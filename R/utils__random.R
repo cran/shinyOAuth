@@ -1,3 +1,12 @@
+# This file contains helpers for generating and validating random values used
+# during the login flow
+# Used for creating and checking state values, nonces, code verifiers, and
+# browser-session tokens
+
+# 1 Random and token validation helpers ----------------------------------------
+
+## 1.1 Generate and validate protocol randomness -------------------------------
+
 #' Generate a cryptographically secure URL-safe random string
 #'
 #' @description
@@ -30,6 +39,10 @@ random_urlsafe <- function(n = 32) {
 
 #' Generate a cryptographically random OIDC nonce
 #'
+#' Used when login flows need a nonce for ID token replay protection.
+#'
+#' @param length Length of the generated nonce.
+#' @return Cryptographically random nonce string.
 #' @keywords internal
 #' @noRd
 gen_oidc_nonce <- function(length = 32) {
@@ -39,26 +52,33 @@ gen_oidc_nonce <- function(length = 32) {
 #' Validate OAuth/OIDC nonce
 #'
 #' A nonce should be a high-entropy, URL-safe string. We accept the RFC 3986
-#' "unreserved" characters: \[A-Z\] / \[a-z\] / \[0-9\] / "-" / "." / "_" / "~".
+#' "unreserved" characters: `[A-Z]`, `[a-z]`, `[0-9]`, `-`, `.`, `_`, and
+#' `~`.
 #' To approximate >=128 bits of entropy for base64url-like strings, we require
-#' a minimum length of 22 characters. Max is capped at 255.
+#' a minimum length of 22 characters. Max is capped at 255. Used when nonce
+#' values return from the provider.
 #'
+#' @param nonce Nonce string to validate.
+#' @param min_chars Minimum allowed byte length.
+#' @param max_chars Maximum allowed byte length.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises
+#'   an error.
 #' @keywords internal
 #' @noRd
 validate_oidc_nonce <- function(nonce, min_chars = 22, max_chars = 255) {
   if (length(nonce) != 1) {
-    err_pkce("nonce must be a length-1 string")
+    err_oidc_nonce("nonce must be a length-1 string")
   }
   if (!is.character(nonce)) {
-    err_pkce("nonce must be character")
+    err_oidc_nonce("nonce must be character")
   }
   if (!is_valid_string(nonce)) {
-    err_pkce("nonce missing or empty")
+    err_oidc_nonce("nonce missing or empty")
   }
 
   n <- nchar(nonce, type = "bytes")
   if (n < min_chars || n > max_chars) {
-    err_pkce(sprintf(
+    err_oidc_nonce(sprintf(
       "nonce length must be between %d and %d characters",
       min_chars,
       max_chars
@@ -67,7 +87,9 @@ validate_oidc_nonce <- function(nonce, min_chars = 22, max_chars = 255) {
 
   # Unreserved characters per RFC 3986
   if (!grepl('^[A-Za-z0-9._~-]+$', nonce)) {
-    err_pkce("nonce contains invalid characters (allowed: A-Z a-z 0-9 - . _ ~)")
+    err_oidc_nonce(
+      "nonce contains invalid characters (allowed: A-Z a-z 0-9 - . _ ~)"
+    )
   }
 
   invisible(TRUE)
@@ -75,6 +97,10 @@ validate_oidc_nonce <- function(nonce, min_chars = 22, max_chars = 255) {
 
 #' Generate a RFC 7636 PKCE code_verifier
 #'
+#' Used when the client needs a PKCE verifier before building an auth request.
+#'
+#' @param n Length of the generated verifier.
+#' @return PKCE code-verifier string.
 #' @keywords internal
 #' @noRd
 gen_code_verifier <- function(n = 64) {
@@ -93,9 +119,13 @@ gen_code_verifier <- function(n = 64) {
 #' Validate PKCE code verifier per RFC 7636
 #'
 #' A code_verifier is a high-entropy cryptographic random string using the
-#' characters \[A-Z\] / \[a-z\] / \[0-9\] / "-" / "." / "_" / "~" with a minimum
-#' length of 43 characters and a maximum length of 128 characters.
+#' characters `[A-Z]`, `[a-z]`, `[0-9]`, `-`, `.`, `_`, and `~`, with a
+#' minimum length of 43 characters and a maximum length of 128 characters. Used
+#' before or after PKCE values are sent in requests.
 #'
+#' @param verifier PKCE code verifier string.
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises
+#'   an error.
 #' @keywords internal
 #' @noRd
 validate_code_verifier <- function(verifier) {
@@ -122,12 +152,15 @@ validate_code_verifier <- function(verifier) {
 #'
 #' JS sets a 64-byte random token encoded as lowercase hex
 #' (128 chars, \[0-9a-f\]). Enforce lowercase only to match JS
-#' and avoid accepting mixed/uppercase variants.
+#' and avoid accepting mixed/uppercase variants. Used when callbacks and module
+#' state must stay bound to one browser instance.
 #'
 #' @param token String to validate (e.g., input$shinyOAuth_sid)
 #' @param expected_bytes Expected number of random bytes before hex-encoding.
 #'   Defaults to 64 to match the JS `randomHex(64)` call.
 #'
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises
+#'   an error.
 #' @keywords internal
 #' @noRd
 validate_browser_token <- function(token, expected_bytes = 64L) {
@@ -174,6 +207,7 @@ validate_browser_token <- function(token, expected_bytes = 64L) {
 #'   \[A-Z\] / \[a-z\] / \[0-9\] / "-" / "." / "_" / "~".
 #' To approximate >=128 bits of entropy for base64url-like strings (~6 bits/char),
 #' the default minimum length is 22 characters. Upper bound is conservative.
+#' Used before state is stored and after it returns in a callback.
 #'
 #' @param state String to validate.
 #' @param min_chars Minimum allowed length. Default 22 (~128 bits for base64url-like).
@@ -181,6 +215,8 @@ validate_browser_token <- function(token, expected_bytes = 64L) {
 #' @param strict_base64url If TRUE, restrict to base64url charset only
 #'   (`[A-Za-z0-9_-]`) rather than the full RFC 3986 unreserved set.
 #'
+#' @return Invisibly returns `TRUE` on success. Otherwise this function raises
+#'   an error.
 #' @keywords internal
 #' @noRd
 validate_state <- function(

@@ -118,7 +118,8 @@ test_that("oauth_provider rejects vector pkce_method", {
       token_url = "https://example.com/token",
       pkce_method = c("S256", "plain")
     ),
-    "pkce_method must be a scalar character string"
+    "pkce_method must be a scalar character string",
+    class = "shinyOAuth_input_error"
   )
 })
 
@@ -142,6 +143,18 @@ test_that("oauth_provider accepts NA pkce_method (defaults to S256)", {
   expect_identical(p@pkce_method, "S256")
 })
 
+test_that("oauth_provider rejects invalid scalar pkce_method", {
+  expect_error(
+    oauth_provider(
+      name = "test",
+      auth_url = "https://example.com/auth",
+      token_url = "https://example.com/token",
+      pkce_method = "s512"
+    ),
+    "pkce_method must be 'S256' or 'plain'"
+  )
+})
+
 # ── OAuthProvider: URL inputs ────────────────────────────────────────────────
 
 test_that("oauth_provider rejects vector auth_url", {
@@ -151,7 +164,8 @@ test_that("oauth_provider rejects vector auth_url", {
       auth_url = c("https://a.com/auth", "https://b.com/auth"),
       token_url = "https://example.com/token"
     ),
-    "auth_url must be a scalar character string"
+    "auth_url must be a scalar character string",
+    class = "shinyOAuth_input_error"
   )
 })
 
@@ -162,7 +176,8 @@ test_that("oauth_provider rejects vector token_url", {
       auth_url = "https://example.com/auth",
       token_url = c("https://a.com/token", "https://b.com/token")
     ),
-    "token_url must be a scalar character string"
+    "token_url must be a scalar character string",
+    class = "shinyOAuth_input_error"
   )
 })
 
@@ -174,7 +189,8 @@ test_that("oauth_provider rejects vector userinfo_url", {
       token_url = "https://example.com/token",
       userinfo_url = c("https://a.com/u", "https://b.com/u")
     ),
-    "userinfo_url must be a scalar character string"
+    "userinfo_url must be a scalar character string",
+    class = "shinyOAuth_input_error"
   )
 })
 
@@ -186,7 +202,8 @@ test_that("oauth_provider rejects vector introspection_url", {
       token_url = "https://example.com/token",
       introspection_url = c("https://a.com/i", "https://b.com/i")
     ),
-    "introspection_url must be a scalar character string"
+    "introspection_url must be a scalar character string",
+    class = "shinyOAuth_input_error"
   )
 })
 
@@ -198,11 +215,17 @@ test_that("oauth_provider rejects vector revocation_url", {
       token_url = "https://example.com/token",
       revocation_url = c("https://a.com/r", "https://b.com/r")
     ),
-    "revocation_url must be a scalar character string"
+    "revocation_url must be a scalar character string",
+    class = "shinyOAuth_input_error"
   )
 })
 
 # ── JWT helpers: defense-in-depth ────────────────────────────────────────────
+
+decode_jwt_payload <- function(jwt) {
+  parts <- strsplit(jwt, ".", fixed = TRUE)[[1]]
+  jsonlite::fromJSON(shinyOAuth:::base64url_decode(parts[[2]]))
+}
 
 test_that("build_client_assertion handles zero-length client_assertion_alg gracefully", {
   prov <- oauth_provider(
@@ -225,6 +248,84 @@ test_that("build_client_assertion handles zero-length client_assertion_alg grace
   jwt <- shinyOAuth:::build_client_assertion(cli, "https://example.com/token")
   expect_type(jwt, "character")
   expect_true(nzchar(jwt))
+})
+
+test_that("build_client_assertion clamps sub-60 TTL values to 60 seconds", {
+  withr::local_options(list(shinyOAuth.client_assertion_ttl = 30L))
+
+  prov <- oauth_provider(
+    name = "test",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    token_auth_style = "client_secret_jwt",
+    id_token_required = FALSE,
+    id_token_validation = FALSE
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = paste(rep("s", 32), collapse = ""),
+    redirect_uri = "http://localhost:8100"
+  )
+
+  payload <- decode_jwt_payload(
+    shinyOAuth:::build_client_assertion(cli, prov@token_url)
+  )
+
+  expect_identical(as.integer(payload$exp - payload$iat), 60L)
+})
+
+test_that("build_client_assertion falls back to the default TTL for invalid values", {
+  withr::local_options(list(shinyOAuth.client_assertion_ttl = NA_real_))
+
+  prov <- oauth_provider(
+    name = "test",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    token_auth_style = "client_secret_jwt",
+    id_token_required = FALSE,
+    id_token_validation = FALSE
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = paste(rep("s", 32), collapse = ""),
+    redirect_uri = "http://localhost:8100"
+  )
+
+  payload <- decode_jwt_payload(
+    shinyOAuth:::build_client_assertion(cli, prov@token_url)
+  )
+
+  expect_identical(as.integer(payload$exp - payload$iat), 120L)
+})
+
+test_that("build_client_assertion clamps supra-300 TTL values to 300 seconds", {
+  withr::local_options(list(shinyOAuth.client_assertion_ttl = 600L))
+
+  prov <- oauth_provider(
+    name = "test",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    token_auth_style = "client_secret_jwt",
+    id_token_required = FALSE,
+    id_token_validation = FALSE
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = paste(rep("s", 32), collapse = ""),
+    redirect_uri = "http://localhost:8100"
+  )
+
+  jwt <- NULL
+  expect_warning(
+    jwt <- shinyOAuth:::build_client_assertion(cli, prov@token_url),
+    regexp = "clamping to 300 seconds"
+  )
+  payload <- decode_jwt_payload(jwt)
+
+  expect_identical(as.integer(payload$exp - payload$iat), 300L)
 })
 
 test_that("resolve_client_assertion_audience handles NA sentinel without crash", {

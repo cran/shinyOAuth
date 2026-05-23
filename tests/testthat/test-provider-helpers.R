@@ -100,14 +100,32 @@ test_that("oauth_provider_microsoft with common tenant has correct defaults", {
   expect_match(p@auth_url, "login\\.microsoftonline\\.com/common")
   expect_match(p@token_url, "login\\.microsoftonline\\.com/common")
   expect_match(p@userinfo_url, "graph\\.microsoft\\.com")
-  expect_true(is.na(p@issuer))
+  expect_identical(
+    p@issuer,
+    "https://login.microsoftonline.com/common/v2.0"
+  )
   expect_true(is.na(p@introspection_url))
-  expect_false(p@use_nonce)
+  expect_true(p@use_nonce)
   expect_true(p@use_pkce)
   expect_identical(p@token_auth_style, "body")
   expect_identical(p@allowed_algs, c("RS256"))
-  expect_false(p@id_token_validation)
-  expect_false(p@id_token_required)
+  expect_true(p@id_token_validation)
+  expect_true(p@id_token_required)
+  expect_true(p@userinfo_id_token_match)
+})
+
+test_that("oauth_provider_microsoft with consumers tenant uses stable issuer", {
+  p <- oauth_provider_microsoft(tenant = "consumers")
+
+  expect_match(p@auth_url, "login\\.microsoftonline\\.com/consumers")
+  expect_match(p@token_url, "login\\.microsoftonline\\.com/consumers")
+  expect_identical(
+    p@issuer,
+    "https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0"
+  )
+  expect_true(p@use_nonce)
+  expect_true(p@id_token_validation)
+  expect_true(p@id_token_required)
 })
 
 test_that("oauth_provider_microsoft with GUID tenant enables validation", {
@@ -131,17 +149,29 @@ test_that("oauth_provider_microsoft respects explicit id_token_validation overri
     id_token_validation = FALSE
   )
   expect_false(p@id_token_validation)
+  expect_match(p@issuer, guid, fixed = TRUE)
 
-  # Explicitly enable for common tenant is impossible because it requires
-  # use_nonce = TRUE which requires an issuer, and common has no stable issuer.
-  # This should error at validation.
-  expect_error(
-    oauth_provider_microsoft(
-      tenant = "common",
-      id_token_validation = TRUE
-    ),
-    regexp = "use_nonce.*issuer"
+  # Explicitly disable for tenant-independent aliases should opt back into
+  # OAuth + userinfo only.
+  p_common <- oauth_provider_microsoft(
+    tenant = "common",
+    id_token_validation = FALSE
   )
+  expect_true(is.na(p_common@issuer))
+  expect_false(p_common@id_token_validation)
+  expect_false(p_common@id_token_required)
+  expect_false(p_common@use_nonce)
+
+  # Explicitly enabling for common should preserve the tenant-independent issuer.
+  p_common_oidc <- oauth_provider_microsoft(
+    tenant = "common",
+    id_token_validation = TRUE
+  )
+  expect_identical(
+    p_common_oidc@issuer,
+    "https://login.microsoftonline.com/common/v2.0"
+  )
+  expect_true(p_common_oidc@use_nonce)
 })
 
 test_that("oauth_provider_oidc builds correct endpoint URLs from base_url", {
@@ -161,6 +191,19 @@ test_that("oauth_provider_oidc builds correct endpoint URLs from base_url", {
   expect_true(p@id_token_validation)
   expect_identical(p@token_auth_style, "header")
   expect_identical(p@allowed_token_types, "Bearer")
+})
+
+test_that("oauth_provider_oidc trims trailing slashes from base_url", {
+  p <- oauth_provider_oidc(
+    name = "test-oidc-trailing-slash",
+    base_url = "https://auth.example.com/"
+  )
+
+  expect_identical(p@auth_url, "https://auth.example.com/authorize")
+  expect_identical(p@token_url, "https://auth.example.com/token")
+  expect_identical(p@userinfo_url, "https://auth.example.com/userinfo")
+  expect_identical(p@introspection_url, "https://auth.example.com/introspect")
+  expect_identical(p@issuer, "https://auth.example.com")
 })
 
 test_that("oauth_provider_oidc allows custom paths", {
@@ -230,7 +273,7 @@ test_that("oauth_provider_keycloak constructs correct issuer from base_url + rea
   disc_json <- make_discovery_doc(issuer)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -262,7 +305,7 @@ test_that("oauth_provider_okta constructs correct issuer from domain + auth_serv
   disc_json <- make_discovery_doc(issuer)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -288,7 +331,7 @@ test_that("oauth_provider_auth0 constructs correct issuer from domain", {
   disc_json <- make_discovery_doc(issuer)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -311,7 +354,7 @@ test_that("oauth_provider_auth0 includes audience in extra_auth_params", {
   disc_json <- make_discovery_doc(issuer)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -338,7 +381,7 @@ test_that("oauth_provider_slack constructs correct issuer", {
   disc_json <- make_discovery_doc(issuer)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -359,17 +402,41 @@ test_that("oauth_provider_slack constructs correct issuer", {
 # ── Input validation for discovery-based providers ──────────────────────────
 
 test_that("oauth_provider_keycloak rejects empty base_url and realm", {
-  expect_error(oauth_provider_keycloak(base_url = "", realm = "r"))
-  expect_error(oauth_provider_keycloak(
-    base_url = "http://localhost",
-    realm = ""
-  ))
+  expect_error(
+    oauth_provider_keycloak(base_url = "", realm = "r"),
+    "base_url must be a non-empty string",
+    class = "shinyOAuth_input_error"
+  )
+  expect_error(
+    oauth_provider_keycloak(
+      base_url = "http://localhost",
+      realm = ""
+    ),
+    "realm must be a non-empty string",
+    class = "shinyOAuth_input_error"
+  )
 })
 
 test_that("oauth_provider_okta rejects empty domain", {
-  expect_error(oauth_provider_okta(domain = ""))
+  expect_error(
+    oauth_provider_okta(domain = ""),
+    "domain must be a non-empty string",
+    class = "shinyOAuth_input_error"
+  )
 })
 
 test_that("oauth_provider_auth0 rejects empty domain", {
-  expect_error(oauth_provider_auth0(domain = ""))
+  expect_error(
+    oauth_provider_auth0(domain = ""),
+    "domain must be a non-empty string",
+    class = "shinyOAuth_input_error"
+  )
+})
+
+test_that("oauth_provider_microsoft rejects empty tenant with typed error", {
+  expect_error(
+    oauth_provider_microsoft(tenant = ""),
+    "tenant must be a non-empty string",
+    class = "shinyOAuth_input_error"
+  )
 })

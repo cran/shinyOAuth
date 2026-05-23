@@ -21,11 +21,12 @@ oauth_provider_keycloak(
 
 \item{token_auth_style}{Optional override for token endpoint authentication
 method. One of "header" (client_secret_basic), "body"
-(client_secret_post), "private_key_jwt", or "client_secret_jwt". Defaults
-to "body" for Keycloak, which works for both confidential clients and
-public PKCE clients (secretless). If you pass \code{NULL}, discovery will infer
-the method from the provider's
-\code{token_endpoint_auth_methods_supported} metadata.}
+(client_secret_post), "public" (send \code{client_id} only; \code{"none"} alias also
+accepted), "private_key_jwt", or "client_secret_jwt". Defaults
+to "body" for Keycloak, which works for many common setups. Use \code{"public"}
+if you need to suppress \code{client_secret} even when it is set in the
+environment. If you pass \code{NULL}, discovery will infer the method from the
+provider's \code{token_endpoint_auth_methods_supported} metadata.}
 }
 \value{
 \link{OAuthProvider} object configured for the specified Keycloak realm
@@ -52,14 +53,14 @@ generic_oidc_provider <- oauth_provider_oidc(
 
 # Configure a OIDC provider via OIDC discovery
 # (requires network access)
-\donttest{
-# Using Auth0 sample issuer as an example
-oidc_discovery_provider <- oauth_provider_oidc_discover(
-  issuer = "https://samples.auth0.com"
-)
+if (interactive()) {
+  # Using Auth0 sample issuer as an example
+  oidc_discovery_provider <- oauth_provider_oidc_discover(
+    issuer = "https://samples.auth0.com"
+  )
 }
 
-# GitHub preconfigured provider 
+# GitHub preconfigured provider
 github_provider <- oauth_provider_github()
 
 # Google preconfigured provider
@@ -68,30 +69,30 @@ google_provider <- oauth_provider_google()
 # Microsoft preconfigured provider
 # See `?oauth_provider_microsoft` for example using a custom tenant ID
 
-# Spotify preconfigured provider 
+# Spotify preconfigured provider
 spotify_provider <- oauth_provider_spotify()
 
 # Slack via OIDC discovery
 # (requires network access)
-\donttest{
-slack_provider <- oauth_provider_slack()
+if (interactive()) {
+  slack_provider <- oauth_provider_slack()
 }
-  
+
 # Keycloak
 # (requires configured Keycloak realm; example below is therefore not run)
-\dontrun{
-oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
+if (interactive()) {
+  oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
 }
 
 # Auth0
 # (requires configured Auth0 domain; example below is therefore not run)
-\dontrun{
-oauth_provider_auth0(domain = "your-tenant.auth0.com")
+if (interactive()) {
+  oauth_provider_auth0(domain = "your-tenant.auth0.com")
 }
 
 # Okta
 # (requires configured Okta domain; example below is therefore not run)
-\dontrun{
-oauth_provider_okta(domain = "dev-123456.okta.com")
+if (interactive()) {
+  oauth_provider_okta(domain = "dev-123456.okta.com")
 }
 }

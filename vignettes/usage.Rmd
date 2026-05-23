@@ -9,15 +9,15 @@ vignette: >
 
 ## Overview
 
-'shinyOAuth' implements provider‑agnostic OAuth 2.0 and OpenID Connect (OIDC) 
-authorization/authentication for Shiny apps, with modern S7 classes and secure defaults.
-It streamlines the full authorization/authentication flow, including:
+'shinyOAuth' helps a Shiny app send users to an OAuth 2.0 or OpenID Connect
+(OIDC) provider, handle the return callback, and keep the flow secure by
+default. It takes care of:
 
-- Building authorization URLs and redirecting unauthenticated users
-- State, nonce, and PKCE generation, sealing, and verification
-- Authorization code exchange and token validation
-- Optional userinfo retrieval & ID token signature/claims validation
-- Proactive token refresh and re‑authentication triggers
+- Building the login URL and redirecting users when needed
+- Creating and checking state, nonce, and PKCE values
+- Exchanging the authorization code for tokens and validating the result
+- Optionally loading user info and validating ID token signatures/claims
+- Optionally refreshing tokens before expiry or triggering re-login
 
 For a full step-by-step protocol breakdown, see the separate vignette:
 `vignette("authentication-flow", package = "shinyOAuth")`.
@@ -25,9 +25,12 @@ For a full step-by-step protocol breakdown, see the separate vignette:
 For a detailed explanation of audit logging key events during the flow, see:
 `vignette("audit-logging", package = "shinyOAuth")`.
 
+For a dedicated description of OpenTelemetry support in 'shinyOAuth', see:
+`vignette("opentelemetry", package = "shinyOAuth")`.
+
 ## Minimal Shiny module example
 
-Below is a minimal example using a GitHub's OAuth 2.0 app (same as shown in the README). 
+Below is a minimal example using a GitHub OAuth app (the same setup shown in the README).
 Register an OAuth 2.0 application at <https://github.com/settings/developers> and set
 environment variables `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET`.
 
@@ -77,18 +80,17 @@ runApp(
 # (viewers in RStudio/Positron/etc. cannot perform necessary redirects)
 ```
 
-Note that `ui` includes `use_shinyOAuth()` to load the necessary JavaScript
-dependency. Always place `use_shinyOAuth()` in your UI; otherwise, the module will not function.
-You may place it near the top-level of your UI (e.g., inside `fluidPage()`, `tagList()`,
-or `bslib::page()`).
+`use_shinyOAuth()` must be included once in your UI. It loads the JavaScript
+helper that the login flow depends on. Place it near the top of your UI, for
+example inside `fluidPage()`, `tagList()`, or `bslib::page()`.
 
-Note also that you must access the app in a regular browser.
-This is because the necessary redirects that the browser must perform can usually
-not be handled inside embedded viewers of IDEs like RStudio or Positron.
+Open the app in a regular browser, not an IDE viewer. Embedded viewers in tools
+like RStudio or Positron usually cannot complete the required redirects.
 
 ## Manual login button variant
 
-Below is an example where the user clicks a button to start the login process instead of being redirected immediately on page load.
+This version does the same thing, but waits for the user to click a button
+before starting login.
 
 ```{r, eval = FALSE}
 library(shiny)
@@ -146,9 +148,14 @@ runApp(
 
 ## Making authenticated API calls
 
-Once authenticated, you may want to call an API on behalf of the user using the access token.
-Use `client_bearer_req()` to quickly build an authorized 'httr2' request with the correct Bearer token.
-See the example app below; it calls the GitHub API to obtain the user's repositories.
+After login succeeds, you can use the access token to call an API on the
+user's behalf. `perform_resource_req()` is the easiest option for most
+call sites: it builds an authorized `httr2` request, performs it, and when the
+token type is `DPoP` it also handles a one-time `DPoP-Nonce` challenge retry.
+Use `resource_req()` when you need to inspect or customize the `httr2`
+request before sending it yourself.
+
+The example below calls the GitHub API to fetch the user's repositories.
 
 ```{r, eval = FALSE}
 library(shiny)
@@ -183,8 +190,10 @@ server <- function(input, output, session) {
 
     # Example additional API request using the access token
     # (e.g., fetch user repositories from GitHub)
-    req <- client_bearer_req(auth$token, "https://api.github.com/user/repos")
-    resp <- httr2::req_perform(req)
+    resp <- perform_resource_req(
+      auth$token,
+      "https://api.github.com/user/repos"
+    )
 
     if (httr2::resp_is_error(resp)) {
       repositories(NULL)
@@ -232,54 +241,25 @@ runApp(
 For an example application which fetches data from the Spotify web API, see:
 `vignette("example-spotify", package = "shinyOAuth")`.
 
-## Token introspection (optional)
-
-By default, `oauth_module_server()` considers a login complete once the callback has been validated
-and token retrieval plus any configured OIDC checks have succeeded.
-
-If your provider supports RFC 7662 token introspection, you can optionally add an extra
-login-time validation step by enabling `introspect = TRUE` when creating your `oauth_client()`.
-
-When enabled, the module calls the provider introspection endpoint during callback processing and
-requires the response to indicate `active = TRUE`. If introspection is unsupported by the provider
-or the introspection request fails, the login is aborted and `$authenticated` is not set to `TRUE`.
-
-You can optionally request additional checks via `introspect_elements`:
-
-- `"sub"` – require the introspected `sub` to match the session subject (from ID token `sub` when
-  available; otherwise userinfo `sub` when available)
-- `"client_id"` – require the introspected `client_id` to match your OAuth client id
-- `"scope"` – validate returned scopes against requested scopes; this follows the client's
-  `scope_validation` mode (`"strict"` errors, `"warn"` warns, `"none"` skips scope checks)
-
-(Note that not all providers may return each of these fields in introspection responses.)
-
-```r
-# Example with introspection enabled
-client <- oauth_client(
-  provider = provider,
-  client_id = Sys.getenv("OAUTH_CLIENT_ID"),
-  client_secret = Sys.getenv("OAUTH_CLIENT_SECRET"),
-  redirect_uri = "http://127.0.0.1:8100",
-  introspect = TRUE,
-  introspect_elements = c("sub", "client_id", "scope")
-)
-
-auth <- oauth_module_server("auth", client, auto_redirect = TRUE)
-```
-
 ## Async mode to keep UI responsive
 
-By default, `oauth_module_server()` performs network operations (authorization code exchange, refresh, userinfo) on the main R thread. During transient network errors the package retries with backoff, and sleeping on the main thread can block the Shiny event loop for the worker process.
+By default, `oauth_module_server()` performs network operations
+(authorization-code exchange, refresh, userinfo) on the main R thread. That
+keeps setup simple, but a slow provider or retry delay can temporarily block
+the Shiny worker handling the session.
 
-To avoid blocking, enable async mode and configure an async backend. 
-The package supports both 'mirai' and 'future' for async execution (see below).
-The package auto-detects which backend is configured. 
-If both are set up, mirai takes precedence (it offers lower overhead and non-blocking dispatch).
+
+To avoid blocking, enable async mode and configure an async backend.
+'shinyOAuth' supports both `mirai` and `future` and auto-detects whichever one
+you have configured. If both are set up, `mirai` takes precedence.
+
+For the `future` backend, use a non-sequential plan such as `future::multisession()` or
+`future::multicore()` where available. `future::sequential()` still runs in the
+same R process, so it does not move network work off the main R thread.
 
 If you need to keep `async = FALSE`, you may consider reducing retry behaviour
-to limit blocking during provider incidents. See 'Global options' and then 
-'HTTP timeout/retries'.
+to limit blocking during provider incidents. See the global options section for
+timeout and retry settings.
 
 ### 'mirai' async backend (recommended)
 
@@ -322,8 +302,10 @@ server <- function(input, output, session) {
 
 ## Logout
 
-To log out the user, call `auth$logout()`. This clears the local session and
-attempts to revoke tokens at the provider (if a revocation endpoint is available):
+To log out the user, call `auth$logout()`. This clears the local session,
+sets `auth$error` to `"logged_out"`, reissues a fresh browser token for the
+next login attempt, and attempts to revoke tokens at the provider (if a
+revocation endpoint is available):
 
 ```r
 observeEvent(input$logout_btn, {
@@ -331,43 +313,109 @@ observeEvent(input$logout_btn, {
 })
 ```
 
-Revocation uses RFC 7009 and runs asynchronously when `oauth_module_server(async = TRUE)`.
-See `?revoke_token` for programmatic use outside the module.
+## Using `response_mode = "form_post"`
 
-### Automatic revocation on session end
+The response mode determines how the provider returns the authorization response
+to the app after the user authenticates. The effective default is the normal
+query callback flow, which means the provider redirects back to the app with
+query parameters (e.g., `?code=...&state=...`) and shinyOAuth does not send a
+`response_mode` parameter unless you configure one.
 
-To revoke tokens when the Shiny session ends (e.g., browser tab closed, timeout), 
-set `revoke_on_session_end = TRUE`:
+For most Shiny apps, query is the preferred response mode because it works
+seamlessly with Shiny's routing and does not require any special UI handling.
+It is the default and does not require setting `response_mode` explicitly.
 
-```r
-auth <- oauth_module_server(
-  "auth",
-  client = client,
-  revoke_on_session_end = TRUE
+For some apps, when your provider explicitly requires or recommends
+`response_mode = "form_post"`, you can configure that on the client.
+Because Shiny apps do not handle POST callbacks by default, you need to enable
+this by wrapping your UI with `oauth_form_post_ui()`. This allows the provider
+to POST the authorization response back to the app. That wrapper also injects
+the shinyOAuth browser dependency automatically, so you do not need a separate
+`use_shinyOAuth()` call in the wrapped UI. The `/callback` path below is only
+an example sub-route; using the app root is also fine as long as the provider
+redirect URI matches the path handled by `oauth_form_post_ui()`. Here's how you
+can set it up:
+
+This is the plain OAuth/OIDC Form Post Response Mode: the POST body contains
+parameters such as `code`, `state`, `error`, and `iss`. JWT Secured
+Authorization Response Mode (JARM) values such as `form_post.jwt` use a
+different JWT `response` payload and are not currently supported.
+
+```{r, eval = FALSE}
+library(shiny)
+library(shinyOAuth)
+
+provider <- oauth_provider_keycloak(
+  base_url = "http://localhost:8080",
+  realm = "shinyoauth"
 )
+
+client <- oauth_client(
+  provider = provider,
+  client_id = "shiny-public",
+  client_secret = "",
+  # `/callback` is only an example sub-route. The app root also works if the
+  # provider redirect URI matches the path handled by `oauth_form_post_ui()`
+  redirect_uri = "http://127.0.0.1:8100/callback",
+  scopes = c("openid", "profile", "email"),
+  response_mode = "form_post"
+)
+
+base_ui <- fluidPage(
+  uiOutput("login")
+)
+
+ui <- oauth_form_post_ui(base_ui, id = "auth", client = client)
+
+server <- function(input, output, session) {
+  auth <- oauth_module_server("auth", client, auto_redirect = TRUE)
+
+  output$login <- renderUI({
+    if (auth$authenticated) {
+      tagList(
+        tags$p("You are logged in!"),
+        tags$pre(paste(capture.output(str(auth$token@userinfo)), collapse = "\n"))
+      )
+    } else {
+      tags$p("You are not logged in.")
+    }
+  })
+}
+
+runApp(
+  shinyApp(ui, server, uiPattern = ".*"),
+  port = 8100,
+  launch.browser = FALSE
+)
+
+# Open the app in your regular browser at http://127.0.0.1:8100
+# (viewers in RStudio/Positron/etc. cannot perform necessary redirects)
 ```
 
-Note: this is a best-effort operation; network failures or provider unavailability may prevent revocation. 
-Combine with appropriate token lifetimes on the provider side for defense in depth.
-  
+If your `redirect_uri` is the app root (like `http://127.0.0.1:8100`),
+`uiPattern = ".*"` is usually harmless.
+If your `redirect_uri` is a sub-route (like `http://127.0.0.1:8100/callback`),
+use `uiPattern = ".*"` so Shiny routes that POST request through `oauth_form_post_ui()`
+before the app returns to its normal GET flow.
+
 ## Global options
 
-The package provides several global options to customize behavior.
-Below is a list of all available options.
+The package provides several global options to customize behavior. Most apps
+can stay with the defaults; this section is mainly for cases where you want to
+tune logging, networking, or a specific advanced behavior.
 
 ### Observability/logging
 
-- `options(shinyOAuth.print_errors = TRUE)` – concise error lines (interactive / tests only)
-- `options(shinyOAuth.print_traceback = TRUE)` – include backtraces (interactive / tests only)
-- `options(shinyOAuth.expose_error_body = TRUE)` – include sanitized HTTP bodies (may reveal details)
-- `options(shinyOAuth.trace_hook = function(event){ ... })` – structured events (errors, http, etc.)
-- `options(shinyOAuth.audit_hook = function(event){ ... })` – separate audit stream
+- `options(shinyOAuth.audit_hook = function(event){ ... })` – receive structured audit and error events
 - `options(shinyOAuth.audit_include_http = FALSE)` – exclude HTTP request details from audit events (default: `TRUE`)
-- `options(shinyOAuth.audit_redact_http = FALSE)` – disable automatic redaction of sensitive data in audit events (default: `TRUE`)
-- `options(shinyOAuth.audit_digest_key = ...)` – key for HMAC-SHA256 audit digests
+- `options(shinyOAuth.audit_redact_http = FALSE)` – disable automatic redaction of sensitive data in audit events (default: `TRUE`). Debug only: raw mode can expose cookies, authorization headers, codes, state values, and client IP addresses
+- `options(shinyOAuth.audit_digest_key = ...)` – shared key for HMAC-SHA256 digests used in audit/OTel attributes. By default, 'shinyOAuth' generates a random per-process key when this is not configured
+- `options(shinyOAuth.otel_tracing_enabled = FALSE)` – disable 'shinyOAuth' OpenTelemetry span creation and async trace-context propagation. Default: `TRUE`
+- `options(shinyOAuth.otel_logging_enabled = FALSE)` – disable 'shinyOAuth' OpenTelemetry log emission. Default: `TRUE`
 
 See `vignette("audit-logging", package = "shinyOAuth")` for details about
-audit and trace hooks.
+audit hooks, and `vignette("opentelemetry", package = "shinyOAuth")`
+for more details about logs and traces via OpenTelemetry.
 
 ### Networking/security
 
@@ -378,8 +426,9 @@ audit and trace hooks.
 to this whitelist
 - `options(shinyOAuth.allow_hs = TRUE)` – opt‑in HMAC validation for ID tokens (HS256/HS384/HS512). Requires a strictly server‑side `client_secret`
 - `options(shinyOAuth.client_assertion_ttl = 120L)` – lifetime in seconds for JWT client assertions used with
-  `client_secret_jwt` or `private_key_jwt` token endpoint authentication. Values below 60 seconds are coerced up to
-  a safe minimum; default is 120 seconds
+  `client_secret_jwt` or `private_key_jwt` token endpoint authentication. Finite values below 60 seconds are coerced to
+  60 seconds, finite values above 300 seconds are clamped to 300 seconds, and `NA` or non-finite values fall back to
+  the 120-second default
 - `options(shinyOAuth.state_fail_delay_ms = c(10, 30))` – adds a small randomized delay (in milliseconds) before any state validation failure (e.g., malformed token, IV/tag/ciphertext issues, or GCM authentication failure). This helps reduce timing side‑channels between different failure modes
 
 Note on `allowed_hosts`: patterns support globs (`*`, `?`). 
@@ -388,16 +437,25 @@ Avoid this unless you truly intend to accept any host; prefer pinning to your do
 
 ### Extra parameter overrides
 
-By default, shinyOAuth blocks certain security‑critical parameters from being passed 
-via `extra_auth_params`, `extra_token_params`, and `extra_token_headers`. This prevents
-accidental misconfiguration that could break state binding, PKCE integrity, or client authentication.
+Most users can ignore this section. By default, 'shinyOAuth' blocks certain
+security-critical parameters from being passed via `extra_auth_params`,
+`extra_token_params`, and `extra_token_headers`. This helps prevent accidental
+misconfiguration that could break state binding, PKCE, or client
+authentication.
+
+`response_mode` now has a dedicated client argument via
+`oauth_client(..., response_mode = ...)`. Prefer that first-class API over
+setting `extra_auth_params$response_mode` manually.
 
 If you have a specific, advanced use case where you need to override one of these blocked parameters,
 you can unblock them using the following options:
 
 - `options(shinyOAuth.unblock_auth_params = c("redirect_uri"))` – allows overriding the specified
   authorization URL parameters. Default blocked: `response_type`, `client_id`, `redirect_uri`, `state`,
-  `scope`, `code_challenge`, `code_challenge_method`, `nonce`, `claims`
+  `request_uri`, `request`, `scope`, `code_challenge`, `code_challenge_method`, `nonce`, `claims`
+- `request` and `request_uri` stay blocked by default because 'shinyOAuth' manages them internally for
+  PAR and Request Object flows; leave them reserved unless you are intentionally taking responsibility
+  for a fully custom advanced flow.
 - `options(shinyOAuth.unblock_token_params = c(...))` – allows overriding the specified token exchange
   parameters. Default blocked: `grant_type`, `code`, `redirect_uri`, `code_verifier`, `client_id`,
   `client_secret`, `client_assertion`, `client_assertion_type`
@@ -415,14 +473,12 @@ you can unblock them using the following options:
 - `options(shinyOAuth.replay_async_conditions = FALSE)` – when `FALSE`, warnings and messages captured
   from async workers are silently discarded instead of being re-emitted on the main R process. Default is
   `TRUE` (replay all captured conditions). Useful if worker diagnostics are too noisy or handled
-  separately via `trace_hook` / `audit_hook`
+  separately via `audit_hook`
 
 ### Token lifetime fallback
 
 - `options(shinyOAuth.default_expires_in = 3600)` – fallback token lifetime (in seconds) 
-when the provider omits `expires_in` from the token response. Without this option 
-the lifetime defaults to `Inf` and proactive refresh will never trigger. A warning
-is emitted in either case
+  when the provider omits `expires_in` from the token response
 
 ### HTTP settings (timeout, retries, user agent)
 
@@ -438,7 +494,8 @@ is emitted in either case
 - `options(shinyOAuth.allow_redirect = FALSE)` –  when `FALSE` (default), all sensitive
   HTTP requests (token exchange, refresh, introspection, revocation, userinfo, OIDC discovery, JWKS) refuse to
   follow redirects and reject 3xx responses. This prevents authorization codes, tokens, and PKCE verifiers from
-  leaking to redirect targets. Only set to `TRUE` if your provider legitimately requires redirect-following
+  leaking to redirect targets. Set to `TRUE` only when you deliberately accept that redirect-following risk for a
+  specific deployment; this opt-in is honored in all sessions
 - `options(shinyOAuth.max_body_bytes = 1048576)` – maximum response body size (bytes, default 1 MiB) accepted
   from OAuth endpoints (token, introspection, userinfo, discovery, JWKS). Curl aborts the transfer early when
   `Content-Length` exceeds this limit; a post-download guard catches chunked responses. Increase if a provider
@@ -447,21 +504,11 @@ is emitted in either case
 ### State store
 
 - `options(shinyOAuth.allow_non_atomic_state_store = TRUE)` – allow non-atomic `$get()` + `$remove()` fallback
-  for shared state stores (e.g., `cachem::cache_disk()`) that do not implement `$take()`. By default, shinyOAuth
+  for shared state stores (e.g., `cachem::cache_disk()`) that do not implement `$take()`. By default, 'shinyOAuth'
   errors when a non-`cachem::cache_mem()` store lacks `$take()`, because the non-atomic fallback cannot guarantee
   single-use state consumption under concurrent access (TOCTOU replay window). Setting this option to `TRUE`
   downgrades the error to a one-time warning and allows the fallback to proceed. Not recommended for
   production without additional replay protection.
-
-### Development/debugging
-
-- `options(shinyOAuth.skip_browser_token = TRUE)` – skip browser cookie binding
-- `options(shinyOAuth.skip_id_sig = TRUE)` – skip ID token signature verification
-- `options(shinyOAuth.allow_unsigned_userinfo_jwt = TRUE)` – accept unsigned (`alg=none`) UserInfo JWTs
-- `options(shinyOAuth.debug = TRUE)` – re‑raise errors during token exchange
-
-Don't enable these in production. They disable key security checks or alter error behavior, and are intended for local testing/debugging only.
-Use `error_on_softened()` at startup to fail fast if softening flags are enabled in an environment where they should not be.
 
 ### Size caps
 
@@ -484,30 +531,50 @@ These prevent maliciously large state parameters from causing excessive CPU or m
 - `options(shinyOAuth.callback_max_iss_bytes = 2048)` – maximum byte length of the `iss` query parameter (RFC 9207 issuer identification)
 - `options(shinyOAuth.callback_max_query_bytes = <derived>)` – maximum total byte length of the raw callback query string (pre-parse guard)
 - `options(shinyOAuth.callback_max_browser_token_bytes = 256)` – maximum byte length of the `browser_token` argument accepted by `handle_callback()`
+- `options(shinyOAuth.callback_max_form_post_body_bytes = <derived>)` – maximum byte length of the raw `form_post` callback body before parsing
+- `options(shinyOAuth.callback_max_form_post_handle_bytes = 128)` – maximum byte length of the transient `shinyOAuth_form_post` handle query parameter
+- `options(shinyOAuth.callback_max_form_post_id_bytes = 256)` – maximum byte length of the transient `shinyOAuth_form_post_id` module-id query parameter
 
-These apply before any hashing/auditing/state parsing, and exist to prevent memory/log amplification from extremely large callback URLs.
+These apply before any hashing/auditing/state parsing, and exist to prevent memory/log amplification from extremely large callback URLs or `form_post` bodies.
+
+### Development/debugging
+
+- `options(shinyOAuth.skip_browser_token = TRUE)` – skip browser cookie binding in tests or interactive sessions
+- `options(shinyOAuth.skip_id_sig = TRUE)` – skip ID token signature verification in tests or interactive sessions
+- `options(shinyOAuth.allow_unsigned_userinfo_jwt = TRUE)` – accept unsigned (`alg=none`) UserInfo JWTs in tests or interactive sessions; outside those contexts 'shinyOAuth' errors instead of honoring it
+- `options(shinyOAuth.debug = TRUE)` – re‑raise errors during token exchange
+- `options(shinyOAuth.expose_error_body = TRUE)` – include sanitized HTTP bodies (may reveal details)
+
+Don't enable these options in production. They disable key security checks or alter
+error behavior, and are intended for local testing/debugging only.
 
 ## Browser cookie & preventing XSS
 
-`oauth_module_server()` binds the browser and server session with a short‑lived cookie that must be readable from client‑side JavaScript to bridge values into Shiny.
+`oauth_module_server()` binds the browser and server session with a short‑lived cookie 
+that must be readable from client‑side JavaScript to bridge values into Shiny.
 
-The cookie ensures that the same browser which initiated login is the one receiving the callback. This specifically prevents
-an attack where an attacker tricks a user into clicking a link which initiates login for the attacker's account,
+The cookie ensures that the same browser which initiated login is the one 
+receiving the callback. This specifically prevents an attack where an attacker 
+tricks a user into clicking a link which initiates login for the attacker's account,
 confusing the user into logging in as the attacker (login confusion).
 
-The cookie is set with the `HttpOnly` flag disabled so that it can be read by JavaScript.
-This is necessary to bridge the cookie value into Shiny. However, this means that if 
-your app has XSS vulnerabilities, an attacker could read the cookie too.
+The cookie is set with the `HttpOnly` flag disabled so that it can be read by
+JavaScript. This is necessary to bridge the cookie value into Shiny. However, 
+this means that if your app has XSS vulnerabilities, an attacker could read
+the cookie too.
 
-While this is a relatively limited attack vector, you should still take care to prevent XSS vulnerabilities in your app.
-An important mitigation is to sanitize user inputs before rendering them in the UI (e.g., using `htmltools::htmlEscape()`).
+While this is a relatively limited attack vector, you should still take care to
+prevent XSS vulnerabilities in your app. An important mitigation is to sanitize 
+user inputs before rendering them in the UI (e.g., using `htmltools::htmlEscape()`).
 
-## Multi‑process deployments: share state store & key
+## Multi‑process deployments: share state store, key, and policy
 
 When you run multiple Shiny R processes (e.g., multiple workers, Shiny Server Pro, RStudio Connect, Docker/Kubernetes replicas, or any non‑sticky load balancer), you must ensure that:
 
-- All workers share the same state store with atomic single-use semantics. Use `custom_cache()` with an atomic `$take()` method backed by a shared store (e.g., Redis `GETDEL`, SQL `DELETE ... RETURNING`). Plain `cachem::cache_disk()` is not safe as a shared state store because its `$get()` + `$remove()` are not atomic and may allow replay attacks under concurrent access; the default `cachem::cache_mem()` is per‑process only and is not shared. See `?custom_cache` for details on implementing `$take()`.
-- All workers share the same state key (e.g., read from environment variable; by default, a random key is generated per client instance which is then not shared)
+- All workers share the same state store with atomic single-use semantics. Use `custom_cache()` with an atomic `$take()` method backed by a shared store (e.g., Redis `GETDEL`, SQL `DELETE ... RETURNING`). Plain `cachem::cache_disk()` is not safe as a shared state store because its `$get()` + `$remove()` are not atomic and may allow replay attacks under concurrent access; the default `cachem::cache_mem()` is per‑process only and is not shared. See `?custom_cache` for details on implementing `$take()`;
+- All workers share the same state key (e.g., read from environment variable; by default, a random key is generated per client instance which is then not shared);
+- All workers use the same effective `OAuthClient` / `OAuthProvider` settings which are included in
+the fingerprint used for state binding.
 
 This is because during the authorization code + PKCE flow, 'shinyOAuth' creates an encrypted "state envelope" which is stored in a cache (the state_store) and echoed back via the `state` query parameter. The envelope is sealed with AES‑GCM using your state_key. If the callback lands on a different worker than the one that initiated login, that worker must be able to both read the cached entry and decrypt the envelope using the same key. If workers have different keys, decryption will fail and the login flow will abort with a state error.
 
@@ -519,8 +586,8 @@ Below is a checklist of things you may want to think about when bringing your ap
 
 - Use HTTPS everywhere in production
 - Verify issuer used in your provider is correct
-- In your `OAuthProvider`, set as many of the security options as possible;
-for instance, set `jwks_host_issuer_match`/`jwks_host_allow_only` (if your provider uses a different host for JWKS)
+- In your `OAuthClient` and `OAuthProvider`, set as many of the security options
+as your provider supports
 - Have your `OAuthClient` request the minimum scopes necessary; give
 your app registration only the permissions it needs
 - Do not show `$error_description` to your users; never expose tokens in UI or logs
@@ -528,12 +595,6 @@ your app registration only the permissions it needs
 - Sanitize user inputs before rendering them in the UI (e.g., using `htmltools::htmlEscape()`)
 - Make use of audit logging (see `vignette("audit-logging", package = "shinyOAuth")`) and
 monitor these logs
-- Consider enabling automatic revocation on session end (`revoke_on_session_end = TRUE`)
-- If your provider can return UserInfo as a signed JWT (`Content-Type: application/jwt`),
-set `userinfo_signed_jwt_required = TRUE` in your `OAuthProvider` to prevent downgrade
-to plain JSON. Without this flag, shinyOAuth verifies any JWT it receives, but a
-misconfigured provider or man-in-the-middle could return unsigned JSON claims
-instead, bypassing signature verification.
 - Use a provider which enforces strong authentication (e.g., multi-factor authentication)
 - Set Content Security Policy (CSP) headers to restrict resource loading and mitigate XSS attacks;
 (requires middleware; can't be done in Shiny)

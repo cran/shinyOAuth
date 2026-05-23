@@ -15,18 +15,20 @@ testthat::test_that("introspect_token handles unsupported and missing tokens", {
   testthat::expect_true(is.na(res$active))
   testthat::expect_identical(res$status, "introspection_unsupported")
 
-  # 2) Supported but missing token -> active = NA, status = "missing_token"
+  # 2) Supported but missing refresh token -> active = NA, status = "missing_token"
   cli@provider@introspection_url <- "https://example.com/introspect"
-  # Missing access token
-  t@access_token <- NA_character_
-  res2 <- introspect_token(cli, t, which = "access", async = FALSE)
-  testthat::expect_true(isTRUE(res2$supported))
-  testthat::expect_true(is.na(res2$active))
-  testthat::expect_identical(res2$status, "missing_token")
-  # Missing refresh token
-  t@access_token <- "at"
-  t@refresh_token <- NA_character_
-  res3 <- introspect_token(cli, t, which = "refresh", async = FALSE)
+  t_missing_refresh <- OAuthToken(
+    access_token = "at",
+    refresh_token = NA_character_,
+    expires_at = as.numeric(Sys.time()) + 60,
+    id_token = NA_character_
+  )
+  res3 <- introspect_token(
+    cli,
+    t_missing_refresh,
+    which = "refresh",
+    async = FALSE
+  )
   testthat::expect_true(isTRUE(res3$supported))
   testthat::expect_true(is.na(res3$active))
   testthat::expect_identical(res3$status, "missing_token")
@@ -44,7 +46,7 @@ testthat::test_that("introspect_token parses active variants and http errors", {
 
   # HTTP error -> active = NA, supported = TRUE, status = "http_<code>"
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 404,
@@ -72,7 +74,7 @@ testthat::test_that("introspect_token parses active variants and http errors", {
   )
   i <- 0
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       i <<- i + 1
       body <- bodies[[i]]
       httr2::response(
@@ -113,6 +115,91 @@ testthat::test_that("introspect_token parses active variants and http errors", {
   testthat::expect_identical(r8$status, "invalid_json")
 })
 
+testthat::test_that("introspect_token treats duplicate active members as invalid_json", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@introspection_url <- "https://example.com/introspect"
+  t <- OAuthToken(
+    access_token = "at",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 60,
+    id_token = NA_character_
+  )
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"active":true,"active":false}')
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  res <- introspect_token(cli, t, which = "access", async = FALSE)
+  testthat::expect_true(is.na(res$active))
+  testthat::expect_identical(res$status, "invalid_json")
+})
+
+testthat::test_that("introspect_token rejects malformed JSON shapes", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@introspection_url <- "https://example.com/introspect"
+  t <- OAuthToken(
+    access_token = "at",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 60,
+    id_token = NA_character_
+  )
+
+  bodies <- list(
+    '[{"active":true}]',
+    'true',
+    '{"active":[true]}',
+    '{"active":{"value":true}}',
+    '{"active":["true","false"]}'
+  )
+  i <- 0
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      i <<- i + 1
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(bodies[[i]])
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  top_level_array <- introspect_token(cli, t, which = "access", async = FALSE)
+  testthat::expect_true(is.na(top_level_array$active))
+  testthat::expect_identical(top_level_array$status, "invalid_json")
+
+  top_level_scalar <- introspect_token(cli, t, which = "access", async = FALSE)
+  testthat::expect_true(is.na(top_level_scalar$active))
+  testthat::expect_identical(top_level_scalar$status, "invalid_json")
+
+  active_array <- introspect_token(cli, t, which = "access", async = FALSE)
+  testthat::expect_true(is.na(active_array$active))
+  testthat::expect_identical(active_array$status, "invalid_active")
+
+  active_object <- introspect_token(cli, t, which = "access", async = FALSE)
+  testthat::expect_true(is.na(active_object$active))
+  testthat::expect_identical(active_object$status, "invalid_active")
+
+  active_multi_string <- introspect_token(
+    cli,
+    t,
+    which = "access",
+    async = FALSE
+  )
+  testthat::expect_true(is.na(active_multi_string$active))
+  testthat::expect_identical(active_multi_string$status, "invalid_active")
+})
+
 testthat::test_that("introspect_token async returns a resolved promise", {
   testthat::skip_on_cran()
   testthat::skip_if_not_installed("promises")
@@ -129,7 +216,7 @@ testthat::test_that("introspect_token async returns a resolved promise", {
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -150,7 +237,7 @@ testthat::test_that("introspect_token async returns a resolved promise", {
   testthat::expect_s3_class(p, "promise")
   val <- NULL
   p$then(function(x) {
-    val <<- shinyOAuth:::replay_async_conditions(x)
+    val <<- x
   })
   deadline <- Sys.time() + 5
   while (is.null(val) && Sys.time() < deadline) {
@@ -158,5 +245,6 @@ testthat::test_that("introspect_token async returns a resolved promise", {
     Sys.sleep(0.02)
   }
   testthat::expect_type(val, "list")
+  testthat::expect_false(isTRUE(val$.shinyOAuth_async_wrapped))
   testthat::expect_true(isTRUE(val$active))
 })

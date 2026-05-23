@@ -1,0 +1,300 @@
+# Tests for mandatory 'sub' claim in OIDC UserInfo responses (OIDC Core §5.3)
+
+# --- JSON path: get_userinfo() with OIDC provider (issuer configured) --------
+
+test_that("get_userinfo rejects JSON response missing sub for OIDC provider", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@issuer <- "https://issuer.example.com"
+  events <- list()
+
+  old_hook <- getOption("shinyOAuth.audit_hook")
+  options(shinyOAuth.audit_hook = function(event) {
+    events <<- c(events, list(event))
+  })
+  on.exit(options(shinyOAuth.audit_hook = old_hook), add = TRUE)
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(jsonlite::toJSON(
+          list(name = "No Sub User", email = "nosub@example.com"),
+          auto_unbox = TRUE
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    get_userinfo(cli, token = "access-token"),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "sub.*claim"
+  )
+
+  ui_events <- Filter(function(e) identical(e$type, "audit_userinfo"), events)
+  expect_true(any(vapply(
+    ui_events,
+    function(e) identical(e$status, "userinfo_missing_sub"),
+    logical(1)
+  )))
+})
+
+test_that("get_userinfo rejects JSON response with empty sub for OIDC provider", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@issuer <- "https://issuer.example.com"
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(jsonlite::toJSON(
+          list(sub = "", name = "Empty Sub"),
+          auto_unbox = TRUE
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    get_userinfo(cli, token = "access-token"),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "sub.*claim"
+  )
+})
+
+test_that("get_userinfo accepts JSON response with sub for OIDC provider", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@issuer <- "https://issuer.example.com"
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(jsonlite::toJSON(
+          list(sub = "user-123", name = "Valid User"),
+          auto_unbox = TRUE
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  result <- get_userinfo(cli, token = "access-token")
+  expect_equal(result$sub, "user-123")
+})
+
+test_that("get_userinfo rejects direct OAuthToken calls with mismatched sub", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = TRUE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@userinfo_required <- TRUE
+  cli@provider@userinfo_id_token_match <- TRUE
+  events <- list()
+
+  old_hook <- getOption("shinyOAuth.audit_hook")
+  options(shinyOAuth.audit_hook = function(event) {
+    events <<- c(events, list(event))
+  })
+  on.exit(options(shinyOAuth.audit_hook = old_hook), add = TRUE)
+
+  token <- OAuthToken(
+    access_token = "access-token",
+    token_type = "Bearer",
+    id_token = build_dummy_jwt(list(sub = "id-token-sub")),
+    id_token_validated = TRUE,
+    userinfo = list()
+  )
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(jsonlite::toJSON(
+          list(sub = "different-sub", name = "Wrong User"),
+          auto_unbox = TRUE
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    get_userinfo(cli, token = token),
+    class = "shinyOAuth_userinfo_mismatch",
+    regexp = "does not match"
+  )
+
+  ui_events <- Filter(function(e) identical(e$type, "audit_userinfo"), events)
+  statuses <- vapply(
+    ui_events,
+    function(e) e$status %||% NA_character_,
+    character(1)
+  )
+  expect_false(any(statuses == "ok"))
+})
+
+test_that("get_userinfo fails closed for direct raw-token calls when required", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = TRUE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@userinfo_required <- TRUE
+  cli@provider@userinfo_id_token_match <- TRUE
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(jsonlite::toJSON(
+          list(sub = "id-token-sub", name = "Bound User"),
+          auto_unbox = TRUE
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    get_userinfo(cli, token = "access-token"),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "Cannot verify UserInfo subject against a validated ID token"
+  )
+})
+
+test_that("get_userinfo allows missing sub for non-OIDC provider (no issuer)", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  # issuer is already NA_character_ from make_test_client defaults
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(jsonlite::toJSON(
+          list(login = "octocat", name = "GitHub User"),
+          auto_unbox = TRUE
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  result <- get_userinfo(cli, token = "access-token")
+  expect_equal(result$login, "octocat")
+})
+
+# --- JWT path: validate_signed_userinfo_claims() sub check --------------------
+
+test_that("validate_signed_userinfo_claims rejects missing sub", {
+  expect_error(
+    shinyOAuth:::validate_signed_userinfo_claims(
+      claims = list(iss = "https://issuer.example.com", aud = "client-id"),
+      expected_issuer = "https://issuer.example.com",
+      expected_client_id = "client-id"
+    ),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "sub.*claim"
+  )
+})
+
+test_that("validate_signed_userinfo_claims rejects empty sub", {
+  expect_error(
+    shinyOAuth:::validate_signed_userinfo_claims(
+      claims = list(
+        sub = "",
+        iss = "https://issuer.example.com",
+        aud = "client-id"
+      ),
+      expected_issuer = "https://issuer.example.com",
+      expected_client_id = "client-id"
+    ),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "sub.*claim"
+  )
+})
+
+test_that("validate_signed_userinfo_claims accepts valid sub", {
+  expect_invisible(
+    shinyOAuth:::validate_signed_userinfo_claims(
+      claims = list(
+        sub = "user-42",
+        iss = "https://issuer.example.com",
+        aud = "client-id"
+      ),
+      expected_issuer = "https://issuer.example.com",
+      expected_client_id = "client-id"
+    )
+  )
+})
+
+# --- Full signed JWT path through get_userinfo() -----------------------------
+
+test_that("get_userinfo rejects signed JWT missing sub for OIDC provider", {
+  key <- openssl::rsa_keygen(2048)
+  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
+  jwk$kid <- "test-kid-sub"
+  jwk$use <- "sig"
+  jwks <- list(keys = list(jwk))
+
+  # Claims without sub
+  claims <- list(
+    name = "No Sub JWT User",
+    iss = "https://issuer.example.com",
+    aud = "abc"
+  )
+  header <- list(typ = "JWT", alg = "RS256", kid = "test-kid-sub")
+  clm <- do.call(jose::jwt_claim, claims)
+  jwt_body <- jose::jwt_encode_sig(clm, key = key, header = header)
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@issuer <- "https://issuer.example.com"
+  events <- list()
+
+  old_hook <- getOption("shinyOAuth.audit_hook")
+  options(shinyOAuth.audit_hook = function(event) {
+    events <<- c(events, list(event))
+  })
+  on.exit(options(shinyOAuth.audit_hook = old_hook), add = TRUE)
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/jwt"),
+        body = charToRaw(jwt_body)
+      )
+    },
+    fetch_jwks = function(...) jwks,
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    get_userinfo(cli, token = "access-token"),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "sub.*claim"
+  )
+
+  ui_events <- Filter(function(e) identical(e$type, "audit_userinfo"), events)
+  expect_true(any(vapply(
+    ui_events,
+    function(e) identical(e$status, "userinfo_jwt_missing_sub"),
+    logical(1)
+  )))
+})

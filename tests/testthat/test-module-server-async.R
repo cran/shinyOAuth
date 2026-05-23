@@ -38,7 +38,11 @@ testthat::test_that("async login flow resolves token and sets flags", {
       # Mock token exchange to avoid HTTP; resolve with a short-lived token
       token <- testthat::with_mocked_bindings(
         swap_code_for_token_set = function(client, code, code_verifier) {
-          list(access_token = "t-async", expires_in = 3600)
+          list(
+            access_token = "t-async",
+            token_type = "Bearer",
+            expires_in = 3600
+          )
         },
         .package = "shinyOAuth",
         {
@@ -76,15 +80,9 @@ testthat::test_that("async login failure surfaces error and keeps authenticated 
   mirai::daemons(1)
   withr::defer(mirai::daemons(0))
 
-  # The daemon is a separate R process that must be able to load shinyOAuth.
-  # When only loaded via devtools::load_all() the package is unavailable to
-  # subprocess workers, so skip in that case.
-  pkg_check <- mirai::mirai(requireNamespace("shinyOAuth", quietly = TRUE))
-  mirai::call_mirai(pkg_check)
-  testthat::skip_if_not(
-    isTRUE(pkg_check$data),
-    "shinyOAuth must be installed (not just load_all'd) for mirai daemon tests"
-  )
+  # The daemon is a separate R process and must load a current installed copy
+  # of shinyOAuth rather than a stale library build from an older checkout.
+  assert_shinyoauth_available_in_daemon()
 
   # Stand up a webfakes server whose /token endpoint always returns HTTP 400.
   # The mirai worker process hits this real endpoint, so no mocking is needed
@@ -221,7 +219,11 @@ testthat::test_that("pending callback resumes after cookie arrives (async)", {
       # Once cookie is provided, module should resume the pending callback
       token <- testthat::with_mocked_bindings(
         swap_code_for_token_set = function(client, code, code_verifier) {
-          list(access_token = "t-async2", expires_in = 3600)
+          list(
+            access_token = "t-async2",
+            token_type = "Bearer",
+            expires_in = 3600
+          )
         },
         .package = "shinyOAuth",
         {
@@ -235,6 +237,83 @@ testthat::test_that("pending callback resumes after cookie arrives (async)", {
       testthat::expect_false(is.null(token))
       testthat::expect_null(values$pending_callback)
       testthat::expect_true(isTRUE(values$authenticated))
+    }
+  )
+})
+
+testthat::test_that("async refresh failure with auto_redirect queues reauth", {
+  testthat::skip_on_cran()
+  testthat::skip_if_not_installed("promises")
+  testthat::skip_if_not_installed("later")
+
+  withr::local_options(list(
+    shinyOAuth.skip_browser_token = TRUE,
+    shinyOAuth.skip_id_sig = TRUE
+  ))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  async_refresh_error <- tryCatch(
+    shinyOAuth:::err_id_token("Invalid ID token"),
+    error = function(e) e
+  )
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = TRUE,
+      async = TRUE,
+      indefinite_session = FALSE,
+      refresh_proactively = TRUE,
+      refresh_lead_seconds = 4000,
+      refresh_check_interval = 100
+    ),
+    expr = {
+      t <- OAuthToken(
+        access_token = "old_at",
+        refresh_token = "rt",
+        expires_at = as.numeric(Sys.time()) + 3600,
+        id_token = NA_character_
+      )
+      values$token <- t
+      values$auth_started_at <- as.numeric(Sys.time())
+      values$error <- NULL
+      values$error_description <- NULL
+      values$browser_token <- NULL
+      session$flushReact()
+
+      testthat::with_mocked_bindings(
+        refresh_token = function(
+          oauth_client,
+          token,
+          async = TRUE,
+          introspect = FALSE,
+          shiny_session = NULL
+        ) {
+          promises::promise_reject(async_refresh_error)
+        },
+        .package = "shinyOAuth",
+        {
+          poll_for_async(function() isTRUE(values$pending_login), session)
+        }
+      )
+
+      poll_for_async(function() !isTRUE(values$authenticated), session)
+
+      testthat::expect_identical(values$error, "token_refresh_error")
+      testthat::expect_false(isTRUE(values$authenticated))
+      testthat::expect_true(is.null(values$token))
+      testthat::expect_true(isTRUE(values$reauth_triggered))
+      testthat::expect_true(isTRUE(values$pending_login))
+      testthat::expect_false(isTRUE(values$auto_redirected))
+      testthat::expect_false(isTRUE(values$refresh_in_progress))
+
+      values$browser_token <- valid_browser_token()
+      poll_for_async(function() isTRUE(values$auto_redirected), session)
+
+      testthat::expect_false(isTRUE(values$pending_login))
+      testthat::expect_true(isTRUE(values$auto_redirected))
     }
   )
 })

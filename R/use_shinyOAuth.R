@@ -1,15 +1,28 @@
+# This file contains the UI-side helpers for the browser JavaScript dependency
+# That browser code handles redirects and keeps the login flow tied to the
+# current browser session
+# Used for adding the shinyOAuth JavaScript dependency to a Shiny UI
+
+# 1 UI dependency helper -------------------------------------------------------
+
+## 1.1 Add the browser dependency to the UI ------------------------------------
+
 #' Add JavaScript dependency to the UI of a Shiny app
 #'
 #' @description
-#' Adds the package's client-side JavaScript helpers as an htmlDependency to
-#' your Shiny UI. This enables features such as redirection and setting
-#' the browser cookie token.
+#' Adds shinyOAuth's client-side JavaScript dependency to your Shiny UI.
+#' This is required so the module can handle redirects and manage its
+#' browser-side session token.
 #'
-#' Without adding this to the UI of your app,  the `oauth_module_server()` will not function.
+#' Without this call in the UI, [oauth_module_server()] will not work unless
+#' your app UI is wrapped with [oauth_form_post_ui()], which injects this
+#' dependency automatically for form_post flows.
 #'
 #' @details
 #' Place this near the top-level of your UI (e.g., inside `fluidPage()` or
-#' `tagList()`), similar to how you would use `shinyjs::useShinyjs()`.
+#' `tagList()`), similar to how you would use `shinyjs::useShinyjs()`. If you
+#' wrap the app UI with [oauth_form_post_ui()], you usually do not need a
+#' separate call here because that wrapper injects this dependency for you.
 #'
 #' @param inject_referrer_meta If TRUE (default), injects a
 #'   `<meta name="referrer" content="no-referrer">` tag into the document
@@ -17,8 +30,7 @@
 #'   (like `code` and `state`) via the `Referer` header to third-party
 #'   subresources during the initial callback page load.
 #'
-#' @return A tagList containing a singleton dependency tag that ensures the JS
-#'   file `inst/www/shinyOAuth.js` is loaded
+#' @return A `tagList` that loads the `inst/www/shinyOAuth.js` dependency once.
 #'
 #' @export
 #'
@@ -30,7 +42,7 @@
 #'
 #' @seealso [oauth_module_server()]
 use_shinyOAuth <- function(inject_referrer_meta = TRUE) {
-  .set_flag(".called_js_dependency", TRUE)
+  assign(".called_js_dependency", TRUE, envir = .watchdog_environment)
 
   if (
     !(isTRUE(inject_referrer_meta) || identical(inject_referrer_meta, FALSE))
@@ -72,44 +84,38 @@ use_shinyOAuth <- function(inject_referrer_meta = TRUE) {
   )
 }
 
-# Warn about non-usage ----------------------------------------------------
+# 2 Missing dependency watchdog ------------------------------------------------
 
-# Here we track if the dependency has likely been added to UI;
-# if this flag is FALSE, and `oauth_module_server()` is called,
-# a warning is emitted to remind the developer to add it (once per session)
+## 2.1 Warn when the UI dependency is missing ----------------------------------
 
-.watchdog_environment <- new.env(parent = emptyenv())
-assign(".called_js_dependency", FALSE, envir = .watchdog_environment)
-
-.get_flag <- function(name, default = FALSE) {
-  get0(
-    name,
-    envir = .watchdog_environment,
-    inherits = FALSE,
-    ifnotfound = default
-  )
-}
-.set_flag <- function(name, value) {
-  assign(name, value, envir = .watchdog_environment)
-  invisible(TRUE)
-}
-
-# call this from your UI helper that injects the JS dependency
-mark_js_dependency_called <- function() {
-  .set_flag(".called_js_dependency", TRUE)
-}
-
+#' Warn when the UI dependency is missing
+#'
+#' Emits a once-per-session warning when server code uses the browser-side
+#' helpers before [use_shinyOAuth()] has loaded the JavaScript dependency. Used
+#' by [oauth_module_server()] so missing UI setup is easier to diagnose.
+#'
+#' @return Invisibly returns `TRUE` when a warning is emitted; otherwise
+#'   invisibly returns `NULL`.
+#' @keywords internal
+#' @noRd
 warn_about_missing_js_dependency <- function() {
   if (.is_test()) {
     return(invisible(NULL))
   }
-  if (.get_flag(".called_js_dependency")) {
+  if (
+    get0(
+      ".called_js_dependency",
+      envir = .watchdog_environment,
+      inherits = FALSE,
+      ifnotfound = FALSE
+    )
+  ) {
     return(invisible(NULL))
   }
 
-  rlang::warn(
+  warn_pkg(
+    "JavaScript dependency not called",
     c(
-      "[{.pkg shinyOAuth}] - {.strong JavaScript dependency not called}",
       "!" = "{.code oauth_module_server()} was called, but no previous call to {.code use_shinyOAuth()} was detected",
       "i" = paste0(
         "You must add {.code use_shinyOAuth()} to your UI (e.g., inside {.code fluidPage()}) ",
@@ -122,3 +128,12 @@ warn_about_missing_js_dependency <- function() {
 
   invisible(TRUE)
 }
+
+## 2.2 Store file-local watchdog state -----------------------------------------
+
+# Here we track if the dependency has likely been added to UI;
+# if this flag is FALSE, and `oauth_module_server()` is called,
+# a warning is emitted to remind the developer to add it (once per session)
+
+.watchdog_environment <- new.env(parent = emptyenv())
+assign(".called_js_dependency", FALSE, envir = .watchdog_environment)

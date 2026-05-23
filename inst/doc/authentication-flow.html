@@ -343,11 +343,10 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <div id="overview" class="section level2">
 <h2>Overview</h2>
-<p>This vignette provides a step-by-step description of what happens
-during an authentication flow when using the
-<code>oauth_module_server()</code> Shiny module. It maps protocol
-concepts (OAuth 2.0 Authorization Code + PKCE, OpenID Connect) to the
-concrete implementation details in the package.</p>
+<p>This vignette walks through what happens when a user signs in through
+<code>oauth_module_server()</code>. It explains the main OAuth 2.0 and
+OpenID Connect (OIDC) steps in package terms, so you can follow the flow
+without needing deep protocol knowledge.</p>
 <p>For a concise quick-start (minimal and manual button examples,
 options, and security checklist) see:
 <code>vignette(&quot;usage&quot;, package = &quot;shinyOAuth&quot;)</code>.</p>
@@ -356,16 +355,24 @@ options, and security checklist) see:
 </div>
 <div id="what-happens-during-the-authentication-flow" class="section level2">
 <h2>What happens during the authentication flow?</h2>
-<p>The package implements the OAuth 2.0 ‘Authorization Code’ flow and
-optional ‘OpenID Connect’ (OIDC) checks end‑to‑end. Below is the
-sequence of operations and the rationale behind each step.</p>
+<p>‘shinyOAuth’ handles the OAuth 2.0 Authorization Code flow, plus
+optional OIDC checks, from start to finish. Below is the sequence of
+steps and why each one matters.</p>
 <div id="first-page-load-set-a-browser-token" class="section level3">
 <h3>1. First page load: set a browser token</h3>
-<p>On the first load of your app, the module sets a small random cookie
-in the user’s browser (SameSite=Strict; Secure when over HTTPS). This
-browser token is mirrored to Shiny as an input. Its purpose is to ensure
-that the same browser that starts the OAuth 2.0 flow is the one that
-finishes it (a “double-submit” style CSRF defense).</p>
+<p>On the first load of your app, the module asks the browser to set a
+small random cookie (SameSite=<code>Strict</code> by default;
+<code>Secure</code> when required by HTTPS or
+<code>SameSite=None</code>).</p>
+<p>This browser token is mirrored to Shiny as an input. Its purpose is
+to ensure that the same browser that starts login is the one that comes
+back after the redirect. If the browser cannot create or read this
+cookie bridge (for example because cookies are blocked or Web Crypto is
+unavailable), the module surfaces <code>browser_cookie_error</code> and
+stops before login continues. If the mirrored token looks invalid,
+‘shinyOAuth’ rejects it, records the event, and asks the browser to
+generate a fresh token before login or callback processing
+continues.</p>
 </div>
 <div id="decide-whether-to-start-login" class="section level3">
 <h3>2. Decide whether to start login</h3>
@@ -373,59 +380,154 @@ finishes it (a “double-submit” style CSRF defense).</p>
 unauthenticated session triggers immediate redirection to the provider
 authorization endpoint.</p>
 <p>If <code>oauth_module_server(auto_redirect = FALSE)</code>, you
-manually call <code>$request_login()</code> (e.g., via a button) to do
-so.</p>
+manually call <code>$request_login()</code> (e.g., when your user clicks
+a button).</p>
 </div>
 <div id="build-the-authorization-url-prepare_call" class="section level3">
 <h3>3. Build the authorization URL (<code>prepare_call()</code>)</h3>
-<p>To redirect the user to the provider, the module constructs an
-authorization request URL. The URL is built from the provider’s
-authorization endpoint and includes various query parameters to ensure
-security and proper context tracking:</p>
+<p>To redirect the user to the provider, the module builds an
+authorization URL from the provider’s authorization endpoint. The URL
+includes a few values that keep the flow linked to the right session and
+protect the callback:</p>
 <ul>
-<li>State: this is a high-entropy random string to prevent CSRF; this
-package seals the state to enhance security (see below)</li>
-<li>PKCE: a <code>code_verifier</code> (random) and
-<code>code_challenge</code> (S256 hash) proving the same party finishes
+<li>State: a random value used to link the callback to this login
+attempt and help block forged callbacks; ‘shinyOAuth’ also seals extra
+context into it</li>
+<li>PKCE: a <code>code_verifier</code> and matching
+<code>code_challenge</code> that prove the same browser session finishes
 the flow</li>
-<li>Nonce (OIDC): random string echoed back in the ID token, mitigating
-replay attacks</li>
+<li>Nonce (OIDC): a random value that is checked again when validating
+the ID token</li>
 </ul>
-<p>This package seals the state, meaning it encrypts and authenticates
-(AES-GCM AEAD) a payload containing:</p>
+<p>‘shinyOAuth’ seals the state by storing extra context inside an
+encrypted and authenticated payload. That payload contains:</p>
 <ul>
 <li>state, client_id, redirect_uri</li>
 <li>requested scopes</li>
 <li>provider fingerprint (issuer/auth/token URLs)</li>
+<li>client-policy fingerprint for callback-time policy binding</li>
 <li>issued_at timestamp</li>
+<li>observability metadata like an internal trace id</li>
 </ul>
-<p>Sealing the state prevents tampering, stale callbacks, and mix-ups
-with other providers/clients.</p>
-<p>On the server side, the package will store the sealed state (as a
-cache-safe hash key) in the state store (e.g., a ‘cachem’ backend) along
-with the following data:</p>
+<p>Sealing the state helps prevent tampering, stale callbacks, and
+mix-ups with other providers or clients.</p>
+<p>On the server side, the package also stores a few one-time callback
+values in the state store (for example a <code>cachem</code> backend),
+under a derived key based on the plain state value:</p>
 <ul>
 <li>browser token</li>
 <li>code_verifier</li>
 <li>nonce (OIDC)</li>
 </ul>
-<p>All this data will be used for validation during the callback
-processing.</p>
+<p>These values are used later during callback validation.</p>
+<p>If the client has
+<code>authorization_request_mode = &quot;request&quot;</code>, ‘shinyOAuth’
+switches from plain query parameters to a JWT-based authorization
+request. This is the JAR pattern (RFC 9101). In that mode, the package
+builds a Request Object JWT containing the OAuth authorization
+parameters that would otherwise appear directly on the browser URL. By
+default, ‘shinyOAuth’ signs these Request Objects, which protects them
+from tampering. When Request Object encryption is configured,
+‘shinyOAuth’ signs first and then wraps the signed Request Object in a
+JWE, as RFC 9101 requires for nested JWTs, so the request gains
+confidentiality as well.</p>
+<p>If the client has
+<code>authorization_request_mode = &quot;request_uri&quot;</code>, ‘shinyOAuth’
+builds the same Request Object but publishes it by reference and
+redirects the browser with a <code>request_uri</code> instead of an
+inline <code>request</code> JWT. In <code>oauth_module_server()</code>,
+the default publisher serves that Request Object from the current Shiny
+app origin, and <code>request_uri_base_url</code> lets you override the
+public base URL when the authorization server must fetch it through a
+different host or proxy. This is the caller-managed Request Object URI
+path from RFC 9101, so the provider fetches the Request Object directly
+from the published URL. Because Shiny data-object URLs include
+session-routing path segments, that published <code>request_uri</code>
+can also appear in authorization-server, reverse-proxy, or access logs.
+<code>request_uri_base_url</code> changes the public origin but not the
+underlying Shiny path layout, so prefer PAR when you need
+provider-facing opaque handles.</p>
+<p>If the provider has a <code>par_url</code> configured and the client
+is not using caller-managed
+<code>authorization_request_mode = &quot;request_uri&quot;</code>, the module uses
+Pushed Authorization Requests (PAR, RFC 9126) before redirecting the
+browser. In that mode, the authorization request is first sent
+server-to-server to the provider’s PAR endpoint as a form-encoded POST.
+The browser is then redirected with a provider-issued
+<code>request_uri</code> handle instead of the raw authorization
+parameters. By default, OIDC providers keep outer
+<code>client_id</code>, <code>response_type=code</code>, and a
+<code>scope</code> containing <code>openid</code> for compatibility,
+while the sealed <code>state</code>, <code>redirect_uri</code>, and
+other request details stay behind the PAR handle. Set
+<code>oauth_provider(authorization_request_front_channel_mode = &quot;minimal&quot;)</code>
+for stricter authorization servers that expect only
+<code>client_id</code> plus <code>request_uri</code>. Plain OAuth PAR
+flows already use that minimal shape. If the provider requires PAR,
+<code>authorization_request_mode = &quot;request_uri&quot;</code> is not allowed,
+because RFC 9126 assigns the <code>request_uri</code> handle to the PAR
+response and the PAR request itself must not include a
+<code>request_uri</code> parameter.</p>
 </div>
 <div id="app-redirects-to-the-provider" class="section level3">
 <h3>4. App redirects to the provider</h3>
-<p>The browser of the app user will be redirected to the provider’s
-authorization endpoint with the following parameters:
-<code>response_type=code</code>, <code>client_id</code>,
-<code>redirect_uri</code>, <code>state=&lt;sealed state&gt;</code>, PKCE
-parameters, <code>nonce</code> (OIDC), <code>scope</code>,
-<code>claims</code> (OIDC, when configured via
-<code>oauth_client(claims = ...)</code>), <code>acr_values</code> (OIDC,
-when <code>required_acr_values</code> is set on the client), plus any
-configured extra parameters.</p>
-<p>Note: when the provider has an <code>issuer</code> set (indicating
-OIDC) and <code>openid</code> is missing from the client’s scopes, it is
-automatically prepended with a one-time warning.</p>
+<p>Without JAR and without PAR, the browser of the app user is
+redirected to the provider’s authorization endpoint with the usual OAuth
+query parameters: <code>response_type=code</code>,
+<code>client_id</code>, <code>redirect_uri</code>,
+<code>state=&lt;sealed state&gt;</code>, PKCE parameters,
+<code>nonce</code> (OIDC), <code>scope</code>, <code>claims</code>
+(OIDC, when configured via <code>oauth_client(claims = ...)</code>),
+<code>acr_values</code> (OIDC, when <code>required_acr_values</code> is
+set on the client), plus any configured extra parameters.</p>
+<p>With JAR enabled but without PAR, the browser is still redirected to
+the provider’s authorization endpoint, but the URL now carries the
+Request Object instead of the raw authorization parameters. In practice,
+the redirect contains <code>request=&lt;Request Object JWT&gt;</code>
+plus the outer parameters that the active profile still requires. By
+default, OIDC providers keep outer <code>client_id</code>,
+<code>response_type=code</code>, and an outer <code>scope</code>
+containing <code>openid</code>. That outer OIDC shape is required by
+OpenID Connect Core Section 6.1, so
+<code>authorization_request_front_channel_mode = &quot;minimal&quot;</code> is
+rejected for OIDC by-value <code>request</code> transport. Plain OAuth
+JAR flows can still use the minimal <code>client_id</code> plus
+<code>request</code> shape. The Request Object itself is signed by
+default, or signed first and then encrypted as a nested JWT when Request
+Object encryption is configured.</p>
+<p>With caller-managed <code>request_uri</code> mode, the browser is
+redirected with <code>request_uri=&lt;absolute URL&gt;</code> plus any
+outer parameters still required by the active profile. By default, OIDC
+providers keep outer <code>client_id</code>,
+<code>response_type=code</code>, and an outer <code>scope</code>
+containing <code>openid</code>. That outer OIDC shape is required by
+OpenID Connect Core Section 6.2, so
+<code>authorization_request_front_channel_mode = &quot;minimal&quot;</code> is
+rejected for caller-managed OIDC <code>request_uri</code> transport.
+Plain OAuth request-by-reference flows can still use the minimal
+<code>client_id</code> plus <code>request_uri</code> shape. The
+authorization server then fetches the Request Object from that URL. This
+is different from PAR: the <code>request_uri</code> points at a
+client-managed published Request Object, not a provider-issued PAR
+handle. The published object still follows the same JAR rules as above:
+signed by default, or signed first and then encrypted when Request
+Object encryption is configured. In the default Shiny-backed publisher
+used by ‘shinyOAuth’, that URL also embeds Shiny session-routing path
+segments, so it is not as log-opaque as a provider-issued PAR
+handle.</p>
+<p>With PAR enabled and selected, the browser is still redirected to the
+provider’s authorization endpoint, but the front-channel URL contains
+only the PAR handle plus any profile-required outer parameters. By
+default, OIDC providers keep outer <code>client_id</code>,
+<code>response_type=code</code>, an outer <code>scope</code> containing
+<code>openid</code>, and <code>request_uri</code>. If your provider
+accepts a smaller PAR redirect carrying only <code>client_id</code> plus
+the provider-issued <code>request_uri</code>, set
+<code>oauth_provider(authorization_request_front_channel_mode = &quot;minimal&quot;)</code>.
+Plain OAuth PAR flows already use that minimal shape. If JAR request
+mode is also enabled, the Request Object pushed to the PAR endpoint
+follows the same rule: signed by default, or signed first and then
+encrypted when Request Object encryption is configured.</p>
 </div>
 <div id="user-authenticates-and-authorizes" class="section level3">
 <h3>5. User authenticates and authorizes</h3>
@@ -436,33 +538,45 @@ log in and authorize the app to access the requested scopes.</p>
 <h3>6. Provider redirects user back to the app</h3>
 <p>The provider redirects the user’s browser back to your Shiny app
 (your <code>redirect_uri</code>), including the <code>code</code> and
-<code>state</code> parameters (and optionally <code>error</code> and
-<code>error_description</code> on failure).</p>
+<code>state</code> parameters, and optionally RFC 9207 <code>iss</code>,
+plus <code>error</code>, <code>error_description</code>, and
+<code>error_uri</code> on failure.</p>
 </div>
 <div id="callback-processing-state-verification-handle_callback" class="section level3">
 <h3>7. Callback processing &amp; state verification
 (<code>handle_callback()</code>)</h3>
 <p>Once the user is redirected back to the app, the module processes the
-callback. This consists of the following steps:</p>
+callback. In plain terms, it checks that the callback belongs to the
+login attempt that started earlier and only then continues to token
+exchange. The main checks are:</p>
 <ul>
-<li>Wait for the browser token input if not yet visible</li>
-<li>Enforce callback query size caps (DoS protection)</li>
-<li>If the callback includes an <code>iss</code> query parameter,
-validate it against the provider’s configured/discovered issuer to
-defend against authorization-server mix-up attacks (per RFC 9207). A
-mismatch produces an <code>issuer_mismatch</code> error and audit
-event</li>
+<li>Wait for a usable browser token input if it has not reached Shiny
+yet; when the cookie bridge fails, the module surfaces
+<code>browser_cookie_error</code> instead of attempting authentication
+without that binding</li>
+<li>Enforce callback query size caps before and after parsing to protect
+against unusually large or abusive callback inputs on sensitive
+parameters such as <code>code</code>, <code>state</code>,
+<code>error</code>, <code>error_description</code>,
+<code>error_uri</code>, and <code>iss</code></li>
+<li>Validate the callback <code>iss</code> query parameter against the
+provider’s configured/discovered issuer so the callback must come from
+the expected provider (per RFC 9207). When
+<code>oauth_client(enforce_callback_issuer = TRUE)</code> is enabled,
+callbacks that omit <code>iss</code> are also rejected before token
+exchange. A mismatch produces an <code>issuer_mismatch</code> error; a
+missing required <code>iss</code> produces an
+<code>issuer_missing</code> error and corresponding audit event</li>
 <li>If the callback is an error response (<code>?error=...</code>),
-require a valid <code>state</code> parameter; missing/invalid/consumed
-state is treated as <code>invalid_state</code> rather than surfacing the
-attacker-controlled <code>?error</code> value. The
-<code>error_uri</code> from the provider (RFC 6749 section 4.1.2.1) is
-also surfaced as a reactive field when included</li>
-<li>Decrypt and verify the sealed state, ensuring integrity,
-authenticity, and freshness (using the <code>issued_at</code>
-window)</li>
-<li>Check that embedded context matches expected client/provider
-(defends against misconfiguration/multi-tenant mix-ups)</li>
+still require a valid <code>state</code> parameter and browser-token
+binding before showing the provider error. That way, attacker-controlled
+error values are not trusted on their own. The provider’s
+<code>error_uri</code> is only surfaced when it is an absolute HTTPS
+URL</li>
+<li>Decrypt and verify the sealed state, making sure it is authentic and
+still fresh</li>
+<li>Check that embedded context matches the expected client and
+provider</li>
 <li>Fetch and immediately delete the one-time state entry from the
 configured state store
 <ul>
@@ -471,6 +585,11 @@ aborts with a <code>shinyOAuth_state_error</code></li>
 <li>Audit events are emitted on failures (e.g.,
 <code>state_store_lookup_failed</code>,
 <code>state_store_removal_failed</code>)</li>
+<li>In multi-worker deployments, shared state stores are expected to
+provide an atomic <code>$take()</code> method for single-use semantics.
+Without that, ‘shinyOAuth’ rejects shared stores by default unless the
+operator explicitly opts into the weaker replay-risk fallback with
+<code>options(shinyOAuth.allow_non_atomic_state_store = TRUE)</code></li>
 </ul></li>
 <li>Verify that user’s browser token matches the previously stored
 browser token</li>
@@ -483,76 +602,167 @@ single‑use and strict failure behavior.</p>
 </div>
 <div id="exchange-authorization-code-for-tokens" class="section level3">
 <h3>8. Exchange authorization code for tokens</h3>
-<p>Once the callback is verified, the module proceeds to exchange the
-authorization code for tokens.</p>
+<p>Once the callback checks pass, the module sends the authorization
+code to the token endpoint to obtain tokens.</p>
 <p>A POST request is made to the token endpoint with
-<code>grant_type=authorization_code</code>, the code, the redirect_uri,
-and the <code>code_verifier</code> (PKCE). Client authentication method
-depends on provider style: HTTP Basic header
+<code>grant_type=authorization_code</code>, the code, the
+<code>redirect_uri</code>, and the <code>code_verifier</code> (PKCE).
+Client authentication depends on how the provider expects the client to
+identify itself: public (<code>client_id</code> only), HTTP Basic
 (<code>client_secret_basic</code>), body params
-(<code>client_secret_post</code>), or JWT-based assertions
-(<code>client_secret_jwt</code>, <code>private_key_jwt</code>) when
-configured. The response must include at least
-<code>access_token</code>. Malformed or error responses abort the
-flow.</p>
-<p>When successful, the package also applies two safety rails:</p>
+(<code>client_secret_post</code>), JWT-based assertions
+(<code>client_secret_jwt</code>, <code>private_key_jwt</code>), or mTLS
+when configured. Most users only need to configure the client correctly;
+‘shinyOAuth’ builds the right request from there.</p>
+<p>When the client is configured with <code>dpop_private_key</code>,
+‘shinyOAuth’ also attaches a DPoP proof to the token request. For
+authorization-code exchange and refresh, if the authorization server
+responds with a <code>DPoP-Nonce</code> challenge, ‘shinyOAuth’ caches
+the supplied nonce and retries the token request once with a fresh DPoP
+proof that includes it. Generic transport and HTTP retries still stay
+disabled for these non-idempotent token requests, so the package does
+not replay them beyond that RFC 9449 nonce handshake. The response must
+include at least <code>access_token</code>. Malformed or error responses
+abort the flow.</p>
+<p>After a successful response, ‘shinyOAuth’ also checks two basic
+things:</p>
 <ul>
-<li>If the token response includes <code>scope</code>, shinyOAuth can
-reconcile it against the requested scopes (defaults to strict
-enforcement; configurable via the client <code>scope_validation</code>
-setting)</li>
-<li>If the provider was configured with a non-empty
-<code>allowed_token_types</code>, the token response must include
-<code>token_type</code> and its value must be one of the allowed types
-(case-insensitive, e.g., <code>Bearer</code>)</li>
+<li>If the token response includes <code>scope</code>, ‘shinyOAuth’ can
+reconcile it against the requested scopes (defaults to warning on
+reduced grants; configurable via the client
+<code>scope_validation</code> setting)</li>
+<li>The token response must include <code>token_type</code>; if the
+provider was configured with a non-empty
+<code>allowed_token_types</code>, that value must also be one of the
+allowed types (case-insensitive, e.g., <code>Bearer</code>)</li>
 </ul>
+<div id="what-changes-when-mtls-is-enabled-rfc-8705" class="section level4">
+<h4>What changes when mTLS is enabled (RFC 8705)</h4>
+<p>When the provider uses mutual TLS
+(<code>token_auth_style = &quot;tls_client_auth&quot;</code> or
+<code>&quot;self_signed_tls_client_auth&quot;</code>), ‘shinyOAuth’ sends the
+configured client certificate on authorization-server requests and
+prefers any discovered <code>mtls_endpoint_aliases</code>.</p>
+<p>Certificate-bound access tokens are a separate RFC 8705 policy. When
+the provider advertises
+<code>tls_client_certificate_bound_access_tokens = TRUE</code> and the
+client opts in with
+<code>mtls_request_certificate_bound_access_tokens = TRUE</code>,
+‘shinyOAuth’ prefers the mTLS endpoints for authorization-server
+requests even when <code>token_auth_style</code> itself is not an mTLS
+auth style, and then treats the resulting access tokens as
+sender-constrained when the binding is observable:</p>
+<ul>
+<li>For authorization-server requests such as PAR, authorization-code
+exchange, refresh, introspection, and revocation, ‘shinyOAuth’ sends the
+configured client certificate on the TLS connection and prefers any
+discovered <code>mtls_endpoint_aliases</code></li>
+<li>For protected-resource requests such as <code>resource_req()</code>
+calls to downstream APIs, and for userinfo when it is acting as a
+certificate-bound resource, ‘shinyOAuth’ checks that the token’s
+<code>cnf.x5t#S256</code> thumbprint matches the configured certificate
+before sending the request</li>
+</ul>
+<p>If ‘shinyOAuth’ learns <code>cnf</code> by locally parsing a
+self-contained JWT access token, it is only observing the token payload
+that the authorization server returned; it is not independently
+verifying the access-token signature. For strict assurance of
+sender-constrained access tokens, prefer introspection or another
+provider-specific proof surface.</p>
+</div>
+<div id="what-changes-when-dpop-is-enabled-rfc-9449" class="section level4">
+<h4>What changes when DPoP is enabled (RFC 9449)</h4>
+<p>When the client is configured with <code>dpop_private_key</code>,
+‘shinyOAuth’ adds DPoP proofs to token requests and later
+protected-resource requests:</p>
+<ul>
+<li>Authorization-code exchange and refresh calls to the token endpoint
+carry a DPoP proof. If the authorization server responds with a
+<code>DPoP-Nonce</code> challenge, ‘shinyOAuth’ retries once with a
+fresh proof that includes the supplied nonce, then reuses the most
+recently learned authorization-server nonce on later token requests
+until the server rotates it</li>
+<li>Later <code>get_userinfo()</code> calls and downstream
+<code>perform_resource_req()</code> requests also attach DPoP proofs
+when the effective access-token type is <code>DPoP</code> and the caller
+supplies the corresponding <code>OAuthClient</code>
+<ul>
+<li><code>perform_resource_req()</code> also retries one
+protected-resource <code>use_dpop_nonce</code> challenge with the
+supplied <code>DPoP-Nonce</code>; plain <code>resource_req()</code> only
+builds the request object</li>
+<li>Resource-server nonces are cached per issuing server rather than per
+exact endpoint, so same-server protected-resource paths can reuse a
+nonce while token-endpoint and resource-server nonce state stay
+separate</li>
+<li>If an idempotent DPoP request is retried after a transient transport
+or HTTP failure, ‘shinyOAuth’ mints a fresh proof for the retry instead
+of replaying the same proof JWT</li>
+</ul></li>
+</ul>
+</div>
 </div>
 <div id="validate-id-token-oidc-only" class="section level3">
 <h3>9. Validate ID token (OIDC only)</h3>
 <p>When using <code>oauth_provider(id_token_validation = TRUE)</code>,
 the following verifications are performed <strong>before</strong> any
-userinfo fetch to ensure cryptographic validation occurs prior to making
-external calls:</p>
+userinfo fetch. The list below is intentionally a bit more detailed than
+a typical app needs day to day; the main point is that ‘shinyOAuth’ does
+these checks for you before making external calls:</p>
 <ul>
-<li>Signature: verified against provider JWKS (with optional pinning)
-for standard asymmetric algorithms (RSA-PKCS1, RSA-PSS, ECDSA, EdDSA).
-HMAC algorithms (HS256/384/512) are only allowed with explicit opt-in
+<li>Signature: checked against the provider JWKS (with optional pinning)
+for supported asymmetric algorithms (<code>RS256</code>,
+<code>RS384</code>, <code>RS512</code>, <code>ES256</code>,
+<code>ES384</code>, <code>ES512</code>, <code>EdDSA</code>). HMAC
+algorithms (<code>HS256</code>/<code>HS384</code>/<code>HS512</code>)
+are only allowed with explicit opt-in
 (<code>options(shinyOAuth.allow_hs = TRUE)</code>) and a sufficiently
-strong server-held secret</li>
-<li>Claims: <code>iss</code> matches expected issuer; <code>aud</code>
-vector contains <code>client_id</code>; <code>sub</code> present;
-<code>iat</code> is required and must be a single finite numeric;
+strong server-held secret. RSA-PSS (<code>PS256</code>,
+<code>PS384</code>, <code>PS512</code>) is not currently supported</li>
+<li>Token format: ‘shinyOAuth’ accepts signed JWS ID tokens only.
+Encrypted ID tokens (JWE) are rejected because the package does not
+perform JWE decryption; configure the provider to return signed-only ID
+tokens</li>
+<li>Core claims: <code>iss</code> must match the expected issuer;
+<code>aud</code> must include <code>client_id</code>; <code>sub</code>
+must be present; <code>iat</code> must be a single finite numeric;
 time-based claims (<code>exp</code> is required, <code>nbf</code>
 optional) are evaluated with a small configurable leeway; tokens issued
 in the future are rejected</li>
-<li>Header <code>typ</code> (when present): must indicate a JWT
-(<code>JWT</code>, case-insensitive). Other values (e.g.,
+<li>JWT header type (<code>typ</code>, when present): must indicate a
+JWT (<code>JWT</code>, case-insensitive). Other values (e.g.,
 <code>at+jwt</code>) are rejected for ID tokens</li>
 <li>Maximum ID token lifetime: <code>exp - iat</code> is checked against
 <code>options(shinyOAuth.max_id_token_lifetime)</code> (default 24
 hours); tokens with unreasonably long lifetimes are rejected</li>
-<li>Authorized party (<code>azp</code>): if <code>aud</code> has
-multiple entries, <code>azp</code> MUST be present and equal to
-<code>client_id</code>. If <code>azp</code> is present in any case, it
-MUST equal <code>client_id</code></li>
+<li>Authorized party (<code>azp</code>): when an ID token names multiple
+audiences, ‘shinyOAuth’ requires <code>azp = client_id</code> to keep
+the client binding explicit. If <code>azp</code> is present at all, it
+must equal <code>client_id</code></li>
 <li>Nonce: must match the previously stored value (if configured)</li>
 <li><code>auth_time</code> validation (OIDC Core §3.1.2.1): when
 <code>max_age</code> is present in <code>extra_auth_params</code>, the
-ID token’s <code>auth_time</code> claim must be present and satisfy
+ID token’s <code>auth_time</code> claim must be present, must not be in
+the future beyond <code>leeway</code>, and must satisfy
 <code>now - auth_time &lt;= max_age + leeway</code></li>
 <li><code>at_hash</code> (Access Token hash, OIDC Core §3.1.3.8): when
 the ID token contains an <code>at_hash</code> claim, the access token
 binding is verified. When <code>id_token_at_hash_required = TRUE</code>
 on the provider, the ID token must contain this claim or login
 fails</li>
-<li>Essential claims (OIDC Core §5.5): if the client requested specific
+<li>Requested claims (OIDC Core §5.5): if the client requested specific
 claims via the <code>claims</code> parameter with
-<code>essential = TRUE</code>, and <code>claims_validation</code> is
+<code>essential = TRUE</code>, <code>value</code>, or
+<code>values</code>, and <code>claims_validation</code> is
 <code>&quot;warn&quot;</code> or <code>&quot;strict&quot;</code>, the decoded ID token
-payload is checked for the presence of those essential claims. Missing
-essential claims trigger a warning or error depending on the mode. This
-is skipped when <code>claims_validation = &quot;none&quot;</code> (the
-default)</li>
+payload is checked for missing essential claims and unsatisfied
+requested claim values. These trigger a warning or error depending on
+the mode. For <code>claims$id_token</code>, this enforcement only runs
+after ‘shinyOAuth’ has validated the ID token; configure the provider
+with <code>id_token_validation = TRUE</code> or
+<code>use_nonce = TRUE</code> so those checks run on trusted token
+content. This is skipped when <code>claims_validation = &quot;none&quot;</code>
+(the default)</li>
 <li>ACR enforcement (OIDC Core §2, §3.1.2.1): if the client was created
 with <code>required_acr_values</code>, the ID token’s <code>acr</code>
 claim must be present and match one of the specified values. This
@@ -568,43 +778,102 @@ parameter as a voluntary hint to the provider</li>
 <p>If userinfo is requested via
 <code>oauth_provider(userinfo_required = TRUE)</code> (for which you
 should have a <code>userinfo_url</code> configured), the module calls
-the userinfo endpoint with the access token and stores returned claims.
-This happens <strong>after</strong> ID token validation to ensure
-cryptographic checks pass before making external calls. If this request
-fails, the flow aborts with an error.</p>
-<p>The userinfo endpoint may return either a standard JSON response or a
-JWT-encoded response (per OIDC Core, section 5.3.2). When the endpoint
-returns <code>Content-Type: application/jwt</code>, the body is decoded
-as a JWT with signature verification against the provider JWKS. When
+the userinfo endpoint with the access token and stores the returned
+claims. This happens <strong>after</strong> ID token validation, so the
+earlier token checks pass before another external call is made. If the
+request fails, the flow aborts with an error.</p>
+<p>When the access token is certificate-bound, ‘shinyOAuth’ treats the
+userinfo call as protected-resource access: it uses the mTLS alias for
+<code>userinfo_endpoint</code> when configured, sends the client
+certificate on the TLS connection, and requires the token’s
+<code>cnf.x5t#S256</code> thumbprint to match that certificate before
+making the request.</p>
+<p>When a refresh response omits any new observable <code>cnf</code>,
+‘shinyOAuth’ does not carry forward the previous <code>x5t#S256</code>
+thumbprint onto the refreshed token. Refreshed access tokens keep mTLS
+sender-constrained state only when the new token itself, or its
+introspection response, supplies fresh <code>cnf</code> data.</p>
+<p>The userinfo endpoint may return either a standard JSON response or,
+less commonly, a JWT response (per OIDC Core section 5.3.2). When the
+endpoint returns <code>Content-Type: application/jwt</code>, the body is
+verified as a signed JWT against the provider JWKS. Only signed JWS
+userinfo responses are supported. Encrypted UserInfo JWTs (JWE) are
+rejected; configure the provider to return signed-only JWTs when using
+<code>application/jwt</code> responses. When
 <code>userinfo_signed_jwt_required = TRUE</code> on the provider, the
 endpoint must return <code>application/jwt</code> or the flow is
-aborted.</p>
+aborted. UserInfo JWT verification is limited to asymmetric algorithms
+from the provider’s <code>allowed_algs</code> (<code>RS*</code>,
+<code>ES*</code>, or <code>EdDSA</code>); <code>HS256</code>,
+<code>HS384</code>, and <code>HS512</code> are rejected on this surface
+even if HS* is otherwise enabled for ID tokens.</p>
+<p>For security-sensitive deployments that rely on signed UserInfo JWTs,
+consider requiring at least an expiry claim with
+<code>oauth_client(userinfo_jwt_required_temporal_claims = &quot;exp&quot;)</code>.
+OIDC Core does not require <code>exp</code> on signed UserInfo
+responses, so ‘shinyOAuth’ leaves that policy opt-in and validates
+<code>exp</code>, <code>iat</code>, and <code>nbf</code> whenever they
+are present.</p>
 <ul>
-<li>Subject match: if
-<code>oauth_provider(userinfo_id_token_match = TRUE)</code>, it is
-checked that <code>sub</code> in userinfo equals <code>sub</code> in the
-ID token</li>
-<li>Essential claims (OIDC Core §5.5): if the client requested specific
+<li>Subject match: whenever ‘shinyOAuth’ has both userinfo and a
+validated ID token baseline, it checks that <code>sub</code> in userinfo
+equals <code>sub</code> in the ID token. Setting
+<code>oauth_provider(userinfo_id_token_match = TRUE)</code> additionally
+makes the flow fail closed when userinfo is fetched but no validated ID
+token baseline is available</li>
+<li>Requested claims (OIDC Core §5.5): if the client requested specific
 userinfo claims via the <code>claims</code> parameter with
-<code>essential = TRUE</code>, and <code>claims_validation</code> is
+<code>essential = TRUE</code>, <code>value</code>, or
+<code>values</code>, and <code>claims_validation</code> is
 <code>&quot;warn&quot;</code> or <code>&quot;strict&quot;</code>, the userinfo response is
-checked for those claims. Missing essential claims trigger a warning or
-error depending on the mode</li>
+checked for missing essential claims and unsatisfied requested claim
+values. These trigger a warning or error depending on the mode</li>
+</ul>
+</div>
+<div id="build-the-oauthtoken-object" class="section level3">
+<h3>11. Build the <code>OAuthToken</code> object</h3>
+<p>Once the token response and any preceding verification steps have
+succeeded, the module builds the <code>OAuthToken</code> object that
+your app will work with. This happens before optional token
+introspection, but the module still waits for any remaining checks
+before marking the session as authenticated.</p>
+<p>This is an S7 <code>OAuthToken</code> object which contains:</p>
+<ul>
+<li><code>access_token</code> (string)</li>
+<li><code>token_type</code> (string, e.g., <code>Bearer</code> or
+<code>DPoP</code>)</li>
+<li><code>refresh_token</code> (optional string)</li>
+<li><code>expires_at</code> (numeric timestamp, seconds since epoch;
+<code>Inf</code> for non-expiring tokens)</li>
+<li><code>id_token</code> (optional string)</li>
+<li><code>id_token_validated</code> (logical, indicating whether the ID
+token was cryptographically verified)</li>
+<li><code>id_token_claims</code> (read-only named list exposing the
+decoded JWT payload, e.g., <code>sub</code>, <code>acr</code>,
+<code>amr</code>, <code>auth_time</code>)</li>
+<li><code>cnf</code> (optional confirmation claim set, such as an mTLS
+certificate thumbprint)</li>
+<li><code>granted_scopes</code> (normalized scope tokens currently
+associated with the access token)</li>
+<li><code>granted_scopes_verified</code> (logical indicating whether the
+current token response explicitly proved those scopes)</li>
+<li><code>userinfo</code> (optional list)</li>
 </ul>
 </div>
 <div id="token-introspection-optional" class="section level3">
-<h3>11. Token introspection (optional)</h3>
-<p>Some providers support RFC 7662 token introspection (an additional
-endpoint where the server can ask the provider whether an access token
-is currently active and retrieve related metadata).</p>
+<h3>12. Token introspection (optional)</h3>
+<p>Some providers support RFC 7662 token introspection. This is an extra
+server-to-server check where ‘shinyOAuth’ asks the provider whether a
+token is currently active and receives related metadata.</p>
 <p>If you enable <code>introspect = TRUE</code> when creating your
 <code>oauth_client()</code>, the module calls the provider’s
-introspection endpoint during callback processing and requires the
-response to indicate <code>active = TRUE</code>. If introspection is
-unsupported by the provider or the introspection request fails, the
-login is aborted and <code>$authenticated</code> is not set to
-<code>TRUE</code>.</p>
-<p>You can optionally enforce additional provider-dependent fields via
+introspection endpoint after the token object has been built and
+requires the response to indicate <code>active = TRUE</code> before the
+session is treated as authenticated. If introspection fails, or if the
+token is reported as inactive, login stops and
+<code>$authenticated</code> is not set to <code>TRUE</code>.</p>
+<p>You can optionally ask ‘shinyOAuth’ to check additional
+provider-dependent fields via
 <code>oauth_client(introspect_elements = ...)</code>:</p>
 <ul>
 <li><code>&quot;sub&quot;</code> – require introspection <code>sub</code> to match
@@ -615,50 +884,35 @@ the session subject</li>
 against requested scopes (respects the client’s
 <code>scope_validation</code> mode)</li>
 </ul>
-<p>(Note that not all providers may return each of these fields in
-introspection responses.)</p>
+<p>Note that not all providers may return each of these fields in
+introspection responses.</p>
 </div>
-<div id="build-the-oauthtoken-object" class="section level3">
-<h3>12. Build the <code>OAuthToken</code> object</h3>
-<p>Now that all verifications have passed, the module builds the final
-token object. This is an S7 <code>OAuthToken</code> object which
-contains:</p>
-<ul>
-<li><code>access_token</code> (string)</li>
-<li><code>refresh_token</code> (optional string)</li>
-<li><code>expires_at</code> (numeric timestamp, seconds since epoch;
-<code>Inf</code> for non-expiring tokens)</li>
-<li><code>id_token</code> (optional string)</li>
-<li><code>id_token_validated</code> (logical, indicating whether the ID
-token was cryptographically verified)</li>
-<li><code>id_token_claims</code> (read-only named list exposing the
-decoded JWT payload, e.g., <code>sub</code>, <code>acr</code>,
-<code>amr</code>, <code>auth_time</code>)</li>
-<li><code>userinfo</code> (optional list)</li>
-</ul>
+<div id="mark-session-as-authenticated" class="section level3">
+<h3>13. Mark session as authenticated</h3>
 <p>The <code>$authenticated</code> value as returned by
 <code>oauth_module_server()</code> now becomes TRUE, meaning all
 requested verifications have passed.</p>
 </div>
 <div id="clean-url-tidy-ui-clear-browser-token" class="section level3">
-<h3>13. Clean URL &amp; tidy UI; clear browser token</h3>
+<h3>14. Clean URL &amp; tidy UI; clear browser token</h3>
 <p>The user’s browser was redirected to your app with OAuth 2.0 query
-parameters (<code>code</code>, <code>state</code>, etc.). To improve UX
-and avoid leaking sensitive data, these values are removed from the
-address bar with JavaScript. Optionally, the page title may also be
-adjusted (see the <code>tab_title_</code> arguments in
+parameters (<code>code</code>, <code>state</code>, etc.). To keep the
+URL cleaner and avoid leaving sensitive values in the address bar, these
+values are removed with JavaScript. Optionally, the page title may also
+be adjusted (see the <code>tab_title_</code> arguments in
 <code>oauth_module_server()</code>).</p>
 <p>The browser token cookie is also cleared and immediately re-issued
-with a fresh value, so a future flow can start with a new per-session
+with a fresh value, so a future flow starts with a new per-session
 token.</p>
 </div>
 <div id="post-flow-session-management" class="section level3">
-<h3>14. Post-flow session management</h3>
-<p>Now that the flow is complete, the module will manage the token
-lifetime during the active session. This may consist of:</p>
+<h3>15. Post-flow session management</h3>
+<p>Once login is complete, the module manages token lifetime during the
+active session. Depending on your settings, that may include:</p>
 <ul>
-<li>Proactive refresh: if enabled and a refresh token exists, the access
-token is refreshed before expiry</li>
+<li>Proactive refresh: if enabled via
+<code>oauth_module_server(refresh_proactively = TRUE)</code> and a
+refresh token exists, the access token is refreshed before expiry</li>
 <li>Expiration: expired tokens are cleared automatically, setting the
 <code>$authenticated</code> flag to FALSE</li>
 <li>Re-authentication: optionally,
@@ -667,30 +921,49 @@ periodic re-authentication</li>
 </ul>
 <div id="refresh-behavior-refresh_token" class="section level4">
 <h4>Refresh behavior (<code>refresh_token()</code>)</h4>
-<p>When the module refreshes a session (or when you call
-<code>refresh_token()</code> directly), it performs an OAuth 2.0 refresh
-token grant against the provider’s token endpoint and updates the
-<code>OAuthToken</code> object. This works as follows:</p>
+<p>When the module refreshes a session, or when you call
+<code>refresh_token()</code> directly, it performs an OAuth 2.0
+refresh-token grant against the provider’s token endpoint and updates
+the <code>OAuthToken</code> object. In short:</p>
 <ul>
 <li>A token request is sent with <code>grant_type=refresh_token</code>
 and the current <code>refresh_token</code></li>
+<li>When DPoP is enabled and the token endpoint responds with
+<code>DPoP-Nonce</code>, ‘shinyOAuth’ retries the refresh request once
+with a fresh proof that includes that nonce</li>
 <li>The response must include a new <code>access_token</code>.
 <code>expires_at</code> is updated from <code>expires_in</code> when
-present; otherwise it is set to <code>Inf</code></li>
+present; otherwise ‘shinyOAuth’ synthesizes a finite fallback lifetime
+(default <code>3600</code> seconds, configurable via
+<code>options(shinyOAuth.default_expires_in = ...)</code>)</li>
 <li>If the provider rotates the refresh token (returns a new
 <code>refresh_token</code>), it is stored; otherwise the original is
 preserved</li>
 <li>If <code>oauth_provider(userinfo_required = TRUE)</code>, userinfo
 is re-fetched using the fresh access token</li>
+<li>If <code>oauth_client(introspect = TRUE)</code>, the refreshed
+access token is introspected through the same client policy before the
+session is updated</li>
 </ul>
-<p>With respect to OIDC ID token handling:</p>
+<p>When the refresh response omits new observable <code>cnf</code>,
+‘shinyOAuth’ does not carry forward the previous certificate thumbprint
+onto the refreshed token. Refreshed access tokens keep mTLS
+sender-constrained state only when the new token itself, or its
+introspection response, supplies fresh <code>cnf</code> data.</p>
+<p>If you are running a security-sensitive app, set
+<code>options(shinyOAuth.default_expires_in = ...)</code> to the
+provider’s documented lifetime instead of relying on the package
+default, and consider
+<code>oauth_module_server(reauth_after_seconds = ...)</code> when you
+need a hard upper bound on session age.</p>
+<p>Refresh can behave a little differently for OIDC ID tokens:</p>
 <ul>
 <li>Per OIDC Core Section 12.2, refresh responses may omit
-<code>id_token</code>. When omitted, the original <code>id_token</code>
-from the initial login is preserved. Thus, a refresh does not
-necessarily revalidate identity</li>
+<code>id_token</code>. When that happens, ‘shinyOAuth’ keeps the
+original <code>id_token</code>, so refresh does not necessarily
+revalidate identity</li>
 <li>If the provider does return an <code>id_token</code> during refresh,
-shinyOAuth enforces OIDC 12.2 subject continuity: the refresh-returned
+‘shinyOAuth’ enforces OIDC 12.2 subject continuity: the refresh-returned
 <code>id_token</code> must have the same <code>sub</code> as the
 original <code>id_token</code> from login
 <ul>
@@ -700,7 +973,7 @@ subject claim match with no baseline)</li>
 <li>If <code>id_token_validation = TRUE</code>, the refresh-returned
 <code>id_token</code> is fully validated (signature + claims); the
 <code>sub</code> claim match is enforced as part of validation</li>
-<li>If <code>id_token_validation = FALSE</code>, shinyOAuth still
+<li>If <code>id_token_validation = FALSE</code>, ‘shinyOAuth’ still
 enforces the <code>sub</code> match by parsing the JWT payload (ensuring
 that the <code>sub</code> claim still matches but without full
 validation)</li>
@@ -709,23 +982,27 @@ claims in the refreshed ID token are compared against the original ID
 token’s values (not just the provider configuration) per OIDC Core
 Section 12.2, to cover edge cases with multi-tenant providers or
 rotating issuer URIs</li>
+<li>‘shinyOAuth’ also enforces continuity for <code>auth_time</code>
+when the original ID token had it, rejects a refreshed
+<code>nonce</code> when it changes, and requires <code>azp</code> to
+match when either token carries it</li>
 </ul></li>
 </ul>
 <p>If refresh fails inside <code>oauth_module_server()</code>, the
-module exposes the failure via its reactive state (for example,
-<code>token_refresh_error</code>). By default it also clears the current
-session token; if
+module exposes the failure through its reactive state (for example,
+<code>auth$error == &quot;token_refresh_error&quot;</code> plus
+<code>auth$error_description</code>). By default it also clears the
+current session token; if
 <code>oauth_module_server(indefinite_session = TRUE)</code>, the token
-is kept but marked stale. In the default mode, the
-<code>$authenticated</code> flag becomes <code>FALSE</code> while the
-error is present. However, when <code>indefinite_session = TRUE</code>,
-the <code>$authenticated</code> flag remains <code>TRUE</code> even if
-errors are present, allowing long-lived sessions despite transient
-refresh failures.</p>
+is kept and <code>auth$token_stale</code> becomes <code>TRUE</code>. In
+the default mode, <code>$authenticated</code> becomes <code>FALSE</code>
+while the error is present. With <code>indefinite_session = TRUE</code>,
+<code>$authenticated</code> stays <code>TRUE</code> even if a refresh
+error is present.</p>
 </div>
 </div>
 <div id="logout-and-token-revocation" class="section level3">
-<h3>15. Logout and token revocation</h3>
+<h3>16. Logout and token revocation</h3>
 <p>When <code>auth$logout()</code> is called, the module:</p>
 <ol style="list-style-type: decimal">
 <li>Attempts to revoke both refresh and access tokens at the provider
@@ -742,13 +1019,18 @@ cookie)</li>
 <p>To automatically attempt revocation when a Shiny session ends (for
 example, a tab close or session timeout), set
 <code>revoke_on_session_end = TRUE</code>:</p>
+<p>This requires the provider to have a configured
+<code>revocation_url</code>; otherwise
+<code>oauth_module_server()</code> rejects
+<code>revoke_on_session_end = TRUE</code> at startup.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  <span class="st">&quot;auth&quot;</span>,</span>
 <span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="at">client =</span> client,</span>
 <span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">revoke_on_session_end =</span> <span class="cn">TRUE</span></span>
 <span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>)</span></code></pre></div>
 <p>This is best-effort: the session may end while the provider is
-unavailable, and revocation failures do not block session cleanup.</p>
+unavailable, and revocation failures do not block local session
+cleanup.</p>
 </div>
 </div>
 

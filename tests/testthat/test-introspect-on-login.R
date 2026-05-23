@@ -138,11 +138,11 @@ test_that("OAuthClient validates introspect configuration at construction time",
 .build_dummy_jwt <- function(payload) {
   # Minimal JWT string for parse_jwt_payload(): header.payload.signature
   hdr <- list(alg = "none", typ = "JWT")
-  h <- shinyOAuth:::b64url_encode(charToRaw(jsonlite::toJSON(
+  h <- shinyOAuth:::base64url_encode(charToRaw(jsonlite::toJSON(
     hdr,
     auto_unbox = TRUE
   )))
-  p <- shinyOAuth:::b64url_encode(charToRaw(jsonlite::toJSON(
+  p <- shinyOAuth:::base64url_encode(charToRaw(jsonlite::toJSON(
     payload,
     auto_unbox = TRUE
   )))
@@ -173,7 +173,7 @@ test_that("handle_callback with introspect=TRUE fails when token is inactive", {
       )
     },
     # Mock introspection to return inactive
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -213,7 +213,7 @@ test_that("handle_callback with introspect=TRUE succeeds when token is active", 
       )
     },
     # Mock introspection to return active
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -235,8 +235,50 @@ test_that("handle_callback with introspect=TRUE succeeds when token is active", 
   )
 })
 
-test_that("introspect_elements can require sub match (id_token)", {
+test_that("handle_callback with introspect=TRUE backfills cnf from introspection", {
   cli <- make_introspect_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "opaque-access-token",
+        expires_in = 3600,
+        token_type = "Bearer"
+      )
+    },
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(
+          '{"active":true,"cnf":{"x5t#S256":"intro-thumbprint"}}'
+        )
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      tok_obj <- shinyOAuth:::handle_callback(
+        cli,
+        code = "abc",
+        payload = enc,
+        browser_token = tok
+      )
+
+      testthat::expect_identical(
+        tok_obj@cnf$`x5t#S256`,
+        "intro-thumbprint"
+      )
+    }
+  )
+})
+
+test_that("introspect_elements can require sub match from a validated id_token", {
+  cli <- make_introspect_client(use_pkce = TRUE, use_nonce = TRUE)
   cli@introspect_elements <- "sub"
 
   tok <- valid_browser_token()
@@ -254,7 +296,17 @@ test_that("introspect_elements can require sub match (id_token)", {
         id_token = idt
       )
     },
-    req_with_retry = function(req) {
+    validate_id_token = function(
+      client,
+      id_token,
+      expected_nonce = NULL,
+      expected_sub = NULL,
+      expected_access_token = NULL,
+      max_age = NULL
+    ) {
+      invisible(list(sub = "u1", iss = client@provider@issuer))
+    },
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -286,12 +338,191 @@ test_that("introspect_elements can require sub match (id_token)", {
         id_token = idt
       )
     },
-    req_with_retry = function(req) {
+    validate_id_token = function(
+      client,
+      id_token,
+      expected_nonce = NULL,
+      expected_sub = NULL,
+      expected_access_token = NULL,
+      max_age = NULL
+    ) {
+      invisible(list(sub = "u1", iss = client@provider@issuer))
+    },
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw('{"active":true,"sub":"u2"}')
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      testthat::expect_error(
+        shinyOAuth:::handle_callback(
+          cli,
+          code = "abc",
+          payload = enc2,
+          browser_token = tok
+        ),
+        class = "shinyOAuth_token_error",
+        regexp = "sub does not match"
+      )
+    }
+  )
+})
+
+test_that("introspect_elements sub falls back to userinfo before an unvalidated id_token", {
+  cli <- make_introspect_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@introspect_elements <- "sub"
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@userinfo_required <- TRUE
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+
+  idt <- .build_dummy_jwt(list(sub = "u1"))
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "at",
+        expires_in = 3600,
+        token_type = "Bearer",
+        id_token = idt
+      )
+    },
+    get_userinfo = function(oauth_client, token) {
+      list(sub = "u2", name = "User Two")
+    },
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"active":true,"sub":"u2"}')
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      tok_obj <- shinyOAuth:::handle_callback(
+        cli,
+        code = "abc",
+        payload = enc,
+        browser_token = tok
+      )
+      testthat::expect_equal(tok_obj@userinfo$sub, "u2")
+      testthat::expect_false(tok_obj@id_token_validated)
+    }
+  )
+
+  url2 <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc2 <- parse_query_param(url2, "state")
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "at",
+        expires_in = 3600,
+        token_type = "Bearer",
+        id_token = idt
+      )
+    },
+    get_userinfo = function(oauth_client, token) {
+      list(sub = "u2", name = "User Two")
+    },
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"active":true,"sub":"u1"}')
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      testthat::expect_error(
+        shinyOAuth:::handle_callback(
+          cli,
+          code = "abc",
+          payload = enc2,
+          browser_token = tok
+        ),
+        class = "shinyOAuth_token_error",
+        regexp = "sub does not match"
+      )
+    }
+  )
+})
+
+test_that("introspect_elements sub uses userinfo_id_selector for userinfo fallback", {
+  cli <- make_introspect_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@introspect_elements <- "sub"
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@userinfo_required <- TRUE
+  cli@provider@userinfo_id_selector <- function(userinfo) {
+    as.character(userinfo$id)
+  }
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+
+  idt <- .build_dummy_jwt(list(sub = "id-token-sub"))
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "at",
+        expires_in = 3600,
+        token_type = "Bearer",
+        id_token = idt
+      )
+    },
+    get_userinfo = function(oauth_client, token) {
+      list(sub = "userinfo-sub", id = 42)
+    },
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"active":true,"sub":"42"}')
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      tok_obj <- shinyOAuth:::handle_callback(
+        cli,
+        code = "abc",
+        payload = enc,
+        browser_token = tok
+      )
+      testthat::expect_identical(tok_obj@userinfo$id, 42)
+      testthat::expect_false(tok_obj@id_token_validated)
+    }
+  )
+
+  url2 <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc2 <- parse_query_param(url2, "state")
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "at",
+        expires_in = 3600,
+        token_type = "Bearer",
+        id_token = idt
+      )
+    },
+    get_userinfo = function(oauth_client, token) {
+      list(sub = "userinfo-sub", id = 42)
+    },
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"active":true,"sub":"userinfo-sub"}')
       )
     },
     .package = "shinyOAuth",
@@ -322,7 +553,7 @@ test_that("introspect_elements can require client_id match", {
     swap_code_for_token_set = function(client, code, code_verifier) {
       list(access_token = "at", expires_in = 3600, token_type = "Bearer")
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -349,7 +580,7 @@ test_that("introspect_elements can require client_id match", {
     swap_code_for_token_set = function(client, code, code_verifier) {
       list(access_token = "at", expires_in = 3600, token_type = "Bearer")
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -379,6 +610,7 @@ test_that("introspect_elements can require scopes", {
     use_nonce = FALSE,
     scopes = c("openid", "profile")
   )
+  cli@scope_validation <- "strict"
   cli@introspect_elements <- "scope"
 
   tok <- valid_browser_token()
@@ -394,7 +626,7 @@ test_that("introspect_elements can require scopes", {
         scope = "openid profile"
       )
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -421,6 +653,7 @@ test_that("introspect_elements can require scopes", {
     use_nonce = FALSE,
     scopes = "openid profile"
   )
+  cli_str@scope_validation <- "strict"
   cli_str@introspect_elements <- "scope"
 
   urls <- shinyOAuth:::prepare_call(cli_str, browser_token = tok)
@@ -436,7 +669,7 @@ test_that("introspect_elements can require scopes", {
         scope = "openid profile"
       )
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -488,7 +721,7 @@ test_that("introspect_elements can require scopes", {
         scope = "openid profile"
       )
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -528,7 +761,7 @@ test_that("introspect_elements can require scopes", {
         scope = "openid profile"
       )
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -560,7 +793,7 @@ test_that("introspect_elements can require scopes", {
         scope = "openid profile"
       )
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -579,6 +812,123 @@ test_that("introspect_elements can require scopes", {
         ),
         class = "shinyOAuth_token_error",
         regexp = "Introspected scopes missing"
+      )
+    }
+  )
+})
+
+test_that("introspection scope checks use effective OIDC callback scopes", {
+  prov <- oauth_provider(
+    name = "oidc-scope-test",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    userinfo_url = NA_character_,
+    introspection_url = "https://example.com/introspect",
+    issuer = "https://issuer.example.com",
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    pkce_method = "S256",
+    userinfo_required = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE,
+    userinfo_id_token_match = FALSE,
+    token_auth_style = "body"
+  )
+
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = character(0),
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    ),
+    introspect = TRUE,
+    introspect_elements = "scope",
+    scope_validation = "strict"
+  )
+
+  tok <- valid_browser_token()
+  url <- suppressWarnings(shinyOAuth:::prepare_call(cli, browser_token = tok))
+  enc <- parse_query_param(url, "state")
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "at",
+        expires_in = 3600,
+        token_type = "Bearer",
+        scope = "openid"
+      )
+    },
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"active":true,"scope":""}')
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      testthat::expect_error(
+        shinyOAuth:::handle_callback(
+          cli,
+          code = "abc",
+          payload = enc,
+          browser_token = tok
+        ),
+        class = "shinyOAuth_token_error",
+        regexp = "Introspected scopes missing requested entries: openid"
+      )
+    }
+  )
+})
+
+test_that("introspection scope validation does not split comma-bearing tokens", {
+  cli <- make_introspect_client(
+    use_pkce = TRUE,
+    use_nonce = FALSE,
+    scopes = c("read", "write")
+  )
+  cli@scope_validation <- "strict"
+  cli@introspect_elements <- "scope"
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "at",
+        expires_in = 3600,
+        token_type = "Bearer",
+        scope = "read write"
+      )
+    },
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"active":true,"scope":"read,write"}')
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      testthat::expect_error(
+        shinyOAuth:::handle_callback(
+          cli,
+          code = "abc",
+          payload = enc,
+          browser_token = tok
+        ),
+        class = "shinyOAuth_token_error",
+        regexp = "Introspected scopes missing requested entries: read, write"
       )
     }
   )
@@ -604,7 +954,7 @@ test_that("introspect_elements errors when required fields are missing", {
       )
     },
     # Missing sub in introspection
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -628,6 +978,105 @@ test_that("introspect_elements errors when required fields are missing", {
   )
 })
 
+test_that("handle_callback rejects conflicting introspection cnf values", {
+  key <- openssl::rsa_keygen()
+  correct_jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(key)
+  )
+
+  cli <- make_introspect_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@dpop_private_key <- key
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = .build_dummy_jwt(list(
+          sub = "u1",
+          cnf = list(jkt = correct_jkt)
+        )),
+        expires_in = 3600,
+        token_type = "DPoP"
+      )
+    },
+    introspect_token = function(oauth_client, oauth_token, which, async, ...) {
+      list(
+        supported = TRUE,
+        active = TRUE,
+        raw = list(
+          token_type = "DPoP",
+          cnf = list(jkt = "intro-jkt")
+        ),
+        status = "ok"
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      testthat::expect_error(
+        shinyOAuth:::handle_callback(
+          cli,
+          code = "abc",
+          payload = enc,
+          browser_token = tok
+        ),
+        class = "shinyOAuth_token_error",
+        regexp = "Conflicting token cnf values"
+      )
+    }
+  )
+})
+
+test_that("introspect_elements can require token_type for DPoP tokens", {
+  key <- openssl::rsa_keygen()
+  jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(key)
+  )
+
+  cli <- make_introspect_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@dpop_private_key <- key
+  cli@introspect_elements <- "token_type"
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier) {
+      list(
+        access_token = "opaque-dpop-at",
+        token_type = "DPoP",
+        expires_in = 3600
+      )
+    },
+    introspect_token = function(oauth_client, oauth_token, which, async, ...) {
+      list(
+        supported = TRUE,
+        active = TRUE,
+        raw = list(
+          token_type = "DPoP",
+          cnf = list(jkt = jkt)
+        ),
+        status = "ok"
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      tok_ok <- shinyOAuth:::handle_callback(
+        cli,
+        code = "abc",
+        payload = enc,
+        browser_token = tok
+      )
+
+      testthat::expect_identical(tok_ok@token_type, "DPoP")
+      testthat::expect_identical(tok_ok@cnf$jkt, jkt)
+    }
+  )
+})
+
 test_that("handle_callback with introspect=TRUE fails on introspection http error", {
   cli <- make_introspect_client(use_pkce = TRUE, use_nonce = FALSE)
 
@@ -644,7 +1093,7 @@ test_that("handle_callback with introspect=TRUE fails on introspection http erro
       )
     },
     # Mock introspection to return HTTP error
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 500,
@@ -691,7 +1140,7 @@ test_that("introspect_token emits audit events during login", {
         token_type = "Bearer"
       )
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -742,7 +1191,7 @@ test_that("introspect_token emits audit events even when login fails", {
         token_type = "Bearer"
       )
     },
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -773,4 +1222,58 @@ test_that("introspect_token emits audit events even when login fails", {
   testthat::expect_false(isTRUE(intro_evt$active))
   testthat::expect_equal(intro_evt$status, "ok")
   testthat::expect_equal(intro_evt$which, "access")
+})
+
+test_that("handle_callback forwards shiny_session to introspect_token", {
+  cli <- make_introspect_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+  captured <- NULL
+  shiny_session <- list(
+    token = "async-session-token",
+    http = NULL,
+    is_async = TRUE,
+    process_id = 4321L,
+    main_process_id = 1234L
+  )
+
+  testthat::with_mocked_bindings(
+    swap_code_for_token_set = function(client, code, code_verifier, ...) {
+      list(
+        access_token = "at",
+        expires_in = 3600,
+        token_type = "Bearer"
+      )
+    },
+    introspect_token = function(
+      oauth_client,
+      oauth_token,
+      which,
+      async,
+      shiny_session = NULL
+    ) {
+      captured <<- shiny_session
+      list(
+        supported = TRUE,
+        active = TRUE,
+        raw = list(active = TRUE),
+        status = "ok"
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      tok_obj <- shinyOAuth:::handle_callback(
+        cli,
+        code = "abc",
+        payload = enc,
+        browser_token = tok,
+        shiny_session = shiny_session
+      )
+      testthat::expect_s3_class(tok_obj, "shinyOAuth::OAuthToken")
+    }
+  )
+
+  testthat::expect_identical(captured, shiny_session)
 })

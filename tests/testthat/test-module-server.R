@@ -25,7 +25,7 @@ testthat::test_that("manual login flow yields authenticated TRUE on success", {
       # Mock token exchange to avoid real HTTP
       token <- testthat::with_mocked_bindings(
         swap_code_for_token_set = function(client, code, code_verifier) {
-          list(access_token = "t", expires_in = 3600)
+          list(access_token = "t", token_type = "Bearer", expires_in = 3600)
         },
         .package = "shinyOAuth",
         {
@@ -42,6 +42,309 @@ testthat::test_that("manual login flow yields authenticated TRUE on success", {
       testthat::expect_true(
         is.logical(values$authenticated) && isTRUE(values$authenticated)
       )
+      testthat::expect_null(values$error)
+      testthat::expect_null(values$error_description)
+    }
+  )
+})
+
+testthat::test_that("manual build_auth_url keeps PAR lifetime metadata", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@par_url <- "https://example.com/par"
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      testthat::expect_true(values$has_browser_token())
+
+      url <- testthat::with_mocked_bindings(
+        req_with_retry = function(req, ...) {
+          httr2::response(
+            url = as.character(req$url),
+            status = 201,
+            headers = list("content-type" = "application/json"),
+            body = charToRaw(
+              '{"request_uri":"urn:ietf:params:oauth:request_uri:test","expires_in":90}'
+            )
+          )
+        },
+        .package = "shinyOAuth",
+        {
+          values$build_auth_url()
+        }
+      )
+
+      testthat::expect_true(is.character(url) && nzchar(url))
+      testthat::expect_match(url, "[?&]request_uri=")
+      testthat::expect_identical(
+        attr(url, "shinyOAuth.par_request_uri"),
+        "urn:ietf:params:oauth:request_uri:test"
+      )
+      testthat::expect_identical(
+        attr(url, "shinyOAuth.par_expires_in"),
+        90L
+      )
+      testthat::expect_s3_class(
+        attr(url, "shinyOAuth.par_expires_at"),
+        "POSIXct"
+      )
+      testthat::expect_true(attr(url, "shinyOAuth.par_expires_at") > Sys.time())
+    }
+  )
+})
+
+testthat::test_that("manual build_auth_url wires request_uri mode through the module publisher", {
+  withr::local_options(list(
+    shinyOAuth.skip_browser_token = TRUE,
+    shinyOAuth.allowed_hosts = c(
+      "example.com",
+      "app.example.com",
+      "client.example.com",
+      "localhost"
+    )
+  ))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@client_secret <- paste(rep("s", 32), collapse = "")
+  cli@authorization_request_audience <- "https://issuer.example.com"
+  cli@authorization_request_mode <- "request_uri"
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      testthat::expect_true(values$has_browser_token())
+
+      url <- testthat::with_mocked_bindings(
+        publish_shiny_request_object = function(
+          session,
+          request_object,
+          request_handle_id,
+          expires_at,
+          base_url
+        ) {
+          testthat::expect_true(
+            is.character(request_object) && nzchar(request_object)
+          )
+          testthat::expect_true(
+            is.character(request_handle_id) && nzchar(request_handle_id)
+          )
+          testthat::expect_true(inherits(expires_at, c("POSIXct", "POSIXt")))
+          testthat::expect_null(base_url)
+          "https://client.example.com/request-object"
+        },
+        .package = "shinyOAuth",
+        {
+          values$build_auth_url()
+        }
+      )
+
+      testthat::expect_true(is.character(url) && nzchar(url))
+      query_names <- names(shiny::parseQueryString(sub("^[^?]*\\?", "", url)))
+      testthat::expect_setequal(
+        query_names,
+        c("client_id", "request_uri")
+      )
+      testthat::expect_identical(
+        parse_query_param(url, "request_uri", decode = TRUE),
+        "https://client.example.com/request-object"
+      )
+    }
+  )
+})
+
+testthat::test_that("manual build_auth_url keeps OIDC outer params in request_uri mode", {
+  withr::local_options(list(
+    shinyOAuth.skip_browser_token = TRUE,
+    shinyOAuth.allowed_hosts = c(
+      "example.com",
+      "app.example.com",
+      "client.example.com",
+      "localhost"
+    )
+  ))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE, scopes = "openid")
+  cli@provider@issuer <- "https://example.com"
+  cli@client_secret <- paste(rep("s", 32), collapse = "")
+  cli@authorization_request_mode <- "request_uri"
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      url <- testthat::with_mocked_bindings(
+        publish_shiny_request_object = function(...) {
+          "https://client.example.com/request-object"
+        },
+        .package = "shinyOAuth",
+        {
+          values$build_auth_url()
+        }
+      )
+
+      query_names <- names(shiny::parseQueryString(sub("^[^?]*\\?", "", url)))
+      testthat::expect_setequal(
+        query_names,
+        c("client_id", "response_type", "scope", "request_uri")
+      )
+      testthat::expect_identical(
+        parse_query_param(url, "request_uri", decode = TRUE),
+        "https://client.example.com/request-object"
+      )
+    }
+  )
+})
+
+testthat::test_that("request_uri mode requires a pinned public origin policy", {
+  withr::local_options(list(
+    shinyOAuth.skip_browser_token = TRUE,
+    shinyOAuth.allowed_hosts = NULL
+  ))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@client_secret <- paste(rep("s", 32), collapse = "")
+  cli@authorization_request_audience <- "https://issuer.example.com"
+  cli@authorization_request_mode <- "request_uri"
+
+  testthat::expect_error(
+    shiny::testServer(
+      app = oauth_module_server,
+      args = list(
+        id = "auth",
+        client = cli,
+        auto_redirect = FALSE,
+        indefinite_session = TRUE
+      ),
+      expr = {}
+    ),
+    regexp = "request_uri_base_url|allowed_hosts"
+  )
+})
+
+testthat::test_that("manual build_auth_url forwards request_uri_base_url through the module publisher", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@client_secret <- paste(rep("s", 32), collapse = "")
+  cli@authorization_request_audience <- "https://issuer.example.com"
+  cli@authorization_request_mode <- "request_uri"
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = TRUE,
+      request_uri_base_url = "https://public.example.com/app/"
+    ),
+    expr = {
+      testthat::expect_true(values$has_browser_token())
+
+      url <- testthat::with_mocked_bindings(
+        publish_shiny_request_object = function(
+          session,
+          request_object,
+          request_handle_id,
+          expires_at,
+          base_url
+        ) {
+          testthat::expect_true(
+            is.character(request_object) && nzchar(request_object)
+          )
+          testthat::expect_true(
+            is.character(request_handle_id) && nzchar(request_handle_id)
+          )
+          testthat::expect_true(inherits(expires_at, c("POSIXct", "POSIXt")))
+          testthat::expect_identical(base_url, "https://public.example.com/app")
+          "https://public.example.com/app/request-object"
+        },
+        .package = "shinyOAuth",
+        {
+          values$build_auth_url()
+        }
+      )
+
+      testthat::expect_true(is.character(url) && nzchar(url))
+      query_names <- names(shiny::parseQueryString(sub("^[^?]*\\?", "", url)))
+      testthat::expect_setequal(
+        query_names,
+        c("client_id", "request_uri")
+      )
+      testthat::expect_identical(
+        parse_query_param(url, "request_uri", decode = TRUE),
+        "https://public.example.com/app/request-object"
+      )
+    }
+  )
+})
+
+testthat::test_that("manual sync login succeeds with browser-token protection enabled", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = FALSE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  btok <- valid_browser_token()
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      async = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      testthat::expect_false(values$has_browser_token())
+
+      session$setInputs(shinyOAuth_sid = btok)
+      session$flushReact()
+
+      testthat::expect_true(values$has_browser_token())
+      testthat::expect_identical(values$browser_token, btok)
+
+      url <- values$build_auth_url()
+      testthat::expect_true(is.character(url) && nzchar(url))
+      enc <- parse_query_param(url, "state")
+      testthat::expect_true(is.character(enc) && nzchar(enc))
+
+      token <- testthat::with_mocked_bindings(
+        swap_code_for_token_set = function(client, code, code_verifier) {
+          list(
+            access_token = "t-sync-cookie",
+            token_type = "Bearer",
+            expires_in = 3600
+          )
+        },
+        .package = "shinyOAuth",
+        {
+          values$.process_query(paste0("?code=ok&state=", enc))
+          session$flushReact()
+          values$token
+        }
+      )
+
+      testthat::expect_false(is.null(token))
+      testthat::expect_true(isTRUE(values$authenticated))
       testthat::expect_null(values$error)
       testthat::expect_null(values$error_description)
     }
@@ -72,9 +375,9 @@ testthat::test_that("login fails when introspection validation fails", {
 
       testthat::with_mocked_bindings(
         swap_code_for_token_set = function(client, code, code_verifier) {
-          list(access_token = "t", expires_in = 3600)
+          list(access_token = "t", token_type = "Bearer", expires_in = 3600)
         },
-        req_with_retry = function(req) {
+        req_with_retry = function(req, ...) {
           httr2::response(
             url = as.character(req$url),
             status = 200,
@@ -96,6 +399,111 @@ testthat::test_that("login fails when introspection validation fails", {
         is.character(values$error_description) &&
           grepl("not active", values$error_description, ignore.case = TRUE)
       )
+    }
+  )
+})
+
+testthat::test_that("sync callback state failures surface invalid_state", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      async = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      testthat::expect_true(values$has_browser_token())
+
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+
+      values$browser_token <- paste(rep("cd", 64), collapse = "")
+
+      testthat::with_mocked_bindings(
+        swap_code_for_token_set = function(client, code, code_verifier) {
+          testthat::fail("token exchange should not run after invalid_state")
+        },
+        .package = "shinyOAuth",
+        {
+          values$.process_query(paste0("?code=bad&state=", enc))
+          session$flushReact()
+        }
+      )
+
+      testthat::expect_identical(values$error, "invalid_state")
+      testthat::expect_true(
+        is.character(values$error_description) &&
+          grepl(
+            "browser token mismatch",
+            values$error_description,
+            ignore.case = TRUE
+          )
+      )
+      testthat::expect_null(values$token)
+    }
+  )
+})
+
+testthat::test_that("async callback state failures surface invalid_state", {
+  testthat::skip_if_not_installed("later")
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  async_state_error <- tryCatch(
+    shinyOAuth:::err_invalid_state("Async browser token mismatch"),
+    error = function(e) e
+  )
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      async = TRUE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      testthat::expect_true(values$has_browser_token())
+
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+
+      testthat::with_mocked_bindings(
+        prepare_client_for_worker = function(client) client,
+        async_dispatch = function(...) {
+          promises::promise_reject(async_state_error)
+        },
+        .package = "shinyOAuth",
+        {
+          values$.process_query(paste0("?code=bad&state=", enc))
+
+          deadline <- Sys.time() + 2
+          while (is.null(values$error) && Sys.time() < deadline) {
+            later::run_now(0.05)
+            session$flushReact()
+            Sys.sleep(0.01)
+          }
+        }
+      )
+
+      testthat::expect_identical(values$error, "invalid_state")
+      testthat::expect_true(
+        is.character(values$error_description) &&
+          grepl(
+            "async browser token mismatch",
+            values$error_description,
+            ignore.case = TRUE
+          )
+      )
+      testthat::expect_null(values$token)
     }
   )
 })
@@ -557,6 +965,72 @@ testthat::test_that("error_uri from provider error callback is surfaced", {
   )
 })
 
+testthat::test_that("non-https error_uri from provider error callback is dropped", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session$flushReact()
+
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+
+      values$.process_query(paste0(
+        "?error=access_denied",
+        "&error_uri=javascript%3Aalert(1)",
+        "&state=",
+        enc
+      ))
+      session$flushReact()
+
+      testthat::expect_identical(values$error, "access_denied")
+      testthat::expect_null(values$error_uri)
+      testthat::expect_false(values$authenticated)
+    }
+  )
+})
+
+testthat::test_that("http error_uri from provider error callback is dropped", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session$flushReact()
+
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+
+      values$.process_query(paste0(
+        "?error=access_denied",
+        "&error_uri=http%3A%2F%2Fprovider.example%2Fhelp%2Faccess_denied",
+        "&state=",
+        enc
+      ))
+      session$flushReact()
+
+      testthat::expect_identical(values$error, "access_denied")
+      testthat::expect_null(values$error_uri)
+      testthat::expect_false(values$authenticated)
+    }
+  )
+})
+
 testthat::test_that("error_uri is NULL when provider omits it", {
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
@@ -783,7 +1257,7 @@ testthat::test_that("callback_max_query_bytes option is enforced", {
           testthat::with_mocked_bindings(
             swap_code_for_token_set = function(client, code, code_verifier) {
               called <<- TRUE
-              list(access_token = "t", expires_in = 3600)
+              list(access_token = "t", token_type = "Bearer", expires_in = 3600)
             },
             .package = "shinyOAuth",
             {
@@ -901,6 +1375,13 @@ testthat::test_that("callback params are cleared when token already exists", {
       session$flushReact()
       seen <<- character(0)
 
+      url <- values$build_auth_url()
+      enc <- parse_query_param(url, "state")
+      payload <- shinyOAuth:::state_payload_decrypt_validate(cli, enc)
+      key <- shinyOAuth:::state_cache_key(payload$state)
+      before <- cli@state_store$get(key, missing = NULL)
+      testthat::expect_false(is.null(before))
+
       t <- OAuthToken(
         access_token = "existing",
         refresh_token = NA_character_,
@@ -909,14 +1390,97 @@ testthat::test_that("callback params are cleared when token already exists", {
       )
       values$token <- t
 
-      values$.process_query("?code=abc&state=s1&foo=1")
+      values$.process_query(paste0("?code=abc&state=", enc, "&foo=1"))
       session$flushReact()
+
+      after <- cli@state_store$get(key, missing = NULL)
 
       testthat::expect_true(
         any(seen == "shinyOAuth:clearQueryAndFixTitle"),
         info = "Expected clearQueryAndFixTitle when callback params appear with existing token"
       )
       testthat::expect_identical(values$token@access_token, "existing")
+      testthat::expect_identical(after, before)
+    }
+  )
+})
+
+testthat::test_that("request_login is ignored while already authenticated", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      t <- OAuthToken(
+        access_token = "existing",
+        refresh_token = NA_character_,
+        expires_at = as.numeric(Sys.time()) + 3600,
+        id_token = NA_character_
+      )
+      values$token <- t
+      session$flushReact()
+
+      keys_before <- sort(cli@state_store$keys())
+      result <- NULL
+      testthat::expect_warning(
+        {
+          result <- values$request_login()
+        },
+        "already authenticated"
+      )
+      session$flushReact()
+      keys_after <- sort(cli@state_store$keys())
+
+      testthat::expect_identical(result, FALSE)
+      testthat::expect_identical(keys_after, keys_before)
+      testthat::expect_false(isTRUE(values$auto_redirected))
+      testthat::expect_false(isTRUE(values$pending_login))
+    }
+  )
+})
+
+testthat::test_that("request_login can start reauth before authenticated observer flushes", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = FALSE
+    ),
+    expr = {
+      t <- OAuthToken(
+        access_token = "existing",
+        refresh_token = NA_character_,
+        expires_at = as.numeric(Sys.time()) + 3600,
+        id_token = NA_character_
+      )
+      values$token <- t
+      # Successful logins clear the browser token; mimic that state so
+      # reauth has to issue a fresh token and mark pending_login.
+      values$browser_token <- NULL
+      session$flushReact()
+
+      values$token <- NULL
+      result <- values$request_login()
+
+      testthat::expect_identical(result, TRUE)
+      testthat::expect_true(isTRUE(values$pending_login))
+      testthat::expect_false(isTRUE(values$auto_redirected))
+
+      session$flushReact()
+      testthat::expect_false(isTRUE(values$authenticated))
     }
   )
 })
@@ -1063,6 +1627,189 @@ testthat::test_that("oauth_module_server clears token and sets error when proact
       testthat::expect_false(is.null(values$error_description))
       testthat::expect_true(is.null(values$token))
       testthat::expect_false(values$authenticated)
+      testthat::expect_false(isTRUE(values$refresh_in_progress))
+    }
+  )
+})
+
+testthat::test_that("oauth_module_server refresh failure with auto_redirect queues reauth", {
+  testthat::skip_if_not_installed("later")
+
+  withr::local_options(list(
+    shinyOAuth.skip_browser_token = TRUE,
+    shinyOAuth.skip_id_sig = TRUE
+  ))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = TRUE,
+      async = FALSE,
+      indefinite_session = FALSE,
+      refresh_proactively = TRUE,
+      refresh_lead_seconds = 4000,
+      refresh_check_interval = 100
+    ),
+    expr = {
+      t <- OAuthToken(
+        access_token = "old_at",
+        refresh_token = "rt",
+        expires_at = as.numeric(Sys.time()) + 3600,
+        id_token = NA_character_
+      )
+      values$token <- t
+      values$auth_started_at <- as.numeric(Sys.time())
+      values$error <- NULL
+      values$error_description <- NULL
+      # Successful login clears the browser token, so refresh-failure reauth
+      # must first queue a replacement token before redirecting.
+      values$browser_token <- NULL
+      session$flushReact()
+
+      testthat::with_mocked_bindings(
+        refresh_token = function(
+          oauth_client,
+          token,
+          async = FALSE,
+          introspect = FALSE,
+          shiny_session = NULL
+        ) {
+          shinyOAuth:::err_id_token("Invalid ID token")
+        },
+        .package = "shinyOAuth",
+        {
+          deadline <- Sys.time() + 2
+          while (!isTRUE(values$pending_login) && Sys.time() < deadline) {
+            later::run_now(0.05)
+            session$flushReact()
+            Sys.sleep(0.01)
+          }
+        }
+      )
+
+      testthat::expect_identical(values$error, "token_refresh_error")
+      testthat::expect_false(isTRUE(values$authenticated))
+      testthat::expect_true(is.null(values$token))
+      testthat::expect_true(isTRUE(values$reauth_triggered))
+      testthat::expect_true(isTRUE(values$pending_login))
+      testthat::expect_false(isTRUE(values$auto_redirected))
+      testthat::expect_false(isTRUE(values$refresh_in_progress))
+
+      values$browser_token <- valid_browser_token()
+
+      deadline <- Sys.time() + 2
+      while (!isTRUE(values$auto_redirected) && Sys.time() < deadline) {
+        later::run_now(0.05)
+        session$flushReact()
+        Sys.sleep(0.01)
+      }
+
+      testthat::expect_false(isTRUE(values$pending_login))
+      testthat::expect_true(isTRUE(values$auto_redirected))
+    }
+  )
+})
+
+testthat::test_that("oauth_module_server proactive refresh forwards introspection policy", {
+  testthat::skip_if_not_installed("later")
+
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = FALSE)
+  prov@introspection_url <- "https://example.com/introspect"
+
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = character(0),
+    introspect = TRUE,
+    introspect_elements = c("sub", "client_id"),
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    )
+  )
+
+  calls <- new.env(parent = emptyenv())
+  calls$token <- 0L
+  calls$introspection <- 0L
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      async = FALSE,
+      indefinite_session = FALSE,
+      refresh_proactively = TRUE,
+      refresh_lead_seconds = 4000,
+      refresh_check_interval = 100
+    ),
+    expr = {
+      testthat::with_mocked_bindings(
+        req_with_retry = function(req, ...) {
+          url <- as.character(req$url)
+          if (grepl("/token", url, fixed = TRUE)) {
+            calls$token <- calls$token + 1L
+            return(httr2::response(
+              url = url,
+              status = 200,
+              headers = list("content-type" = "application/json"),
+              body = charToRaw(
+                '{"access_token":"new_at","token_type":"Bearer","expires_in":7200}'
+              )
+            ))
+          }
+
+          if (grepl("/introspect", url, fixed = TRUE)) {
+            calls$introspection <- calls$introspection + 1L
+            return(httr2::response(
+              url = url,
+              status = 200,
+              headers = list("content-type" = "application/json"),
+              body = charToRaw(
+                '{"active":true,"client_id":"abc","sub":"user-1"}'
+              )
+            ))
+          }
+
+          httr2::response(url = url, status = 200)
+        },
+        .package = "shinyOAuth",
+        {
+          t <- OAuthToken(
+            access_token = "old_at",
+            refresh_token = "rt",
+            expires_at = as.numeric(Sys.time()) + 3600,
+            id_token = NA_character_
+          )
+          t@userinfo <- list(sub = "user-1")
+          values$token <- t
+          values$auth_started_at <- as.numeric(Sys.time())
+          values$error <- NULL
+          values$error_description <- NULL
+          session$flushReact()
+
+          deadline <- Sys.time() + 2
+          while (calls$introspection < 1L && Sys.time() < deadline) {
+            later::run_now(0.05)
+            session$flushReact()
+            Sys.sleep(0.01)
+          }
+        }
+      )
+
+      testthat::expect_gte(calls$token, 1L)
+      testthat::expect_gte(calls$introspection, 1L)
+      testthat::expect_identical(values$token@access_token, "new_at")
       testthat::expect_false(isTRUE(values$refresh_in_progress))
     }
   )

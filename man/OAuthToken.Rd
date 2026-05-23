@@ -6,15 +6,21 @@
 \usage{
 OAuthToken(
   access_token = character(0),
+  token_type = NA_character_,
   refresh_token = NA_character_,
   id_token = NA_character_,
   expires_at = Inf,
   userinfo = list(),
+  cnf = list(),
+  granted_scopes = character(0),
+  granted_scopes_verified = FALSE,
   id_token_validated = FALSE
 )
 }
 \arguments{
 \item{access_token}{Access token}
+
+\item{token_type}{OAuth access token type (for example \code{Bearer} or \code{DPoP})}
 
 \item{refresh_token}{Refresh token (if provided by the provider)}
 
@@ -25,6 +31,25 @@ token expires. \code{Inf} for non-expiring tokens}
 
 \item{userinfo}{List containing user information fetched from the provider's
 userinfo endpoint (if fetched)}
+
+\item{cnf}{Optional confirmation claim set returned alongside a
+sender-constrained access token or observed on another token surface. For
+RFC 8705 certificate-bound tokens, this may contain \code{x5t#S256} with the
+SHA-256 thumbprint of the client certificate that must accompany later
+requests. For DPoP-bound tokens, this may contain \code{jkt} with the RFC 7638
+thumbprint of the public JWK bound to the token. When \code{cnf} is learned by
+locally parsing a raw JWT access token, shinyOAuth is observing the token
+payload and is not independently verifying the access-token signature;
+introspection or another provider proof surface is stronger assurance.}
+
+\item{granted_scopes}{Normalized scope tokens currently associated with the
+access token. When a provider omits \code{scope} in a token response,
+shinyOAuth carries forward the best-known scope set instead of dropping it.}
+
+\item{granted_scopes_verified}{Logical flag indicating whether the current
+token response explicitly proved \code{granted_scopes}. \code{FALSE} means the scope
+set was assumed or carried forward because the provider omitted \code{scope}.
+For stronger proof, configure \code{introspect_elements = "scope"}.}
 
 \item{id_token_validated}{Logical flag indicating whether the ID token was
 cryptographically validated (signature verified and standard claims checked)
@@ -55,26 +80,26 @@ were cryptographically validated.
 
 # Example requires a real token from a completed OAuth flow
 # (code is therefore not run; would error with placeholder values below)
-\dontrun{
-# Define client
-client <- oauth_client(
-  provider = oauth_provider_github(),
-  client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
-  client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
-  redirect_uri = "http://127.0.0.1:8100"
-)
+if (interactive()) {
+  # Define client
+  client <- oauth_client(
+    provider = oauth_provider_github(),
+    client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
+    client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+    redirect_uri = "http://127.0.0.1:8100"
+  )
 
-# Have a valid OAuthToken object; fake example below
-# (typically provided by `oauth_module_server()` or `handle_callback()`)
-token <- handle_callback(client, "<code>", "<payload>", "<browser_token>")
+  # Have a valid OAuthToken object; fake example below
+  # (typically provided by `oauth_module_server()` or `handle_callback()`)
+  token <- handle_callback(client, "<code>", "<payload>", "<browser_token>")
 
-# Get userinfo
-user_info <- get_userinfo(client, token)
+  # Get userinfo
+  user_info <- get_userinfo(client, token)
 
-# Introspect token (if supported by provider)
-introspection <- introspect_token(client, token)
+  # Introspect token (if supported by provider)
+  introspection <- introspect_token(client, token)
 
-# Refresh token
-new_token <- refresh_token(client, token, introspect = TRUE)
+  # Refresh token
+  new_token <- refresh_token(client, token, introspect = TRUE)
 }
 }

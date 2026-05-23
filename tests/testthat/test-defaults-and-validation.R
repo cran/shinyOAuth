@@ -35,6 +35,30 @@ test_that("OAuthClient state_entropy fails fast on NA and non-scalar", {
   )
 })
 
+test_that("OAuthProvider accepts advertised JWS algorithm supersets", {
+  p <- oauth_provider(
+    name = "t",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    request_object_signing_alg_values_supported = c("RS256", "ES256K"),
+    token_endpoint_auth_signing_alg_values_supported = c("RS256", "ES256K"),
+    dpop_signing_alg_values_supported = c("RS256", "ES256K")
+  )
+
+  expect_identical(
+    p@request_object_signing_alg_values_supported,
+    c("RS256", "ES256K")
+  )
+  expect_identical(
+    p@token_endpoint_auth_signing_alg_values_supported,
+    c("RS256", "ES256K")
+  )
+  expect_identical(
+    p@dpop_signing_alg_values_supported,
+    c("RS256", "ES256K")
+  )
+})
+
 test_that("OAuthProvider default jwks_host_issuer_match is FALSE", {
   p <- OAuthProvider(
     name = "t",
@@ -42,6 +66,15 @@ test_that("OAuthProvider default jwks_host_issuer_match is FALSE", {
     token_url = "https://example.com/token"
   )
   expect_identical(p@jwks_host_issuer_match, FALSE)
+})
+
+test_that("OAuthProvider default issuer_match is url", {
+  p <- OAuthProvider(
+    name = "t",
+    auth_url = "https://example.com/authorize",
+    token_url = "https://example.com/token"
+  )
+  expect_identical(p@issuer_match, "url")
 })
 
 test_that("OAuthProvider HS* algs require allow_hs opt-in", {
@@ -71,11 +104,12 @@ test_that("OAuthProvider HS* algs require allow_hs opt-in", {
 test_that("oauth_provider_microsoft defaults are compatible with multi-tenant aliases", {
   p <- oauth_provider_microsoft(tenant = "common")
 
-  # Multi-tenant issuer varies by signing tenant; default disables validation.
-  expect_true(is.na(p@issuer))
-  expect_identical(p@id_token_validation, FALSE)
-  expect_identical(p@id_token_required, FALSE)
-  expect_identical(p@use_nonce, FALSE)
+  # Multi-tenant aliases should use Microsoft's tenant-independent OIDC rules.
+  expect_identical(p@issuer, "https://login.microsoftonline.com/common/v2.0")
+  expect_identical(p@issuer_match, "host")
+  expect_identical(p@id_token_validation, TRUE)
+  expect_identical(p@id_token_required, TRUE)
+  expect_identical(p@use_nonce, TRUE)
   expect_identical(p@allowed_algs, c("RS256"))
 })
 
@@ -230,6 +264,7 @@ test_that("OAuthProvider rejects reserved keys in extra_token_params", {
   reserved <- c(
     "grant_type",
     "code",
+    "refresh_token",
     "redirect_uri",
     "code_verifier",
     "client_id",
@@ -315,6 +350,7 @@ test_that("OAuthProvider rejects mixed-case reserved keys in extra_token_params"
     "GRANT_TYPE",
     "Grant_Type",
     "CODE",
+    " Refresh_Token ",
     "CLIENT_SECRET",
     "Client_Secret",
     " code_verifier ",

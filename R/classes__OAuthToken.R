@@ -1,15 +1,41 @@
+# This file defines the OAuthToken object returned by login, refresh, and other
+# token operations
+# Used for storing the access token, optional refresh or ID tokens, expiry
+# time, and fetched user info in one validated result object
+
+# 1 OAuth token class ----------------------------------------------------------
+
+## 1.1 Class definition --------------------------------------------------------
+
 #' OAuthToken S7 class
 #'
 #' @description
 #' S7 class representing OAuth tokens and (optionally) user information.
 #'
 #' @param access_token Access token
+#' @param token_type OAuth access token type (for example `Bearer` or `DPoP`)
 #' @param refresh_token Refresh token (if provided by the provider)
 #' @param id_token ID token (if provided by the provider; OpenID Connect)
 #' @param expires_at Numeric timestamp (seconds since epoch) when the access
 #'  token expires. `Inf` for non-expiring tokens
 #' @param userinfo List containing user information fetched from the provider's
 #'  userinfo endpoint (if fetched)
+#' @param cnf Optional confirmation claim set returned alongside a
+#'   sender-constrained access token or observed on another token surface. For
+#'   RFC 8705 certificate-bound tokens, this may contain `x5t#S256` with the
+#'   SHA-256 thumbprint of the client certificate that must accompany later
+#'   requests. For DPoP-bound tokens, this may contain `jkt` with the RFC 7638
+#'   thumbprint of the public JWK bound to the token. When `cnf` is learned by
+#'   locally parsing a raw JWT access token, shinyOAuth is observing the token
+#'   payload and is not independently verifying the access-token signature;
+#'   introspection or another provider proof surface is stronger assurance.
+#' @param granted_scopes Normalized scope tokens currently associated with the
+#'   access token. When a provider omits `scope` in a token response,
+#'   shinyOAuth carries forward the best-known scope set instead of dropping it.
+#' @param granted_scopes_verified Logical flag indicating whether the current
+#'   token response explicitly proved `granted_scopes`. `FALSE` means the scope
+#'   set was assumed or carried forward because the provider omitted `scope`.
+#'   For stronger proof, configure `introspect_elements = "scope"`.
 #' @param id_token_validated Logical flag indicating whether the ID token was
 #'  cryptographically validated (signature verified and standard claims checked)
 #'  during the OAuth flow. Defaults to `FALSE`.
@@ -36,6 +62,11 @@ OAuthToken <- S7::new_class(
   properties = list(
     access_token = S7::class_character,
 
+    token_type = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+
     refresh_token = S7::new_property(
       S7::class_character,
       default = NA_character_
@@ -46,6 +77,21 @@ OAuthToken <- S7::new_class(
     expires_at = S7::new_property(S7::class_numeric, default = Inf),
 
     userinfo = S7::class_list,
+
+    cnf = S7::new_property(
+      S7::class_list,
+      default = list()
+    ),
+
+    granted_scopes = S7::new_property(
+      S7::class_character,
+      default = character(0)
+    ),
+
+    granted_scopes_verified = S7::new_property(
+      S7::class_logical,
+      default = FALSE
+    ),
 
     id_token_validated = S7::new_property(
       S7::class_logical,
@@ -67,5 +113,116 @@ OAuthToken <- S7::new_class(
         )
       }
     )
-  )
+  ),
+  validator = function(self) oauth_token_validate(self)
 )
+
+# 2 Internal validation helpers ------------------------------------------------
+
+## 2.1 Bundle validation -------------------------------------------------------
+
+#' Internal: validate one OAuthToken bundle
+#'
+#' Used by the [OAuthToken] S7 class before token fields, expiry times, and ID
+#' token claims are consumed elsewhere in the package.
+#'
+#' @param self [OAuthToken] instance under validation.
+#' @return `NULL` for a valid token bundle, otherwise a length-1 validation
+#'   error string.
+#' @keywords internal
+#' @noRd
+oauth_token_validate <- function(self) {
+  if (!(is.character(self@access_token) && length(self@access_token) == 1L)) {
+    return("OAuthToken: access_token must be a scalar character value")
+  }
+  if (is.na(self@access_token) || !nzchar(trimws(self@access_token))) {
+    return("OAuthToken: access_token must be a non-empty string")
+  }
+
+  for (field in c("token_type", "refresh_token", "id_token")) {
+    value <- S7::prop(self, field)
+    if (!is.character(value) || length(value) != 1L) {
+      return(sprintf(
+        "OAuthToken: %s must be a scalar character value",
+        field
+      ))
+    }
+
+    if (!is.na(value) && !nzchar(trimws(value))) {
+      return(sprintf(
+        "OAuthToken: %s must be NA or a non-empty string",
+        field
+      ))
+    }
+  }
+
+  expires_at <- self@expires_at
+  if (!is.numeric(expires_at) || length(expires_at) != 1L) {
+    return(
+      "OAuthToken: expires_at must be a single numeric timestamp, NA, or Inf"
+    )
+  }
+  if (is.nan(expires_at) || identical(expires_at, -Inf)) {
+    return("OAuthToken: expires_at must be a finite timestamp, NA, or Inf")
+  }
+
+  thumbprint <- self@cnf[["x5t#S256"]] %||% NULL
+  if (!is.null(thumbprint) && !is_valid_string(thumbprint)) {
+    return(
+      "OAuthToken: cnf$x5t#S256 must be a non-empty string when supplied"
+    )
+  }
+
+  dpop_jkt <- self@cnf[["jkt"]] %||% NULL
+  if (!is.null(dpop_jkt) && !is_valid_string(dpop_jkt)) {
+    return(
+      "OAuthToken: cnf$jkt must be a non-empty string when supplied"
+    )
+  }
+
+  granted_scopes <- self@granted_scopes
+  if (!is.character(granted_scopes)) {
+    return("OAuthToken: granted_scopes must be a character vector")
+  }
+
+  granted_scope_error <- tryCatch(
+    {
+      validate_scopes(granted_scopes)
+      NULL
+    },
+    error = function(e) conditionMessage(e)
+  )
+  if (!is.null(granted_scope_error)) {
+    return(paste0(
+      "OAuthToken: invalid granted_scopes: ",
+      granted_scope_error
+    ))
+  }
+
+  if (
+    !(is.logical(self@granted_scopes_verified) &&
+      length(self@granted_scopes_verified) == 1L &&
+      !is.na(self@granted_scopes_verified))
+  ) {
+    return(
+      "OAuthToken: granted_scopes_verified must be a single non-NA logical"
+    )
+  }
+
+  if (isTRUE(self@id_token_validated)) {
+    if (!(is_valid_string(self@id_token) && nzchar(trimws(self@id_token)))) {
+      return(
+        "OAuthToken: id_token_validated = TRUE requires a non-empty id_token"
+      )
+    }
+
+    parsed_claims <- try(parse_jwt_payload(self@id_token), silent = TRUE)
+    if (inherits(parsed_claims, "try-error") || !is.list(parsed_claims)) {
+      return(
+        "OAuthToken: id_token_validated = TRUE requires id_token to be a parseable JWT"
+      )
+    }
+  }
+
+  NULL
+}

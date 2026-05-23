@@ -37,7 +37,7 @@ oauth_provider_oidc(
 for this provider. Defaults to TRUE}
 
 \item{jwks_host_issuer_match}{When TRUE (default), enforce that the JWKS host
-discovered from the provider matches the issuer host (or a subdomain). For
+discovered from the provider matches the issuer host exactly. For
 providers that serve JWKS from a different host (e.g., Google), set
 \code{jwks_host_allow_only} to the exact hostname instead of disabling this.
 Disabling (\code{FALSE}) is not recommended unless you also pin JWKS via
@@ -52,7 +52,9 @@ access tokens issued by this provider. Defaults to 'Bearer'}
 \link{OAuthProvider} object
 }
 \description{
-Preconfigured \link{OAuthProvider} for OpenID Connect (OIDC) compliant providers.
+Helper for providers that follow a standard OpenID Connect endpoint layout.
+It builds the usual OIDC endpoints from one base URL and then calls
+\code{\link[=oauth_provider]{oauth_provider()}} with OIDC-friendly defaults.
 }
 \examples{
 # Configure generic OAuth 2.0 provider (no OIDC)
@@ -73,14 +75,14 @@ generic_oidc_provider <- oauth_provider_oidc(
 
 # Configure a OIDC provider via OIDC discovery
 # (requires network access)
-\donttest{
-# Using Auth0 sample issuer as an example
-oidc_discovery_provider <- oauth_provider_oidc_discover(
-  issuer = "https://samples.auth0.com"
-)
+if (interactive()) {
+  # Using Auth0 sample issuer as an example
+  oidc_discovery_provider <- oauth_provider_oidc_discover(
+    issuer = "https://samples.auth0.com"
+  )
 }
 
-# GitHub preconfigured provider 
+# GitHub preconfigured provider
 github_provider <- oauth_provider_github()
 
 # Google preconfigured provider
@@ -89,30 +91,30 @@ google_provider <- oauth_provider_google()
 # Microsoft preconfigured provider
 # See `?oauth_provider_microsoft` for example using a custom tenant ID
 
-# Spotify preconfigured provider 
+# Spotify preconfigured provider
 spotify_provider <- oauth_provider_spotify()
 
 # Slack via OIDC discovery
 # (requires network access)
-\donttest{
-slack_provider <- oauth_provider_slack()
+if (interactive()) {
+  slack_provider <- oauth_provider_slack()
 }
-  
+
 # Keycloak
 # (requires configured Keycloak realm; example below is therefore not run)
-\dontrun{
-oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
+if (interactive()) {
+  oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
 }
 
 # Auth0
 # (requires configured Auth0 domain; example below is therefore not run)
-\dontrun{
-oauth_provider_auth0(domain = "your-tenant.auth0.com")
+if (interactive()) {
+  oauth_provider_auth0(domain = "your-tenant.auth0.com")
 }
 
 # Okta
 # (requires configured Okta domain; example below is therefore not run)
-\dontrun{
-oauth_provider_okta(domain = "dev-123456.okta.com")
+if (interactive()) {
+  oauth_provider_okta(domain = "dev-123456.okta.com")
 }
 }

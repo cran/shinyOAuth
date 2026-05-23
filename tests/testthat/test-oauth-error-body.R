@@ -2,11 +2,16 @@
 
 test_that("err_http extracts RFC 6749 §5.2 error fields from JSON response", {
   resp <- httr2::response(
-    url = "https://example.com/token",
+    url = "https://user:pass@example.com/token?code=secret&state=abc#frag",
     status = 400,
     headers = list("content-type" = "application/json"),
     body = charToRaw(
-      '{"error":"invalid_grant","error_description":"The authorization code has expired","error_uri":"https://example.com/docs/errors#invalid_grant"}'
+      paste0(
+        '{"error":"invalid_grant","error_description":',
+        '"The authorization code has expired",',
+        '"error_uri":',
+        '"https://example.com/docs/errors?request_uri=opaque#invalid_grant"}'
+      )
     )
   )
 
@@ -25,9 +30,10 @@ test_that("err_http extracts RFC 6749 §5.2 error fields from JSON response", {
     cond$oauth_error_description,
     "The authorization code has expired"
   )
+  expect_identical(cond$url, "https://example.com/token")
   expect_identical(
     cond$oauth_error_uri,
-    "https://example.com/docs/errors#invalid_grant"
+    "https://example.com/docs/errors"
   )
   # Message should contain the structured error
 
@@ -39,9 +45,18 @@ test_that("err_http extracts RFC 6749 §5.2 error fields from JSON response", {
   )
   expect_match(
     conditionMessage(cond),
-    "https://example.com/docs/errors#invalid_grant",
+    "https://example.com/docs/errors",
     fixed = TRUE
   )
+  expect_match(
+    conditionMessage(cond),
+    "URL: https://example.com/token",
+    fixed = TRUE
+  )
+  expect_no_match(conditionMessage(cond), "user:pass", fixed = TRUE)
+  expect_no_match(conditionMessage(cond), "code=secret", fixed = TRUE)
+  expect_no_match(conditionMessage(cond), "state=abc", fixed = TRUE)
+  expect_no_match(conditionMessage(cond), "request_uri=opaque", fixed = TRUE)
 })
 
 test_that("err_http extracts error + error_description without error_uri", {
@@ -131,7 +146,42 @@ test_that("err_http does not extract fields when JSON has no error field", {
 test_that("err_http propagates RFC 6749 §5.2 fields to trace event", {
   events <- list()
   withr::local_options(list(
-    shinyOAuth.trace_hook = function(ev) {
+    shinyOAuth.audit_hook = function(ev) {
+      events[[length(events) + 1]] <<- ev
+    }
+  ))
+
+  resp <- httr2::response(
+    url = "https://user:pass@example.com/token?code=secret&state=abc#frag",
+    status = 400,
+    headers = list("content-type" = "application/json"),
+    body = charToRaw(
+      '{"error":"invalid_grant","error_description":"Code expired"}'
+    )
+  )
+
+  tryCatch(
+    shinyOAuth:::err_http(
+      "Token exchange failed",
+      resp,
+      context = list(phase = "exchange_code")
+    ),
+    error = function(e) NULL
+  )
+
+  expect_true(length(events) >= 1)
+  ev <- events[[1]]
+  expect_identical(ev$oauth_error, "invalid_grant")
+  expect_identical(ev$url, "https://example.com/token")
+  expect_null(ev$oauth_error_description)
+  expect_null(ev$oauth_error_uri)
+})
+
+test_that("err_http only exposes oauth_error_description in events when enabled", {
+  events <- list()
+  withr::local_options(list(
+    shinyOAuth.expose_error_body = TRUE,
+    shinyOAuth.audit_hook = function(ev) {
       events[[length(events) + 1]] <<- ev
     }
   ))
@@ -165,7 +215,7 @@ test_that("swap_code_for_token_set surfaces structured error on 400", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 400,
@@ -191,11 +241,41 @@ test_that("swap_code_for_token_set surfaces structured error on 400", {
   )
 })
 
+test_that("swap_code_for_token_set rejects oversized error bodies", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  withr::local_options(list(shinyOAuth.max_body_bytes = 1024))
+
+  testthat::local_mocked_bindings(
+    req_with_dpop_retry = function(req, client, idempotent = FALSE) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 400,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(paste0(
+          '{"error":"invalid_grant","error_description":"',
+          paste(rep("x", 3000), collapse = ""),
+          '"}'
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    shinyOAuth:::swap_code_for_token_set(cli, "bad_code", "verifier123"),
+    class = "shinyOAuth_parse_error"
+  )
+  expect_error(
+    shinyOAuth:::swap_code_for_token_set(cli, "bad_code", "verifier123"),
+    regexp = "too large"
+  )
+})
+
 test_that("refresh_token surfaces structured error on 400", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 400,

@@ -1,6 +1,29 @@
-# Authenticated encrypt/decrypt of the state payload ---------------------------
+# This file contains the encryption helpers for the sealed OAuth state
+# payload
+# The state value is the temporary login data sent out during redirect and
+# checked again on callback
+# Used for encrypting that state into a compact token and decrypting it safely
+# during callback handling
 
-# Normalize/derive a 32-byte key with basic checks
+# 1 State encryption helpers ---------------------------------------------------
+
+## 1.1 Encrypt and decrypt sealed state ----------------------------------------
+
+# Functions in this subsection encrypt state payloads before login redirects and
+# decrypt them again during callback handling.
+
+#' Internal: normalize or derive a 32-byte state encryption key
+#'
+#' Accepts either a sufficiently long character passphrase or a raw key.
+#' Character inputs are UTF-8 normalized and derived with SHA-256; raw inputs
+#' of exactly 32 bytes are used as-is, and longer raw inputs are hashed to
+#' avoid silent truncation. Used by the state encrypt/decrypt helpers below.
+#'
+#' @param key Character passphrase or raw key material.
+#' @param min_chars Minimum allowed passphrase length for character keys.
+#' @return Raw 32-byte encryption key.
+#' @keywords internal
+#' @noRd
 normalize_key32 <- function(key, min_chars = 32L) {
   if (is.null(key)) {
     err_config("state key is NULL", context = list(phase = "key_derivation"))
@@ -61,6 +84,99 @@ normalize_key32 <- function(key, min_chars = 32L) {
   key
 }
 
+#' Internal: read a positive numeric value from option or environment
+#'
+#' Used by `state_decrypt_gcm()` for defensive size limits where package
+#' options should take precedence over environment-variable fallbacks.
+#'
+#' @param opt_name Option name to read first.
+#' @param env_name Fallback environment variable name.
+#' @param default Positive numeric default.
+#' @return Positive numeric limit value.
+#' @keywords internal
+#' @noRd
+get_option_env_positive_number <- function(opt_name, env_name, default) {
+  val <- getOption(opt_name, NULL)
+  if (is.null(val)) {
+    env <- Sys.getenv(env_name, unset = NA_character_)
+    if (!is.na(env) && nzchar(env)) {
+      suppressWarnings(val <- as.numeric(env))
+    }
+  }
+  if (
+    !is.numeric(val) ||
+      length(val) != 1L ||
+      is.na(val) ||
+      !is.finite(val) ||
+      val <= 0
+  ) {
+    return(as.numeric(default))
+  }
+  as.numeric(val)
+}
+
+#' Internal: add a tiny randomized delay before state decryption failure
+#'
+#' Used by `state_decrypt_fail()` to reduce timing differences between state
+#' parsing and decryption failure paths.
+#'
+#' @return No return value; may sleep briefly before returning invisibly.
+#' @keywords internal
+#' @noRd
+state_decrypt_delay_before_fail <- function() {
+  bounds <- getOption("shinyOAuth.state_fail_delay_ms", c(10, 30))
+  ms <- 0
+  if (is.numeric(bounds) && length(bounds) >= 1) {
+    b1 <- suppressWarnings(as.numeric(bounds[1]))
+    if (!is.finite(b1) || is.na(b1) || b1 < 0) {
+      b1 <- 0
+    }
+    if (length(bounds) >= 2) {
+      b2 <- suppressWarnings(as.numeric(bounds[2]))
+      if (!is.finite(b2) || is.na(b2) || b2 < 0) {
+        b2 <- b1
+      }
+      lo <- min(b1, b2)
+      hi <- max(b1, b2)
+      ms <- stats::runif(1, min = lo, max = hi)
+    } else {
+      ms <- b1
+    }
+  }
+  if (is.finite(ms) && !is.na(ms) && ms > 0) {
+    Sys.sleep(ms / 1000)
+  }
+  invisible(NULL)
+}
+
+#' Internal: raise a normalized invalid-state error during state decryption
+#'
+#' Used by `state_decrypt_gcm()` so all invalid-state failures pass through the
+#' same delay and `err_invalid_state()` path.
+#'
+#' @param msg Invalid-state message.
+#' @param context Structured error context.
+#' @return No return value; always raises `err_invalid_state()`.
+#' @keywords internal
+#' @noRd
+state_decrypt_fail <- function(msg, context = list()) {
+  state_decrypt_delay_before_fail()
+  err_invalid_state(msg, context = context)
+}
+
+#' Internal: encrypt a state payload into the compact GCM envelope
+#'
+#' Serializes the payload as JSON, encrypts it with AES-GCM, and returns the
+#' package's base64url-wrapped state token format containing version, IV, tag,
+#' and ciphertext. Used when login state is created before redirect.
+#'
+#' @param payload State payload to encrypt.
+#' @param key Character passphrase or raw key material.
+#' @param version Envelope version number.
+#' @param min_key_chars Minimum passphrase length for character keys.
+#' @return Compact encrypted state token string.
+#' @keywords internal
+#' @noRd
 state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
   if (is.null(payload)) {
     err_input(c("x" = "payload is NULL"), context = list(phase = "encrypt"))
@@ -123,65 +239,63 @@ state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
 
   token_obj <- list(
     v = as.integer(version),
-    iv = b64url_encode(iv),
-    tg = b64url_encode(tag),
-    ct = b64url_encode(ct)
+    iv = base64url_encode(iv),
+    tg = base64url_encode(tag),
+    ct = base64url_encode(ct)
   )
-  b64url_encode(charToRaw(jsonlite::toJSON(token_obj, auto_unbox = TRUE)))
+  base64url_encode(charToRaw(jsonlite::toJSON(token_obj, auto_unbox = TRUE)))
 }
 
+#' Internal: decrypt and validate the compact state GCM envelope
+#'
+#' Decodes the outer base64url wrapper, validates the version and envelope
+#' members, decrypts the ciphertext with AES-GCM, and returns the parsed JSON
+#' payload. The helper enforces size caps and emits audit events for parse
+#' failures without disclosing plaintext or key material. Used when callback
+#' handling resumes after the provider redirects back.
+#'
+#' @param token Compact encrypted state token.
+#' @param key Character passphrase or raw key material.
+#' @param expected_version Expected envelope version.
+#' @param min_key_chars Minimum passphrase length for character keys.
+#' @return Parsed decrypted state payload list.
+#' @keywords internal
+#' @noRd
 state_decrypt_gcm <- function(
   token,
   key,
   expected_version = 1L,
   min_key_chars = 32L
 ) {
-  # Configurable defensive limits (options or env var fallback)
-  # Defaults chosen to comfortably exceed real-world usage yet block DoS-size inputs.
-  get_limit <- function(opt_name, env_name, default) {
-    # Priority: option > env var > default
-    val <- getOption(opt_name, NULL)
-    if (is.null(val)) {
-      env <- Sys.getenv(env_name, unset = NA_character_)
-      if (!is.na(env) && nzchar(env)) {
-        suppressWarnings(val <- as.numeric(env))
-      }
-    }
-    if (
-      !is.numeric(val) ||
-        length(val) != 1L ||
-        is.na(val) ||
-        !is.finite(val) ||
-        val <= 0
-    ) {
-      return(as.numeric(default))
-    }
-    as.numeric(val)
-  }
-
   # Hard caps
-  max_token_chars <- get_limit(
+  max_token_chars <- get_option_env_positive_number(
     "shinyOAuth.state_max_token_chars",
     "shinyOAuth_STATE_MAX_TOKEN_CHARS",
     8192
   )
-  max_wrapper_bytes <- get_limit(
+  max_wrapper_bytes <- get_option_env_positive_number(
     "shinyOAuth.state_max_wrapper_bytes",
     "shinyOAuth_STATE_MAX_WRAPPER_BYTES",
     8192
   )
-  max_ct_b64_chars <- get_limit(
+  max_ct_b64_chars <- get_option_env_positive_number(
     "shinyOAuth.state_max_ct_b64_chars",
     "shinyOAuth_STATE_MAX_CT_B64_CHARS",
     8192
   )
-  max_ct_bytes <- get_limit(
+  max_ct_bytes <- get_option_env_positive_number(
     "shinyOAuth.state_max_ct_bytes",
     "shinyOAuth_STATE_MAX_CT_BYTES",
     8192
   )
 
-  # Local helper: emit a non-sensitive audit event for parse failures
+  # Internal helper: emit an audit event for a parse or decrypt failure.
+  # Used only by `state_decrypt_gcm()` so failure reasons are logged without
+  # leaking plaintext or key material.
+  # @param reason_code Stable failure reason.
+  # @param details Additional redacted context fields.
+  # @return No return value; emits a best-effort audit event and returns
+  #   invisibly.
   audit_fail <- function(reason_code, details = list()) {
     ctx <- c(
       list(
@@ -196,43 +310,7 @@ state_decrypt_gcm <- function(
     invisible(NULL)
   }
 
-  # Local helper: introduce tiny randomized delay before failing
-  # Goal: reduce timing side-channels between different failure modes
-  # Tuning: options(shinyOAuth.state_fail_delay_ms = c(min_ms, max_ms))
-  #  - default jitter ~10-30ms; set to 0 or NULL to disable if needed (e.g., tests)
-  delay_before_fail <- function() {
-    bounds <- getOption("shinyOAuth.state_fail_delay_ms", c(10, 30))
-    # Sanitize option input; accept numeric scalar or length-2 vector (ms)
-    ms <- 0
-    if (is.numeric(bounds) && length(bounds) >= 1) {
-      b1 <- suppressWarnings(as.numeric(bounds[1]))
-      if (!is.finite(b1) || is.na(b1) || b1 < 0) {
-        b1 <- 0
-      }
-      if (length(bounds) >= 2) {
-        b2 <- suppressWarnings(as.numeric(bounds[2]))
-        if (!is.finite(b2) || is.na(b2) || b2 < 0) {
-          b2 <- b1
-        }
-        lo <- min(b1, b2)
-        hi <- max(b1, b2)
-        ms <- stats::runif(1, min = lo, max = hi)
-      } else {
-        ms <- b1
-      }
-    }
-    if (is.finite(ms) && !is.na(ms) && ms > 0) {
-      # Convert ms -> seconds
-      Sys.sleep(ms / 1000)
-    }
-    invisible(NULL)
-  }
-
-  # Wrapper to normalize all state failures from this function
-  state_fail <- function(msg, context = list()) {
-    delay_before_fail()
-    err_invalid_state(msg, context = context)
-  }
+  state_fail <- state_decrypt_fail
 
   if (!is_valid_string(token)) {
     audit_fail("token_not_string")
@@ -255,7 +333,7 @@ state_decrypt_gcm <- function(
   }
   key <- normalize_key32(key, min_chars = min_key_chars)
 
-  decoded <- try(b64url_decode(token), silent = TRUE)
+  decoded <- try(base64url_decode_raw(token), silent = TRUE)
   if (inherits(decoded, "try-error")) {
     audit_fail("token_b64_invalid")
     state_fail(
@@ -326,7 +404,7 @@ state_decrypt_gcm <- function(
     audit_fail("iv_missing")
     state_fail("state token missing IV", context = list(phase = "decrypt"))
   }
-  iv <- try(b64url_decode(obj$iv), silent = TRUE)
+  iv <- try(base64url_decode_raw(obj$iv), silent = TRUE)
   if (inherits(iv, "try-error")) {
     audit_fail("iv_b64_invalid")
     state_fail(
@@ -345,7 +423,7 @@ state_decrypt_gcm <- function(
     audit_fail("tag_missing")
     state_fail("state token missing tag", context = list(phase = "decrypt"))
   }
-  tg <- try(b64url_decode(obj$tg), silent = TRUE)
+  tg <- try(base64url_decode_raw(obj$tg), silent = TRUE)
   if (inherits(tg, "try-error")) {
     audit_fail("tag_b64_invalid")
     state_fail(
@@ -383,7 +461,7 @@ state_decrypt_gcm <- function(
       context = list(phase = "decrypt", where = "ct_b64")
     )
   }
-  ct <- try(b64url_decode(obj$ct), silent = TRUE)
+  ct <- try(base64url_decode_raw(obj$ct), silent = TRUE)
   if (inherits(ct, "try-error")) {
     audit_fail("ciphertext_b64_invalid")
     state_fail(
@@ -490,8 +568,7 @@ state_decrypt_gcm <- function(
   parsed
 }
 
-
-# Helpers for cache-safe keys -------------------------------------------------
+# 2 State cache keys -----------------------------------------------------------
 
 #' Derive a cache key for an OAuth state value
 #'
@@ -500,6 +577,8 @@ state_decrypt_gcm <- function(
 #' and store/retrieve associated data under a deterministic lowercase-hex
 #' SHA-256 of that state.
 #'
+#' @param state OAuth state string.
+#' @return Lowercase hex cache key.
 #' @keywords internal
 #' @noRd
 state_cache_key <- function(state) {
@@ -522,63 +601,4 @@ state_cache_key <- function(state) {
     )
   }
   raw_to_hex_lower(openssl::sha256(charToRaw(state)))
-}
-
-#' Convert raw vector to lowercase hex string (cachem-safe)
-#'
-#' @keywords internal
-#' @noRd
-raw_to_hex_lower <- function(r) {
-  if (!is.raw(r)) {
-    err_input(
-      "raw_to_hex_lower requires a raw vector",
-      context = list(phase = "cache_key")
-    )
-  }
-  paste0(as.character(r), collapse = "")
-}
-
-# Timing-safe equality --------------------------------------------------------
-
-#' Constant-time comparison for secrets
-#'
-#' Compare two strings in a way that does not leak information via timing
-#' differences from early exits or character-by-character mismatch. Inputs are
-#' coerced to character(1) with NA/NULL treated as a mismatch.
-#'
-#' To reduce length-dependent timing differences, both inputs are first hashed
-#' with SHA-256 to produce fixed 32-byte digests. The function then performs a
-#' constant-time XOR-accumulate comparison over those digests.
-#'
-#' This helper is intended for comparing short secret values like browser
-#' tokens, nonces, or state-bound identifiers. It operates on raw byte values
-#' and does not perform normalization; callers should ensure the same encoding
-#' is used on both sides (we expect native UTF-8/ASCII for our use cases).
-#'
-#' @keywords internal
-#' @noRd
-constant_time_compare <- function(a, b) {
-  # Normalize to single character scalars; everything else mismatches.
-  is_valid <- function(x) is.character(x) && length(x) == 1L && !is.na(x)
-  if (!is_valid(a) || !is_valid(b)) {
-    # Treat invalid inputs as non-equal but still run blinded loop to avoid
-    # observable timing differences between invalid and valid shapes.
-    a <- as.character(NA)
-    b <- as.character("")
-  }
-
-  # Hash both sides to fixed length (32 bytes) to blind original length.
-  # Using openssl keeps consistency with the rest of the package.
-  ar <- openssl::sha256(charToRaw(as.character(a)))
-  br <- openssl::sha256(charToRaw(as.character(b)))
-
-  # Constant-time compare over fixed 32-byte digests.
-  acc <- as.integer(0L)
-  for (i in seq_len(length(ar))) {
-    ai <- as.integer(ar[[i]])
-    bi <- as.integer(br[[i]])
-    acc <- bitwOr(acc, bitwXor(ai, bi))
-  }
-  # Equal iff accumulator is zero
-  isTRUE(identical(acc, 0L))
 }

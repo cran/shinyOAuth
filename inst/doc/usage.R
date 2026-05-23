@@ -129,8 +129,10 @@
 # 
 #     # Example additional API request using the access token
 #     # (e.g., fetch user repositories from GitHub)
-#     req <- client_bearer_req(auth$token, "https://api.github.com/user/repos")
-#     resp <- httr2::req_perform(req)
+#     resp <- perform_resource_req(
+#       auth$token,
+#       "https://api.github.com/user/repos"
+#     )
 # 
 #     if (httr2::resp_is_error(resp)) {
 #       repositories(NULL)
@@ -167,6 +169,56 @@
 # 
 # runApp(
 #   shinyApp(ui, server),
+#   port = 8100,
+#   launch.browser = FALSE
+# )
+# 
+# # Open the app in your regular browser at http://127.0.0.1:8100
+# # (viewers in RStudio/Positron/etc. cannot perform necessary redirects)
+
+## ----eval = FALSE-------------------------------------------------------------
+# library(shiny)
+# library(shinyOAuth)
+# 
+# provider <- oauth_provider_keycloak(
+#   base_url = "http://localhost:8080",
+#   realm = "shinyoauth"
+# )
+# 
+# client <- oauth_client(
+#   provider = provider,
+#   client_id = "shiny-public",
+#   client_secret = "",
+#   # `/callback` is only an example sub-route. The app root also works if the
+#   # provider redirect URI matches the path handled by `oauth_form_post_ui()`
+#   redirect_uri = "http://127.0.0.1:8100/callback",
+#   scopes = c("openid", "profile", "email"),
+#   response_mode = "form_post"
+# )
+# 
+# base_ui <- fluidPage(
+#   uiOutput("login")
+# )
+# 
+# ui <- oauth_form_post_ui(base_ui, id = "auth", client = client)
+# 
+# server <- function(input, output, session) {
+#   auth <- oauth_module_server("auth", client, auto_redirect = TRUE)
+# 
+#   output$login <- renderUI({
+#     if (auth$authenticated) {
+#       tagList(
+#         tags$p("You are logged in!"),
+#         tags$pre(paste(capture.output(str(auth$token@userinfo)), collapse = "\n"))
+#       )
+#     } else {
+#       tags$p("You are not logged in.")
+#     }
+#   })
+# }
+# 
+# runApp(
+#   shinyApp(ui, server, uiPattern = ".*"),
 #   port = 8100,
 #   launch.browser = FALSE
 # )

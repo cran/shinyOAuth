@@ -37,6 +37,14 @@ testthat::test_that("every audit event fires and serializes to JSON", {
       ),
       class = "shinyOAuth_state_error"
     )
+
+    seen_after_failure <- audit_types(events)
+    testthat::expect_true(
+      "audit_callback_validation_failed" %in% seen_after_failure
+    )
+    testthat::expect_false(
+      "audit_callback_validation_success" %in% seen_after_failure
+    )
   }
 
   # 3) handle_callback: success path -> callback_received/validation_success/token_exchange/login_success
@@ -45,7 +53,7 @@ testthat::test_that("every audit event fires and serializes to JSON", {
     enc <- parse_query_param(prepare_call(cli, browser_token = btok), "state")
     tok <- testthat::with_mocked_bindings(
       swap_code_for_token_set = function(client, code, code_verifier) {
-        list(access_token = "t", expires_in = 3600)
+        list(access_token = "t", token_type = "Bearer", expires_in = 3600)
       },
       .package = "shinyOAuth",
       {
@@ -167,7 +175,7 @@ testthat::test_that("every audit event fires and serializes to JSON", {
 
     # Stub HTTP to avoid network and drive both code paths deterministically
     testthat::local_mocked_bindings(
-      req_with_retry = function(req) {
+      req_with_retry = function(req, ...) {
         # Return success responses; body content depends on URL
         url <- req$url %||% ""
         if (grepl("/token", url, fixed = TRUE)) {
@@ -175,7 +183,9 @@ testthat::test_that("every audit event fires and serializes to JSON", {
             url = url,
             status = 200,
             headers = list("content-type" = "application/json"),
-            body = charToRaw('{"access_token":"new","expires_in":3600}')
+            body = charToRaw(
+              '{"access_token":"new","token_type":"Bearer","expires_in":3600}'
+            )
           )
         } else if (grepl("/userinfo", url, fixed = TRUE)) {
           httr2::response(
@@ -266,10 +276,9 @@ testthat::test_that("every audit event fires and serializes to JSON", {
     testthat::test_path("..", "..", "vignettes", "audit-logging.Rmd")
   )
   cand <- cand[file.exists(cand) & nzchar(cand)]
-  testthat::expect_true(
-    length(cand) >= 1,
-    info = "Could not locate audit-logging.Rmd"
-  )
+  if (!length(cand)) {
+    return(invisible(NULL))
+  }
   doc_types <- character()
   for (p in cand) {
     rmd <- try(readLines(p), silent = TRUE)

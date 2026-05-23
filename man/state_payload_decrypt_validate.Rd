@@ -4,7 +4,12 @@
 \alias{state_payload_decrypt_validate}
 \title{Decrypt and validate OAuth state payload}
 \usage{
-state_payload_decrypt_validate(client, encrypted_payload, shiny_session = NULL)
+state_payload_decrypt_validate(
+  client,
+  encrypted_payload,
+  shiny_session = NULL,
+  audit_success = FALSE
+)
 }
 \arguments{
 \item{client}{\link{OAuthClient} instance}
@@ -15,14 +20,21 @@ state_payload_decrypt_validate(client, encrypted_payload, shiny_session = NULL)
 \item{shiny_session}{Optional pre-captured Shiny session context (from
 \code{capture_shiny_session_context()}) to include in audit events. Used when
 calling from async workers that lack access to the reactive domain.}
+
+\item{audit_success}{Whether successful payload validation should emit the
+standard callback validation audit event. Defaults to \code{FALSE} because
+callback handlers normally still need to validate the browser-bound token
+and consume the single-use state entry before success is final. Failures
+are still audited.}
 }
 \value{
 A named list payload (state, client_id, redirect_uri, scopes,
-provider, issued_at) on success; otherwise throws an error via
-\code{err_invalid_state()}.
+provider, client_policy, issued_at) on success; otherwise throws an error
+via \code{err_invalid_state()}.
 }
 \description{
 Internal utility that decrypts the encrypted \code{state} payload using the
-client's \code{state_key}, then validates freshness and client binding.
+client's \code{state_key}, then validates freshness and client binding. Used by
+callback handling before the code exchange continues.
 }
 \keyword{internal}

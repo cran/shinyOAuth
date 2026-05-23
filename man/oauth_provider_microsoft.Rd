@@ -17,32 +17,47 @@ oauth_provider_microsoft(
 or directory GUID). Defaults to "common"}
 
 \item{id_token_validation}{Optional override (logical). If \code{NULL} (default),
-it's enabled automatically when \code{tenant} looks like a GUID, otherwise
-disabled}
+it's enabled automatically when \code{tenant} looks like a GUID or one of the
+Microsoft alias tenants (\code{common}, \code{organizations}, \code{consumers}).
+\code{common} and \code{organizations} use Microsoft's tenant-independent issuer and
+signing-key validation rules; \code{consumers} uses the stable consumer tenant
+issuer}
 }
 \value{
 \link{OAuthProvider} object configured for Microsoft identity platform
 }
 \description{
-Pre-configured \link{OAuthProvider} for Microsoft Entra ID (formerly Azure AD)
-using the v2.0 endpoints. Accepts a tenant identifier and configures the
-authorization, token, and userinfo endpoints directly (no discovery).
+Ready-to-use \link{OAuthProvider} settings for Microsoft Entra ID (formerly Azure
+AD) using the v2.0 endpoints. Accepts a tenant identifier and configures the
+authorization, token, and userinfo endpoints directly.
 }
 \details{
+Most users only need to choose the tenant and decide whether to keep ID
+token validation enabled. The remaining details below explain how the helper
+behaves for Microsoft's different tenant styles.
+
 The \code{tenant} can be one of the special values "common", "organizations",
 or "consumers", or a specific directory (tenant) ID GUID
 (e.g., "00000000-0000-0000-0000-000000000000").
 
-When \code{tenant} is a specific GUID, the provider will enable strict ID token
-validation (issuer match). When using the multi-tenant aliases ("common",
-"organizations", "consumers"), the exact issuer depends on the account that
-signs in and therefore ID token validation is disabled by default to avoid
-false negatives. You can override this via \code{id_token_validation} if you know
-the environment guarantees a fixed issuer.
+When \code{tenant} is a specific GUID, the provider enables strict ID token
+validation with the tenant-specific issuer.
 
-Note: ID token validation requires a stable issuer. For multi-tenant aliases,
-this provider sets \code{issuer = NA} and therefore also disables \code{use_nonce} by
-default (nonce validation relies on validating the ID token).
+For \code{tenant = "common"} or \code{tenant = "organizations"}, the helper enables
+Microsoft Entra's tenant-independent validation mode by default: ID tokens
+are checked against Microsoft's \code{{tenantid}} issuer template and the signing
+key's own \code{issuer} scope, as documented by Microsoft for multi-tenant
+metadata. Runtime JWKS discovery for these aliases also uses host-only
+discovery issuer matching because Microsoft's tenant-independent metadata
+publishes a templated issuer rather than echoing the alias URL exactly.
+
+For \code{tenant = "consumers"}, the helper resolves the stable consumer tenant
+issuer (\verb{9188040d-6c67-4c5b-b112-36a304b66dad}) and performs normal exact-
+issuer validation.
+
+Set \code{id_token_validation = FALSE} to opt out of ID token and nonce
+validation for these aliases, which falls back to OAuth 2.0 plus userinfo
+identity only.
 
 Microsoft issues RS256 ID tokens; \code{allowed_algs} is restricted accordingly.
 The userinfo endpoint is provided by Microsoft Graph
@@ -51,7 +66,7 @@ The userinfo endpoint is provided by Microsoft Graph
 When configuring your \link{OAuthClient}, if you do not have the option to
 register an app or simply wish to test during development, you may be able
 to use the default Azure CLI public app, with \code{client_id}
-'9391afd1-7129-4938-9e4d-633c688f93c0' (uses \code{redirect_uri}
+'04b07795-8ddb-461a-bbee-02f9e1bf7b46' (uses \code{redirect_uri}
 'http://localhost:8100').
 }
 \examples{
@@ -125,14 +140,32 @@ if (
       auth$token@userinfo
     })
 
-    output$oauth_error <- renderUI({
-      if (!is.null(auth$error)) {
-        msg <- auth$error
-        if (!is.null(auth$error_description)) {
-          msg <- paste0(msg, ": ", auth$error_description)
+    observeEvent(
+      list(auth$error, auth$error_description),
+      {
+        if (interactive() && !is.null(auth$error_description)) {
+          rlang::inform(c(
+            "OAuth error details",
+            "i" = paste0("error: ", auth$error),
+            "i" = paste0("error_description: ", auth$error_description)
+          ))
         }
-        div(class = "alert alert-danger", role = "alert", msg)
+      },
+      ignoreInit = TRUE
+    )
+
+    output$oauth_error <- renderUI({
+      if (is.null(auth$error)) {
+        return(NULL)
       }
+
+      msg <- if (identical(auth$error, "access_denied")) {
+        "Sign-in was canceled or denied. Please try again."
+      } else {
+        "Authentication failed. Please try again."
+      }
+
+      div(class = "alert alert-danger", role = "alert", msg)
     })
   }
 

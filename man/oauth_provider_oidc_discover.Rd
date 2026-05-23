@@ -11,8 +11,7 @@ oauth_provider_oidc_discover(
   use_nonce = TRUE,
   id_token_validation = TRUE,
   token_auth_style = NULL,
-  allowed_algs = c("RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256",
-    "ES384", "ES512", "EdDSA"),
+  allowed_algs = c("RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA"),
   allowed_token_types = c("Bearer"),
   jwks_host_issuer_match = TRUE,
   issuer_match = c("url", "host", "none"),
@@ -36,36 +35,38 @@ includes "none", PKCE is required unless \code{use_pkce} is explicitly set to FA
 for this provider. Defaults to TRUE}
 
 \item{token_auth_style}{Authentication style for token requests: "header"
-(client_secret_basic) or "body" (client_secret_post). If NULL (default),
-it is inferred conservatively from discovery. When PKCE is enabled and the
-provider advertises support for public clients via \code{none}, a secretless
-flow is preferred (modeled as \code{"body"} without credentials). Otherwise,
+(client_secret_basic), "body" (client_secret_post), or "public"
+(public client; send \code{client_id} only). The alias \code{"none"} is also
+accepted for \code{"public"}. If NULL (default), it is inferred conservatively
+from discovery. When PKCE is enabled and the provider advertises support
+for public clients via \code{none}, discovery selects \code{"public"}. Otherwise,
 the helper prefers \code{"header"} (client_secret_basic) when available, then
 \code{"body"} (client_secret_post). JWT-based methods are not auto-selected
-unless explicitly requested}
+unless explicitly requested.}
 
 \item{allowed_algs}{Character vector of allowed ID token signing algorithms.
-Defaults to a broad set of common algorithms, including RSA (RS*), RSA-PSS
-(PS*), ECDSA (ES*), and EdDSA. If the discovery document advertises
+Defaults to a broad set of common algorithms, including RSA (RS*), ECDSA
+(ES*), and EdDSA. If the discovery document advertises
 supported algorithms, the intersection of advertised and caller-provided
 algorithms is used to avoid runtime mismatches. If there's no overlap,
-discovery fails with a configuration error (no fallback)}
+discovery fails with a configuration error (no fallback).}
 
 \item{allowed_token_types}{Character vector of allowed token types for
 access tokens issued by this provider. Defaults to 'Bearer'}
 
 \item{jwks_host_issuer_match}{When TRUE (default), enforce that the JWKS host
-discovered from the provider matches the issuer host (or a subdomain). For
+discovered from the provider matches the issuer host exactly. For
 providers that serve JWKS from a different host, set
 \code{jwks_host_allow_only} to the exact hostname instead of disabling this.
 Disabling (\code{FALSE}) is not recommended unless you also pin JWKS via
-\code{jwks_host_allow_only} or \code{jwks_pins}}
+\code{jwks_host_allow_only} or \code{jwks_pins}.}
 
 \item{issuer_match}{Character scalar controlling how strictly to validate the
 discovery document's \code{issuer} against the input \code{issuer}.
 \itemize{
-\item \code{"url"} (default): require the full issuer URL to match after
-trailing-slash normalization (recommended).
+\item \code{"url"} (default): require the issuer used for discovery to match
+exactly, after removing one trailing slash for discovery URL construction
+(recommended).
 \item \code{"host"}: compare only scheme + host (explicit opt-out; not recommended).
 \item \code{"none"}: do not validate issuer consistency.
 }
@@ -73,21 +74,25 @@ trailing-slash normalization (recommended).
 Prefer \code{"url"} and tighten hosts via \code{options(shinyOAuth.allowed_hosts)}
 when feasible.}
 
-\item{...}{Additional fields passed to \code{\link[=oauth_provider]{oauth_provider()}}}
+\item{...}{Additional fields passed to \code{\link[=oauth_provider]{oauth_provider()}} (for example,
+\code{pkce_method = "plain"} when a provider explicitly advertises only plain
+PKCE support and you intentionally want to allow that downgrade).}
 }
 \value{
 \link{OAuthProvider} object configured from discovery
 }
 \description{
-Uses the OpenID Connect discovery document at
-\verb{/.well-known/openid-configuration} to auto-configure an \link{OAuthProvider}.
-When present, \code{introspection_endpoint} is wired into the resulting provider
-for RFC 7662 support.
+Builds an \link{OAuthProvider} from the provider's OpenID Connect discovery
+document at \verb{/.well-known/openid-configuration}. When present,
+\code{introspection_endpoint} is also wired into the resulting provider.
 }
 \details{
+Most users can accept the defaults here. The points below are mainly
+reference for advanced provider setups or for understanding why discovery
+might fail early.
 \itemize{
 \item ID token algorithms: by default this helper accepts common asymmetric
-algorithms RSA (RS*), RSA-PSS (PS*), ECDSA (ES*), and EdDSA. When the
+algorithms RSA (RS*), ECDSA (ES*), and EdDSA. When the
 provider advertises its supported ID token signing algorithms via
 \code{id_token_signing_alg_values_supported}, the helper uses the intersection
 with the caller-provided \code{allowed_algs}. If there is no overlap, discovery
@@ -95,26 +100,87 @@ fails with a configuration error. There is no automatic fallback to the
 discovery-advertised set.
 \item Token endpoint authentication methods: supports \code{client_secret_basic}
 (header), \code{client_secret_post} (body), public clients using \code{none}
-(with PKCE), as well as JWT-based methods \code{private_key_jwt} and
-\code{client_secret_jwt} per RFC 7523.
+(mapped to \code{token_auth_style = "public"} when PKCE is enabled), as well as
+JWT-based methods \code{private_key_jwt} and
+\code{client_secret_jwt} per RFC 7523. Discovery also preserves RFC 8705 mTLS
+metadata (\code{mtls_endpoint_aliases} and
+\code{tls_client_certificate_bound_access_tokens}) and supports explicit
+\code{tls_client_auth} / \code{self_signed_tls_client_auth} selection.
+\item PAR metadata: when the discovery document advertises
+\code{pushed_authorization_request_endpoint} or
+\code{require_pushed_authorization_requests}, the resulting provider stores that
+PAR capability and policy metadata so authorization requests can use RFC
+9126 PAR and fail fast on PAR-only provider policies.
+\item Request Object metadata: when the discovery document advertises
+\code{request_object_signing_alg_values_supported} or
+\code{require_signed_request_object}, the resulting provider stores that
+metadata so \code{OAuthClient} can fail fast when a request-object algorithm is
+unsupported or when the provider requires signed Request Objects. When the
+discovery document also advertises
+\code{request_object_encryption_alg_values_supported} or
+\code{request_object_encryption_enc_values_supported}, the resulting provider
+stores that encryption metadata so Request Object JWE configuration can be
+validated early as well.
+\item Authorization request transport metadata: when the discovery document
+advertises \code{request_parameter_supported},
+\code{request_uri_parameter_supported}, or
+\code{require_request_uri_registration}, the resulting provider stores that
+metadata so shinyOAuth can fail fast when a provider explicitly disallows
+the front-channel \code{request} transport used by JAR or caller-managed
+\code{request_uri} values. The registration requirement itself remains
+deployment-specific: shinyOAuth stores
+\code{require_request_uri_registration} for caller awareness, but it cannot
+independently verify whether the provider has already registered a
+matching public \code{request_uri} or wildcard prefix for the client. When PAR
+is configured, shinyOAuth sends signed Request Objects to the PAR endpoint
+and the browser redirect only carries the PAR-issued \code{request_uri}
+handle, regardless of \code{request_uri_parameter_supported} or
+\code{require_request_uri_registration}. When discovery omits these booleans,
+this helper applies the OpenID Connect defaults instead of storing \code{NA}.
+\item Response mode metadata: when the discovery document advertises
+\code{response_modes_supported}, the resulting provider stores it so explicit
+\code{response_mode} requests can fail fast when unsupported. When the metadata
+is omitted, this helper applies the OAuth/OIDC metadata default of
+\code{c("query", "fragment")}.
+\item Token endpoint JWT auth metadata: when the discovery document advertises
+\code{token_endpoint_auth_signing_alg_values_supported}, the resulting provider
+stores that metadata so \code{OAuthClient} can fail fast when a JWT client
+assertion algorithm is unsupported.
+\item DPoP metadata: when the discovery document advertises
+\code{dpop_signing_alg_values_supported}, the resulting provider stores that
+metadata so \code{OAuthClient} can fail fast when an explicit or inferred DPoP
+proof signing algorithm is unsupported.
+\item RFC 9207 callback issuer metadata: when the discovery document advertises
+\code{authorization_response_iss_parameter_supported = true}, the resulting
+provider stores that metadata so \code{\link[=oauth_client]{oauth_client()}} can auto-enable callback
+issuer enforcement unless you explicitly opt out.
+\item PKCE method discovery: this helper keeps \code{S256} as the default and does not
+silently downgrade to \code{plain}. If discovery metadata explicitly omits
+\code{S256}, discovery fails with a configuration error unless you explicitly
+opt into \code{pkce_method = "plain"}.
 
 Important: discovery metadata lists methods supported across the provider,
 not per-client provisioning. This helper does not automatically select
 JWT-based methods just because they are advertised. By default it prefers
 \code{client_secret_basic} (header) when available, otherwise
-\code{client_secret_post} (body), and only uses public \code{none} for PKCE clients.
+\code{client_secret_post} (body), and maps public \code{none} to
+\code{token_auth_style = "public"} only for PKCE clients.
 If a provider advertises only JWT methods, you must explicitly set
 \code{token_auth_style} and configure the corresponding credentials on your
 \link{OAuthClient} (a private key for \code{private_key_jwt}, or a sufficiently
 strong \code{client_secret} for \code{client_secret_jwt}).
-\item Host policy: by default, discovered endpoints must be absolute URLs whose
-host matches the issuer host exactly. Subdomains are NOT implicitly allowed.
-If you want to allow subdomains, add a leading-dot or glob in
-\code{options(shinyOAuth.allowed_hosts)}, e.g., \code{.example.com} or \verb{*.example.com}.
-If a global whitelist is supplied via \code{options(shinyOAuth.allowed_hosts)},
-discovery will restrict endpoints to that whitelist. Scheme policy (https/http for
-loopback) is delegated to \code{is_ok_host()}, so you may allow non-HTTPS hosts
-with \code{options(shinyOAuth.allowed_non_https_hosts)} (see \code{?is_ok_host}).
+\item Host policy: by default, discovered standard endpoints must be absolute
+URLs whose host matches the issuer host exactly. Subdomains are NOT
+implicitly allowed. If you want to allow subdomains, add a leading-dot or
+glob in \code{options(shinyOAuth.allowed_hosts)}, e.g., \code{.example.com} or
+\verb{*.example.com}. If a global whitelist is supplied via
+\code{options(shinyOAuth.allowed_hosts)}, discovery will restrict endpoints to
+that whitelist. RFC 8705 \code{mtls_endpoint_aliases} are validated separately:
+they may use a different host or port by default, but an explicit
+\code{shinyOAuth.allowed_hosts} whitelist still constrains them. Scheme policy
+(https/http for loopback) is delegated to \code{is_ok_host()}, so you may allow
+non-HTTPS hosts with \code{options(shinyOAuth.allowed_non_https_hosts)} (see
+\code{?is_ok_host}).
 }
 }
 \examples{
@@ -136,14 +202,14 @@ generic_oidc_provider <- oauth_provider_oidc(
 
 # Configure a OIDC provider via OIDC discovery
 # (requires network access)
-\donttest{
-# Using Auth0 sample issuer as an example
-oidc_discovery_provider <- oauth_provider_oidc_discover(
-  issuer = "https://samples.auth0.com"
-)
+if (interactive()) {
+  # Using Auth0 sample issuer as an example
+  oidc_discovery_provider <- oauth_provider_oidc_discover(
+    issuer = "https://samples.auth0.com"
+  )
 }
 
-# GitHub preconfigured provider 
+# GitHub preconfigured provider
 github_provider <- oauth_provider_github()
 
 # Google preconfigured provider
@@ -152,30 +218,30 @@ google_provider <- oauth_provider_google()
 # Microsoft preconfigured provider
 # See `?oauth_provider_microsoft` for example using a custom tenant ID
 
-# Spotify preconfigured provider 
+# Spotify preconfigured provider
 spotify_provider <- oauth_provider_spotify()
 
 # Slack via OIDC discovery
 # (requires network access)
-\donttest{
-slack_provider <- oauth_provider_slack()
+if (interactive()) {
+  slack_provider <- oauth_provider_slack()
 }
-  
+
 # Keycloak
 # (requires configured Keycloak realm; example below is therefore not run)
-\dontrun{
-oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
+if (interactive()) {
+  oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
 }
 
 # Auth0
 # (requires configured Auth0 domain; example below is therefore not run)
-\dontrun{
-oauth_provider_auth0(domain = "your-tenant.auth0.com")
+if (interactive()) {
+  oauth_provider_auth0(domain = "your-tenant.auth0.com")
 }
 
 # Okta
 # (requires configured Okta domain; example below is therefore not run)
-\dontrun{
-oauth_provider_okta(domain = "dev-123456.okta.com")
+if (interactive()) {
+  oauth_provider_okta(domain = "dev-123456.okta.com")
 }
 }

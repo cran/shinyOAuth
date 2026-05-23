@@ -9,66 +9,72 @@ handle_callback(
   code,
   payload,
   browser_token,
-  shiny_session = NULL
+  shiny_session = NULL,
+  iss = NULL
 )
 }
 \arguments{
-\item{oauth_client}{An \link{OAuthClient} object representing the OAuth client configuration.}
+\item{oauth_client}{An \link{OAuthClient} object.}
 
-\item{code}{The authorization code received from the OAuth provider during the callback.}
+\item{code}{Authorization code received from the provider.}
 
-\item{payload}{The encrypted state payload received from the OAuth provider during the callback
-(this should be the same value that was generated and sent in \code{prepare_call()}).}
+\item{payload}{Encrypted state payload returned by the provider. This should
+be the same value that was originally sent in \code{\link[=prepare_call]{prepare_call()}}.}
 
-\item{browser_token}{Browser token present in the user's session (this is managed
-by \code{oauth_module_server()} and should match the one used in \code{prepare_call()}).}
+\item{browser_token}{Browser token present in the user's session. This is
+usually managed by \code{\link[=oauth_module_server]{oauth_module_server()}}.}
 
 \item{shiny_session}{Optional pre-captured Shiny session context (from
 \code{capture_shiny_session_context()}) to include in audit events. Used when
 calling from async workers that lack access to the reactive domain.}
+
+\item{iss}{Optional RFC 9207 callback issuer (\code{iss}) from the authorization
+response. Pass this when one callback URL can receive responses from more
+than one authorization server. If \code{oauth_client@enforce_callback_issuer}
+is \code{TRUE}, this parameter is required and must match the configured
+provider issuer before any token exchange occurs.}
 }
 \value{
-An \link{OAuthToken} object containing the access token, refresh token,
-expiration time, user information (if requested), and ID token (if applicable).
-If any step of the process fails (e.g., state verification, token exchange,
-token validation), an error is thrown indicating the failure reason.
+An \link{OAuthToken} object. If callback validation, token exchange, or
+token verification fails, the function raises an error.
 }
 \description{
-Handle OAuth 2.0 callback: verify state, swap code for token, verify token
+Completes the callback step of the login flow. It validates the callback
+state, exchanges the returned code for tokens, and verifies the result.
 }
 \examples{
 # Please note: `prepare_call()` & `handle_callback()` are typically
-# not called by users of this package directly, but are called 
+# not called by users of this package directly, but are called
 # internally by `oauth_module_server()`. These functions are exported
 # nonetheless for advanced use cases. Most users will not need to
 # call these functions directly
 
 # Below code shows generic usage of `prepare_call()` and `handle_callback()`
 # (code is not run because it would require user interaction)
-\dontrun{
-# Define client
-client <- oauth_client(
-  provider = oauth_provider_github(),
-  client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
-  client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
-  redirect_uri = "http://127.0.0.1:8100"
-)
+if (interactive()) {
+  # Define client
+  client <- oauth_client(
+    provider = oauth_provider_github(),
+    client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
+    client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+    redirect_uri = "http://127.0.0.1:8100"
+  )
 
-# Get authorization URL and and store state in client's state store
-# `<browser_token>` is a token that identifies the browser session
-#  and would typically be stored in a browser cookie
-#  (`oauth_module_server()` handles this typically)
-authorization_url <- prepare_call(client, "<browser_token>")
+  # Get authorization URL and and store state in client's state store
+  # `<browser_token>` is a token that identifies the browser session
+  #  and would typically be stored in a browser cookie
+  #  (`oauth_module_server()` handles this typically)
+  authorization_url <- prepare_call(client, "<browser_token>")
 
-# Redirect user to authorization URL; retrieve code & payload from query;
-# read also `<browser_token>` from browser cookie
-# (`oauth_module_server()` handles this typically)
-code <- "..."
-payload <- "..."
-browser_token <- "..."
+  # Redirect user to authorization URL; retrieve code & payload from query;
+  # read also `<browser_token>` from browser cookie
+  # (`oauth_module_server()` handles this typically)
+  code <- "..."
+  payload <- "..."
+  browser_token <- "..."
 
-# Handle callback, exchanging code for token and validating state
-# (`oauth_module_server()` handles this typically)
-token <- handle_callback(client, code, payload, browser_token)
+  # Handle callback, exchanging code for token and validating state
+  # (`oauth_module_server()` handles this typically)
+  token <- handle_callback(client, code, payload, browser_token)
 }
 }

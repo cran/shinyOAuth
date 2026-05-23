@@ -1,10 +1,18 @@
-# OIDC generic + discovery -----------------------------------------------------
+# This file contains ready-to-use provider constructors
+# Used for creating common provider configurations with endpoints and defaults
+# already filled in
+
+# 1 Provider constructors ------------------------------------------------------
+
+## 1.1 Generic OIDC construction -----------------------------------------------
 
 #' @title
 #' Create a generic OpenID Connect (OIDC) [OAuthProvider]
 #'
 #' @description
-#' Preconfigured [OAuthProvider] for OpenID Connect (OIDC) compliant providers.
+#' Helper for providers that follow a standard OpenID Connect endpoint layout.
+#' It builds the usual OIDC endpoints from one base URL and then calls
+#' [oauth_provider()] with OIDC-friendly defaults.
 #'
 #' @param name Friendly name for the provider
 #' @param base_url Base URL for OIDC endpoints
@@ -16,7 +24,7 @@
 #' @param id_token_validation Logical, whether to validate ID tokens automatically
 #'   for this provider. Defaults to TRUE
 #' @param jwks_host_issuer_match When TRUE (default), enforce that the JWKS host
-#'   discovered from the provider matches the issuer host (or a subdomain). For
+#'   discovered from the provider matches the issuer host exactly. For
 #'   providers that serve JWKS from a different host (e.g., Google), set
 #'   `jwks_host_allow_only` to the exact hostname instead of disabling this.
 #'   Disabling (`FALSE`) is not recommended unless you also pin JWKS via
@@ -43,6 +51,8 @@ oauth_provider_oidc <- function(
   allowed_token_types = c('Bearer'),
   ...
 ) {
+  base_url <- sub("/+$", "", base_url)
+
   auth_url <- paste0(base_url, auth_path)
   token_url <- paste0(base_url, token_path)
   userinfo_url <- paste0(base_url, userinfo_path)
@@ -64,12 +74,12 @@ oauth_provider_oidc <- function(
   )
 }
 
-# Preconfigured providers ------------------------------------------------------
+## 1.2 Direct-configured provider presets --------------------------------------
 
 #' Create a GitHub [OAuthProvider]
 #'
 #' @description
-#' Pre-configured OAuth 2.0 provider for GitHub.
+#' Ready-to-use OAuth 2.0 provider settings for GitHub.
 #'
 #' @details
 #' You can register a new GitHub OAuth 2.0 app in your
@@ -110,7 +120,7 @@ oauth_provider_github <- function(name = "github") {
 #' Create a Google [OAuthProvider]
 #'
 #' @description
-#' Pre-configured [OAuthProvider] for Google.
+#' Ready-to-use [OAuthProvider] settings for Google.
 #'
 #' @param name Optional provider name (default "google")
 #'
@@ -154,25 +164,37 @@ oauth_provider_google <- function(name = "google") {
 #' Create a Microsoft (Entra ID) [OAuthProvider]
 #'
 #' @description
-#' Pre-configured [OAuthProvider] for Microsoft Entra ID (formerly Azure AD)
-#' using the v2.0 endpoints. Accepts a tenant identifier and configures the
-#' authorization, token, and userinfo endpoints directly (no discovery).
+#' Ready-to-use [OAuthProvider] settings for Microsoft Entra ID (formerly Azure
+#' AD) using the v2.0 endpoints. Accepts a tenant identifier and configures the
+#' authorization, token, and userinfo endpoints directly.
 #'
 #' @details
+#' Most users only need to choose the tenant and decide whether to keep ID
+#' token validation enabled. The remaining details below explain how the helper
+#' behaves for Microsoft's different tenant styles.
+#'
 #' The `tenant` can be one of the special values "common", "organizations",
 #' or "consumers", or a specific directory (tenant) ID GUID
 #' (e.g., "00000000-0000-0000-0000-000000000000").
 #'
-#' When `tenant` is a specific GUID, the provider will enable strict ID token
-#' validation (issuer match). When using the multi-tenant aliases ("common",
-#' "organizations", "consumers"), the exact issuer depends on the account that
-#' signs in and therefore ID token validation is disabled by default to avoid
-#' false negatives. You can override this via `id_token_validation` if you know
-#' the environment guarantees a fixed issuer.
+#' When `tenant` is a specific GUID, the provider enables strict ID token
+#' validation with the tenant-specific issuer.
 #'
-#' Note: ID token validation requires a stable issuer. For multi-tenant aliases,
-#' this provider sets `issuer = NA` and therefore also disables `use_nonce` by
-#' default (nonce validation relies on validating the ID token).
+#' For `tenant = "common"` or `tenant = "organizations"`, the helper enables
+#' Microsoft Entra's tenant-independent validation mode by default: ID tokens
+#' are checked against Microsoft's `{tenantid}` issuer template and the signing
+#' key's own `issuer` scope, as documented by Microsoft for multi-tenant
+#' metadata. Runtime JWKS discovery for these aliases also uses host-only
+#' discovery issuer matching because Microsoft's tenant-independent metadata
+#' publishes a templated issuer rather than echoing the alias URL exactly.
+#'
+#' For `tenant = "consumers"`, the helper resolves the stable consumer tenant
+#' issuer (`9188040d-6c67-4c5b-b112-36a304b66dad`) and performs normal exact-
+#' issuer validation.
+#'
+#' Set `id_token_validation = FALSE` to opt out of ID token and nonce
+#' validation for these aliases, which falls back to OAuth 2.0 plus userinfo
+#' identity only.
 #'
 #' Microsoft issues RS256 ID tokens; `allowed_algs` is restricted accordingly.
 #' The userinfo endpoint is provided by Microsoft Graph
@@ -181,15 +203,18 @@ oauth_provider_google <- function(name = "google") {
 #' When configuring your [OAuthClient], if you do not have the option to
 #' register an app or simply wish to test during development, you may be able
 #' to use the default Azure CLI public app, with `client_id`
-#' '9391afd1-7129-4938-9e4d-633c688f93c0' (uses `redirect_uri`
+#' '04b07795-8ddb-461a-bbee-02f9e1bf7b46' (uses `redirect_uri`
 #' 'http://localhost:8100').
 #'
 #' @param name Optional friendly name for the provider. Defaults to "microsoft"
 #' @param tenant Tenant identifier ("common", "organizations", "consumers",
 #'   or directory GUID). Defaults to "common"
 #' @param id_token_validation Optional override (logical). If `NULL` (default),
-#'   it's enabled automatically when `tenant` looks like a GUID, otherwise
-#'   disabled
+#'   it's enabled automatically when `tenant` looks like a GUID or one of the
+#'   Microsoft alias tenants (`common`, `organizations`, `consumers`).
+#'   `common` and `organizations` use Microsoft's tenant-independent issuer and
+#'   signing-key validation rules; `consumers` uses the stable consumer tenant
+#'   issuer
 #'
 #' @return [OAuthProvider] object configured for Microsoft identity platform
 #'
@@ -202,25 +227,36 @@ oauth_provider_microsoft <- function(
   id_token_validation = NULL
 ) {
   tenant <- tenant[1]
-  stopifnot(is.character(tenant), length(tenant) == 1, nzchar(tenant))
-  # Detect GUID-like tenant IDs
-  is_guid <- grepl(
-    "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-    tenant
-  )
+  if (!is_valid_string(tenant)) {
+    err_input("tenant must be a non-empty string")
+  }
+  consumer_tenant_guid <- "9188040d-6c67-4c5b-b112-36a304b66dad"
+  tenant_independent_alias <- tenant %in% c("common", "organizations")
+  consumer_alias <- identical(tenant, "consumers")
+  is_guid <- is_guid_like(tenant)
   if (is.null(id_token_validation)) {
-    id_token_validation <- is_guid
+    id_token_validation <- is_guid || tenant_independent_alias || consumer_alias
   }
 
   base <- sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0", tenant)
   auth_url <- paste0(base, "/authorize")
   token_url <- paste0(base, "/token")
   userinfo_url <- "https://graph.microsoft.com/oidc/userinfo"
-  # Only set issuer when it's stable (GUID tenant); otherwise leave NA
   issuer <- if (is_guid) {
     sprintf("https://login.microsoftonline.com/%s/v2.0", tenant)
+  } else if (!isTRUE(id_token_validation)) {
+    NA_character_
+  } else if (tenant_independent_alias) {
+    sprintf("https://login.microsoftonline.com/%s/v2.0", tenant)
+  } else if (consumer_alias) {
+    sprintf("https://login.microsoftonline.com/%s/v2.0", consumer_tenant_guid)
   } else {
     NA_character_
+  }
+  issuer_match <- if (tenant_independent_alias && isTRUE(id_token_validation)) {
+    "host"
+  } else {
+    "url"
   }
 
   oauth_provider(
@@ -232,6 +268,7 @@ oauth_provider_microsoft <- function(
     introspection_url = NA_character_,
 
     issuer = issuer,
+    issuer_match = issuer_match,
 
     use_nonce = isTRUE(id_token_validation),
     use_pkce = TRUE,
@@ -256,8 +293,8 @@ oauth_provider_microsoft <- function(
 #' Create a Spotify [OAuthProvider]
 #'
 #' @description
-#' Pre-configured OAuth 2.0 provider for Spotify.
-#' Uses /v1/me as "userinfo". No ID token (not OIDC).
+#' Ready-to-use OAuth 2.0 provider settings for Spotify.
+#' It uses `/v1/me` as the user profile endpoint and does not expect ID tokens.
 #'
 #' @param name Optional provider name (default "spotify")
 #' @details
@@ -302,6 +339,9 @@ oauth_provider_spotify <- function(
   )
 }
 
+
+## 1.3 Discovery-backed provider presets ---------------------------------------
+
 #' Create a Slack [OAuthProvider] (via OIDC discovery)
 #'
 #' @param name Optional provider name (default "slack")
@@ -323,11 +363,12 @@ oauth_provider_slack <- function(name = "slack") {
 #' @param name Optional provider name. Defaults to `paste0('keycloak-', realm)`
 #' @param token_auth_style Optional override for token endpoint authentication
 #'  method. One of "header" (client_secret_basic), "body"
-#'  (client_secret_post), "private_key_jwt", or "client_secret_jwt". Defaults
-#'  to "body" for Keycloak, which works for both confidential clients and
-#'  public PKCE clients (secretless). If you pass `NULL`, discovery will infer
-#'  the method from the provider's
-#'  `token_endpoint_auth_methods_supported` metadata.
+#'  (client_secret_post), "public" (send `client_id` only; `"none"` alias also
+#'  accepted), "private_key_jwt", or "client_secret_jwt". Defaults
+#'  to "body" for Keycloak, which works for many common setups. Use `"public"`
+#'  if you need to suppress `client_secret` even when it is set in the
+#'  environment. If you pass `NULL`, discovery will infer the method from the
+#'  provider's `token_endpoint_auth_methods_supported` metadata.
 #'
 #' @return [OAuthProvider] object configured for the specified Keycloak realm
 #'
@@ -340,7 +381,12 @@ oauth_provider_keycloak <- function(
   name = paste0("keycloak-", realm),
   token_auth_style = "body"
 ) {
-  stopifnot(nzchar(base_url), nzchar(realm))
+  if (!is_valid_string(base_url)) {
+    err_input("base_url must be a non-empty string")
+  }
+  if (!is_valid_string(realm)) {
+    err_input("realm must be a non-empty string")
+  }
 
   issuer <- paste0(rtrim_slash(base_url), "/realms/", realm)
 
@@ -367,7 +413,9 @@ oauth_provider_okta <- function(
   auth_server = "default",
   name = "okta"
 ) {
-  stopifnot(nzchar(domain))
+  if (!is_valid_string(domain)) {
+    err_input("domain must be a non-empty string")
+  }
 
   base <- if (grepl("^https?://", domain)) {
     domain
@@ -387,7 +435,7 @@ oauth_provider_okta <- function(
 #'
 #' @param domain Your Auth0 domain, e.g., "your-domain.auth0.com"
 #' @param name Optional provider name (default "auth0")
-#' @param audience Optional audience to request in auth flows
+#' @param audience Optional audience value to send in authorization requests.
 #'
 #' @return [OAuthProvider] object configured for the specified Auth0 domain
 #'
@@ -395,7 +443,9 @@ oauth_provider_okta <- function(
 #'
 #' @export
 oauth_provider_auth0 <- function(domain, name = "auth0", audience = NULL) {
-  stopifnot(nzchar(domain))
+  if (!is_valid_string(domain)) {
+    err_input("domain must be a non-empty string")
+  }
 
   base <- if (grepl("^https?://", domain)) {
     domain
@@ -412,4 +462,153 @@ oauth_provider_auth0 <- function(domain, name = "auth0", audience = NULL) {
     name = name,
     extra_auth_params = extra_auth
   )
+}
+
+# 2 Helpers --------------------------------------------------------------------
+
+## 2.1 Microsoft-specific helpers ----------------------------------------------
+
+#' Check whether a value looks like a GUID
+#'
+#' Used by [oauth_provider_microsoft()] and tenant-independent ID token
+#' validation helpers.
+#'
+#' @param value Candidate tenant identifier.
+#' @return `TRUE` when `value` is a single GUID-like string; otherwise `FALSE`.
+#' @keywords internal
+#' @noRd
+is_guid_like <- function(value) {
+  is.character(value) &&
+    length(value) == 1L &&
+    !is.na(value) &&
+    grepl(
+      "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      value
+    )
+}
+
+#' Detect a tenant-independent Microsoft issuer
+#'
+#' Used by Microsoft-specific issuer handling when tenant-independent
+#' authorities are configured.
+#'
+#' @param issuer Issuer URL to inspect.
+#' @return A normalized tenant-independent issuer path, or `NULL` when `issuer`
+#'   is not one of the supported Microsoft tenant-independent authorities.
+#' @keywords internal
+#' @noRd
+microsoft_tenant_independent_issuer <- function(issuer) {
+  if (!is_valid_string(issuer)) {
+    return(NULL)
+  }
+
+  parsed <- try(httr2::url_parse(issuer), silent = TRUE)
+  if (inherits(parsed, "try-error")) {
+    return(NULL)
+  }
+
+  host <- tolower(parsed$hostname %||% "")
+  path <- tolower(gsub("^/+|/+$", "", parsed$path %||% ""))
+
+  if (!identical(host, "login.microsoftonline.com")) {
+    return(NULL)
+  }
+
+  if (path %in% c("common/v2.0", "organizations/v2.0")) {
+    return(path)
+  }
+
+  NULL
+}
+
+#' Resolve the expected ID token issuer
+#'
+#' Used before issuer comparison during Microsoft tenant-independent token
+#' validation.
+#'
+#' @param provider_issuer Configured provider issuer.
+#' @param token_payload Parsed ID token payload.
+#' @return A list containing `expected_issuer`, `enforce_key_issuer`, and
+#'   `token_tid`.
+#' @keywords internal
+#' @noRd
+resolve_expected_id_token_issuer <- function(provider_issuer, token_payload) {
+  if (is.null(microsoft_tenant_independent_issuer(provider_issuer))) {
+    return(list(
+      expected_issuer = provider_issuer,
+      enforce_key_issuer = FALSE,
+      token_tid = NULL
+    ))
+  }
+
+  token_tid <- token_payload$tid %||% NULL
+  if (!is_guid_like(token_tid)) {
+    err_id_token(c(
+      "x" = "Microsoft ID token missing or invalid tid claim",
+      "i" = paste(
+        "Tenant-independent Microsoft authorities require a GUID tid claim"
+      )
+    ))
+  }
+
+  list(
+    expected_issuer = sprintf(
+      "https://login.microsoftonline.com/%s/v2.0",
+      token_tid
+    ),
+    enforce_key_issuer = TRUE,
+    token_tid = token_tid
+  )
+}
+
+#' Filter Microsoft JWKS keys by token issuer
+#'
+#' Used only for tenant-independent Microsoft authorities after candidate keys
+#' have been selected.
+#'
+#' @param keys Candidate JWKS keys.
+#' @param provider_issuer Configured provider issuer.
+#' @param token_issuer Issuer claim from the token being validated.
+#' @param token_tid Tenant id claim from the token being validated.
+#' @return The subset of `keys` that matches the token issuer context.
+#' @keywords internal
+#' @noRd
+filter_microsoft_jwks_for_token_issuer <- function(
+  keys,
+  provider_issuer,
+  token_issuer,
+  token_tid
+) {
+  if (
+    is.null(microsoft_tenant_independent_issuer(provider_issuer)) ||
+      length(keys) == 0L ||
+      !is_valid_string(token_issuer) ||
+      !is_guid_like(token_tid)
+  ) {
+    return(keys)
+  }
+
+  keep <- vapply(
+    keys,
+    function(key) {
+      key_issuer <- key$issuer %||% NULL
+      if (!is_valid_string(key_issuer)) {
+        return(FALSE)
+      }
+
+      if (grepl("\\{tenantid\\}", key_issuer, ignore.case = TRUE)) {
+        key_issuer <- gsub(
+          "\\{tenantid\\}",
+          token_tid,
+          key_issuer,
+          ignore.case = TRUE
+        )
+      }
+
+      identical(key_issuer, token_issuer)
+    },
+    logical(1)
+  )
+
+  keys[keep]
 }

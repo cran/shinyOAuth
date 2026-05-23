@@ -6,9 +6,9 @@ make_jwt_with_header <- function(header_list, payload_list) {
   header <- jsonlite::toJSON(header_list, auto_unbox = TRUE)
   payload <- jsonlite::toJSON(payload_list, auto_unbox = TRUE)
   paste0(
-    shinyOAuth:::b64url_encode(charToRaw(as.character(header))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(header))),
     ".",
-    shinyOAuth:::b64url_encode(charToRaw(as.character(payload))),
+    shinyOAuth:::base64url_encode(charToRaw(as.character(payload))),
     "."
   )
 }
@@ -25,7 +25,7 @@ make_signed_jwt_h <- function(payload_list, key, kid = NULL) {
 
 # Helper: mock req_with_retry returning an application/jwt response
 mock_jwt_response <- function(jwt_body) {
-  function(req) {
+  function(req, ...) {
     httr2::response(
       url = as.character(req$url),
       status = 200,

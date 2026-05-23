@@ -26,10 +26,28 @@ parse_query_param <- function(url, name, decode = FALSE) {
     )
     names(vals) <- vapply(kv, function(p) p[1], "")
   }
+  if (!name %in% names(vals)) {
+    return(NA_character_)
+  }
+
   vals[[name]] %||% NA_character_
 }
 
 valid_browser_token <- function() paste(rep("ab", 64), collapse = "")
+
+build_dummy_jwt <- function(payload = list(sub = "user1")) {
+  header <- list(alg = "none", typ = "JWT")
+  encoded_header <- shinyOAuth:::base64url_encode(charToRaw(jsonlite::toJSON(
+    header,
+    auto_unbox = TRUE
+  )))
+  encoded_payload <- shinyOAuth:::base64url_encode(charToRaw(jsonlite::toJSON(
+    payload,
+    auto_unbox = TRUE
+  )))
+
+  paste0(encoded_header, ".", encoded_payload, ".")
+}
 
 # Centralized polling helper for async test assertions.
 # Polls `condition_fn` until it returns TRUE, flushing the Shiny reactive loop
@@ -112,9 +130,12 @@ make_test_client <- function(
   state_max_age = 600,
   state_payload_max_age = 300,
   scopes = NULL,
+  resource = character(0),
   claims = NULL,
   claims_validation = "none",
+  userinfo_jwt_required_temporal_claims = character(0),
   required_acr_values = character(0),
+  response_mode = NULL,
   introspect = FALSE,
   introspect_elements = character(0)
 ) {
@@ -134,8 +155,11 @@ make_test_client <- function(
     client_secret = "", # public client
     redirect_uri = "http://localhost:8100",
     scopes = scopes,
+    resource = resource,
     claims = claims,
+    response_mode = response_mode,
     claims_validation = claims_validation,
+    userinfo_jwt_required_temporal_claims = userinfo_jwt_required_temporal_claims,
     required_acr_values = required_acr_values,
     state_store = cachem::cache_mem(max_age = state_max_age),
     state_payload_max_age = state_payload_max_age,

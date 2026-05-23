@@ -1,5 +1,5 @@
 # Test claims_validation modes: "strict", "warn", "none"
-# Validates that essential claims requested via the OIDC claims parameter
+# Validates that requested claims supplied via the OIDC claims parameter
 # (OIDC Core §5.5) are checked against returned ID token / userinfo.
 
 # --- Unit tests for extract_essential_claims() --------------------------------
@@ -81,6 +81,107 @@ test_that("extract_essential_claims: essential = FALSE is not essential", {
   expect_equal(result, character(0))
 })
 
+test_that("oauth_client defaults to warn for enforceable claim requests", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = TRUE)
+
+  warned <- FALSE
+
+  cli <- withCallingHandlers(
+    oauth_client(
+      provider = prov,
+      client_id = "abc",
+      client_secret = "",
+      redirect_uri = "http://localhost:8100",
+      scopes = "openid",
+      claims = list(
+        id_token = list(auth_time = list(essential = TRUE)),
+        userinfo = list(email_verified = list(value = TRUE))
+      )
+    ),
+    warning = function(w) {
+      warned <<- TRUE
+      invokeRestart("muffleWarning")
+    }
+  )
+
+  expect_false(warned)
+  expect_equal(cli@claims_validation, "warn")
+})
+
+test_that("oauth_client does not warn when enforceable claims opt into validation", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = TRUE)
+
+  expect_no_warning(
+    oauth_client(
+      provider = prov,
+      client_id = "abc",
+      client_secret = "",
+      redirect_uri = "http://localhost:8100",
+      scopes = "openid",
+      claims = list(
+        id_token = list(auth_time = list(essential = TRUE)),
+        userinfo = list(email_verified = list(value = TRUE))
+      ),
+      claims_validation = "warn"
+    )
+  )
+})
+
+test_that("oauth_client rejects enforceable id_token claims without ID token validation", {
+  prov <- oauth_provider(
+    name = "test",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    issuer = "https://example.com",
+    use_nonce = FALSE,
+    id_token_validation = FALSE,
+    token_auth_style = "body",
+    use_pkce = TRUE
+  )
+
+  expect_error(
+    oauth_client(
+      provider = prov,
+      client_id = "abc",
+      client_secret = "",
+      redirect_uri = "http://localhost:8100",
+      scopes = "openid",
+      claims = list(
+        id_token = list(auth_time = list(essential = TRUE))
+      )
+    ),
+    "validate ID tokens|id_token_validation|use_nonce"
+  )
+
+  for (mode in c("warn", "strict")) {
+    expect_error(
+      oauth_client(
+        provider = prov,
+        client_id = "abc",
+        client_secret = "",
+        redirect_uri = "http://localhost:8100",
+        scopes = "openid",
+        claims = list(
+          id_token = list(auth_time = list(essential = TRUE))
+        ),
+        claims_validation = mode
+      ),
+      "validate ID tokens|id_token_validation|use_nonce"
+    )
+  }
+})
+
+test_that("oauth_client allows userinfo-only claims validation without ID token validation", {
+  expect_no_error(
+    make_test_client(
+      claims = list(
+        userinfo = list(email_verified = list(value = TRUE))
+      ),
+      claims_validation = "strict"
+    )
+  )
+})
+
 # --- Unit tests for validate_essential_claims() -------------------------------
 
 test_that("validate_essential_claims: 'none' mode skips validation entirely", {
@@ -115,6 +216,7 @@ test_that("validate_essential_claims: 'none' mode skips validation entirely", {
 
 test_that("validate_essential_claims: 'strict' mode errors on missing essential id_token claims", {
   cli <- make_test_client(
+    use_nonce = TRUE,
     claims = list(
       id_token = list(
         auth_time = list(essential = TRUE),
@@ -158,6 +260,7 @@ test_that("validate_essential_claims: 'strict' mode errors on missing essential 
 
 test_that("validate_essential_claims: 'strict' mode passes when all essential claims present", {
   cli <- make_test_client(
+    use_nonce = TRUE,
     claims = list(
       id_token = list(
         auth_time = list(essential = TRUE),
@@ -179,6 +282,7 @@ test_that("validate_essential_claims: 'strict' mode passes when all essential cl
 
 test_that("validate_essential_claims: 'warn' mode warns on missing essential claims", {
   cli <- make_test_client(
+    use_nonce = TRUE,
     claims = list(
       id_token = list(
         auth_time = list(essential = TRUE)
@@ -223,18 +327,18 @@ test_that("validate_essential_claims: 'warn' mode does not error", {
   )
 })
 
-test_that("validate_essential_claims: skips when no essential claims in spec", {
+test_that("validate_essential_claims: skips when no enforceable claim requirements in spec", {
   cli <- make_test_client(
     claims = list(
       id_token = list(
         email = NULL,
-        acr = list(values = c("something"))
+        profile = list(locale = "nl-BE")
       )
     ),
     claims_validation = "strict"
   )
 
-  # No essential claims requested -> should not error even in strict mode
+  # No essential or value/value claim constraints -> nothing to validate
   expect_no_error(
     shinyOAuth:::validate_essential_claims(cli, list(sub = "user1"), "id_token")
   )
@@ -254,6 +358,7 @@ test_that("validate_essential_claims: skips when client has no claims", {
 
 test_that("validate_essential_claims: error message lists missing claims", {
   cli <- make_test_client(
+    use_nonce = TRUE,
     claims = list(
       id_token = list(
         auth_time = list(essential = TRUE),
@@ -279,6 +384,7 @@ test_that("validate_essential_claims: error message lists missing claims", {
 
 test_that("validate_essential_claims: partially present essential claims", {
   cli <- make_test_client(
+    use_nonce = TRUE,
     claims = list(
       id_token = list(
         auth_time = list(essential = TRUE),
@@ -299,10 +405,100 @@ test_that("validate_essential_claims: partially present essential claims", {
   )
 })
 
+test_that("validate_essential_claims: 'strict' mode errors on mismatched requested claim value", {
+  cli <- make_test_client(
+    use_nonce = TRUE,
+    claims = list(
+      id_token = list(
+        acr = list(values = c("urn:example:gold", "urn:example:silver"))
+      )
+    ),
+    claims_validation = "strict"
+  )
+
+  expect_error(
+    shinyOAuth:::validate_essential_claims(
+      cli,
+      list(sub = "user1", acr = "urn:example:bronze"),
+      "id_token"
+    ),
+    regexp = "Requested claim values not satisfied"
+  )
+})
+
+test_that("validate_essential_claims: 'strict' mode errors when value-constrained claim is missing", {
+  cli <- make_test_client(
+    claims = list(
+      userinfo = list(
+        zoneinfo = list(value = "Europe/Brussels")
+      )
+    ),
+    claims_validation = "strict"
+  )
+
+  expect_error(
+    shinyOAuth:::validate_essential_claims(
+      cli,
+      list(sub = "user1"),
+      "userinfo"
+    ),
+    regexp = "zoneinfo is missing"
+  )
+})
+
+test_that("validate_essential_claims: 'warn' mode warns on mismatched requested claim value", {
+  cli <- make_test_client(
+    use_nonce = TRUE,
+    claims = list(
+      id_token = list(
+        email_verified = list(value = TRUE)
+      )
+    ),
+    claims_validation = "warn"
+  )
+
+  rlang::reset_warning_verbosity("claims-validation-missing-id_token")
+
+  expect_warning(
+    shinyOAuth:::validate_essential_claims(
+      cli,
+      list(sub = "user1", email_verified = FALSE),
+      "id_token"
+    ),
+    regexp = "Requested claim values not satisfied"
+  )
+})
+
+test_that("validate_essential_claims: accepts matching requested claim values", {
+  cli <- make_test_client(
+    use_nonce = TRUE,
+    claims = list(
+      id_token = list(
+        acr = list(values = c("urn:example:gold", "urn:example:silver")),
+        email_verified = list(value = TRUE)
+      )
+    ),
+    claims_validation = "strict"
+  )
+
+  expect_no_error(
+    shinyOAuth:::validate_essential_claims(
+      cli,
+      list(
+        sub = "user1",
+        acr = "urn:example:silver",
+        email_verified = TRUE
+      ),
+      "id_token"
+    )
+  )
+})
+
 # --- Integration tests via handle_callback() ----------------------------------
 
-test_that("claims_validation = 'strict' errors during handle_callback for missing ID token essential claims", {
+test_that("claims_validation = 'strict' errors during handle_callback for missing validated ID token essential claims", {
   cli <- make_test_client(
+    use_nonce = TRUE,
     claims = list(
       id_token = list(
         auth_time = list(essential = TRUE)
@@ -333,7 +529,7 @@ test_that("claims_validation = 'strict' errors during handle_callback for missin
       jsonlite::toJSON(
         list(
           sub = "user1",
-          iss = "https://example.com",
+          iss = "https://issuer.example.com",
           aud = "abc",
           exp = as.numeric(Sys.time()) + 3600,
           iat = as.numeric(Sys.time())
@@ -346,6 +542,75 @@ test_that("claims_validation = 'strict' errors during handle_callback for missin
 
   expect_error(
     testthat::with_mocked_bindings(
+      validate_id_token = function(...) {
+        invisible(TRUE)
+      },
+      swap_code_for_token_set = function(client, code, code_verifier) {
+        list(
+          access_token = "t",
+          token_type = "Bearer",
+          id_token = fake_jwt,
+          expires_in = 3600
+        )
+      },
+      .package = "shinyOAuth",
+      shinyOAuth:::handle_callback(
+        cli,
+        code = "ok",
+        payload = enc,
+        browser_token = tok
+      )
+    ),
+    class = "shinyOAuth_id_token_error"
+  )
+})
+
+test_that("claims_validation = 'strict' errors during handle_callback for mismatched validated ID token claim values", {
+  cli <- make_test_client(
+    use_nonce = TRUE,
+    claims = list(
+      id_token = list(
+        acr = list(values = c("urn:example:gold", "urn:example:silver"))
+      )
+    ),
+    claims_validation = "strict"
+  )
+
+  tok <- valid_browser_token()
+  url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
+  enc <- parse_query_param(url, "state")
+
+  header <- gsub(
+    "\n",
+    "",
+    jsonlite::base64url_enc(
+      jsonlite::toJSON(list(alg = "none", typ = "JWT"), auto_unbox = TRUE)
+    )
+  )
+  payload <- gsub(
+    "\n",
+    "",
+    jsonlite::base64url_enc(
+      jsonlite::toJSON(
+        list(
+          sub = "user1",
+          iss = "https://issuer.example.com",
+          aud = "abc",
+          acr = "urn:example:bronze",
+          exp = as.numeric(Sys.time()) + 3600,
+          iat = as.numeric(Sys.time())
+        ),
+        auto_unbox = TRUE
+      )
+    )
+  )
+  fake_jwt <- paste(header, payload, "", sep = ".")
+
+  expect_error(
+    testthat::with_mocked_bindings(
+      validate_id_token = function(...) {
+        invisible(TRUE)
+      },
       swap_code_for_token_set = function(client, code, code_verifier) {
         list(
           access_token = "t",
@@ -429,9 +694,32 @@ test_that("claims_validation = 'none' does not error for missing ID token essent
 
 # --- OAuthClient validation ---------------------------------------------------
 
-test_that("claims_validation defaults to 'none'", {
-  cli <- make_test_client()
+test_that("claims_validation defaults to 'none' when no enforceable claims are requested", {
+  prov <- make_test_provider()
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = "openid"
+  )
   expect_equal(cli@claims_validation, "none")
+})
+
+test_that("claims_validation defaults to 'warn' when enforceable claims are requested", {
+  prov <- make_test_provider(use_pkce = TRUE, use_nonce = TRUE)
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = "openid",
+    claims = list(
+      userinfo = list(email_verified = list(value = TRUE))
+    )
+  )
+
+  expect_equal(cli@claims_validation, "warn")
 })
 
 test_that("invalid claims_validation value is rejected by oauth_client()", {

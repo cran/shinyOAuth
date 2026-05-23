@@ -13,7 +13,7 @@ oauth_provider_google(name = "google")
 \link{OAuthProvider} object for use with a Google OAuth 2.0 app
 }
 \description{
-Pre-configured \link{OAuthProvider} for Google.
+Ready-to-use \link{OAuthProvider} settings for Google.
 }
 \details{
 You can register a new Google OAuth 2.0 app in the
@@ -39,14 +39,14 @@ generic_oidc_provider <- oauth_provider_oidc(
 
 # Configure a OIDC provider via OIDC discovery
 # (requires network access)
-\donttest{
-# Using Auth0 sample issuer as an example
-oidc_discovery_provider <- oauth_provider_oidc_discover(
-  issuer = "https://samples.auth0.com"
-)
+if (interactive()) {
+  # Using Auth0 sample issuer as an example
+  oidc_discovery_provider <- oauth_provider_oidc_discover(
+    issuer = "https://samples.auth0.com"
+  )
 }
 
-# GitHub preconfigured provider 
+# GitHub preconfigured provider
 github_provider <- oauth_provider_github()
 
 # Google preconfigured provider
@@ -55,30 +55,30 @@ google_provider <- oauth_provider_google()
 # Microsoft preconfigured provider
 # See `?oauth_provider_microsoft` for example using a custom tenant ID
 
-# Spotify preconfigured provider 
+# Spotify preconfigured provider
 spotify_provider <- oauth_provider_spotify()
 
 # Slack via OIDC discovery
 # (requires network access)
-\donttest{
-slack_provider <- oauth_provider_slack()
+if (interactive()) {
+  slack_provider <- oauth_provider_slack()
 }
-  
+
 # Keycloak
 # (requires configured Keycloak realm; example below is therefore not run)
-\dontrun{
-oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
+if (interactive()) {
+  oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
 }
 
 # Auth0
 # (requires configured Auth0 domain; example below is therefore not run)
-\dontrun{
-oauth_provider_auth0(domain = "your-tenant.auth0.com")
+if (interactive()) {
+  oauth_provider_auth0(domain = "your-tenant.auth0.com")
 }
 
 # Okta
 # (requires configured Okta domain; example below is therefore not run)
-\dontrun{
-oauth_provider_okta(domain = "dev-123456.okta.com")
+if (interactive()) {
+  oauth_provider_okta(domain = "dev-123456.okta.com")
 }
 }

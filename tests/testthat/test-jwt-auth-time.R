@@ -35,9 +35,36 @@ mk_client <- function(extra_auth_params = list()) {
     prov,
     client_id = "client-xyz",
     client_secret = "secret",
-    redirect_uri = "http://localhost:8100"
+    redirect_uri = "http://localhost:8100",
+    scopes = "openid",
+    scope_validation = "none"
   )
 }
+
+
+test_that("oauth_provider validates extra_auth_params$max_age early", {
+  bad_values <- list(
+    "abc",
+    -1,
+    c("10", "20")
+  )
+
+  for (bad_value in bad_values) {
+    expect_error(
+      shinyOAuth::oauth_provider(
+        name = "test",
+        auth_url = "https://example.com/auth",
+        token_url = "https://example.com/token",
+        issuer = "https://issuer.example.com",
+        id_token_validation = TRUE,
+        id_token_required = TRUE,
+        allowed_algs = c("RS256", "ES256"),
+        extra_auth_params = list(max_age = bad_value)
+      ),
+      regexp = "extra_auth_params\\$max_age"
+    )
+  }
+})
 
 
 # --- validate_id_token: auth_time required when max_age is passed ---
@@ -292,7 +319,7 @@ test_that("verify_token_set passes max_age from extra_auth_params to validate_id
     access_token = "at_123",
     token_type = "Bearer",
     id_token = jwt,
-    scope = ""
+    scope = "openid"
   )
 
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
@@ -344,7 +371,7 @@ test_that("verify_token_set does not pass max_age during refresh", {
     access_token = "at_refresh",
     token_type = "Bearer",
     id_token = new_jwt,
-    scope = ""
+    scope = "openid"
   )
 
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
@@ -383,7 +410,7 @@ test_that("verify_token_set accepts token when auth_time is within max_age", {
     access_token = "at_ok",
     token_type = "Bearer",
     id_token = jwt,
-    scope = ""
+    scope = "openid"
   )
 
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
@@ -394,6 +421,85 @@ test_that("verify_token_set accepts token when auth_time is within max_age", {
         nonce = NULL,
         is_refresh = FALSE
       )
+    )
+  })
+})
+
+
+# --- Future auth_time rejection (CVE-style regression) ---
+
+test_that("validate_id_token rejects auth_time far in the future", {
+  client <- mk_client()
+  now <- floor(as.numeric(Sys.time()))
+
+  # auth_time 1 hour in the future; max_age = 0 should reject
+  jwt <- build_jwt(
+    list(alg = "none"),
+    list(
+      iss = "https://issuer.example.com",
+      aud = "client-xyz",
+      sub = "user-1",
+      exp = now + 300,
+      iat = now - 1,
+      auth_time = now + 3600
+    )
+  )
+
+  withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
+    expect_error(
+      shinyOAuth:::validate_id_token(client, jwt, max_age = 0),
+      regexp = "auth_time is in the future"
+    )
+  })
+})
+
+
+test_that("validate_id_token rejects auth_time slightly beyond leeway in the future", {
+  client <- mk_client() # leeway = 5
+  now <- floor(as.numeric(Sys.time()))
+
+  # auth_time 10s in the future, leeway is 5 => 10 > 5 => reject
+  jwt <- build_jwt(
+    list(alg = "none"),
+    list(
+      iss = "https://issuer.example.com",
+      aud = "client-xyz",
+      sub = "user-1",
+      exp = now + 300,
+      iat = now - 1,
+      auth_time = now + 10
+    )
+  )
+
+  withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
+    expect_error(
+      shinyOAuth:::validate_id_token(client, jwt, max_age = 300),
+      regexp = "auth_time is in the future"
+    )
+  })
+})
+
+
+test_that("validate_id_token accepts auth_time within leeway in the future", {
+  client <- mk_client() # leeway = 5
+  now <- floor(as.numeric(Sys.time()))
+
+  # auth_time 3s in the future, leeway is 5 => 3 <= 5 => accept
+  jwt <- build_jwt(
+    list(alg = "none"),
+    list(
+      iss = "https://issuer.example.com",
+      aud = "client-xyz",
+      sub = "user-1",
+      exp = now + 300,
+      iat = now - 1,
+      auth_time = now + 3
+    )
+  )
+
+  withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
+    expect_silent(
+      shinyOAuth:::validate_id_token(client, jwt, max_age = 300)
     )
   })
 })
@@ -420,7 +526,7 @@ test_that("verify_token_set rejects ID token missing auth_time when max_age requ
     access_token = "at_missing",
     token_type = "Bearer",
     id_token = jwt,
-    scope = ""
+    scope = "openid"
   )
 
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {

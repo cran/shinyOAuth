@@ -44,6 +44,18 @@ test_that("constant_time_compare handles NA/NULL/non-char as mismatch", {
   expect_false(f(TRUE, "TRUE"))
 })
 
+test_that("constant_time_compare handles raw inputs too", {
+  f <- shinyOAuth:::constant_time_compare
+
+  expect_true(f(charToRaw("abc"), charToRaw("abc")))
+  expect_false(f(charToRaw("abc"), charToRaw("abd")))
+  expect_false(f(charToRaw("abc"), charToRaw("abcd")))
+  expect_true(f(raw(), raw()))
+  expect_false(f(NULL, charToRaw("a")))
+  expect_false(f(charToRaw("a"), NULL))
+  expect_true(f("a", charToRaw("a")))
+})
+
 test_that("constant_time_compare is insensitive to content length timing (coarse)", {
   # We can't perfectly prove constant-time in unit tests, but we can assert
   # that the function runs over the max length without early exit by comparing

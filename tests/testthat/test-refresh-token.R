@@ -19,7 +19,7 @@ testthat::test_that("refresh_token success updates tokens and preserves when not
 
   # Case A: rotation -> new refresh_token returned
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       # Verify body form has grant_type=refresh_token
       # We can't easily read it here; assume methods__token builds it correctly.
       httr2::response(
@@ -27,7 +27,7 @@ testthat::test_that("refresh_token success updates tokens and preserves when not
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
-          '{"access_token":"new_at","refresh_token":"new_rt","expires_in":3600}'
+          '{"access_token":"new_at","token_type":"Bearer","refresh_token":"new_rt","expires_in":3600}'
         )
       )
     },
@@ -47,12 +47,14 @@ testthat::test_that("refresh_token success updates tokens and preserves when not
 
   # Case B: no rotation -> provider omits refresh_token or empty -> keep old
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
         headers = list("content-type" = "application/json"),
-        body = charToRaw('{"access_token":"newer_at","expires_in":"60"}')
+        body = charToRaw(
+          '{"access_token":"newer_at","token_type":"Bearer","expires_in":"60"}'
+        )
       )
     },
     .package = "shinyOAuth"
@@ -65,6 +67,58 @@ testthat::test_that("refresh_token success updates tokens and preserves when not
   testthat::expect_true(is.finite(t3@expires_at))
 })
 
+testthat::test_that("refresh_token async resolves to OAuthToken directly", {
+  testthat::skip_if_not_installed("mirai")
+  testthat::skip_if_not_installed("promises")
+  testthat::skip_if_not_installed("later")
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@token_auth_style <- "body"
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(
+          '{"access_token":"async_new_at","token_type":"Bearer","refresh_token":"async_new_rt","expires_in":60}'
+        )
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  mirai::daemons(sync = TRUE)
+  withr::defer(mirai::daemons(0))
+
+  token <- OAuthToken(
+    access_token = "old_at",
+    refresh_token = "old_rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = NA_character_
+  )
+
+  p <- refresh_token(cli, token, async = TRUE, introspect = FALSE)
+  p <- promises::as.promise(p)
+  testthat::expect_s3_class(p, "promise")
+
+  val <- NULL
+  p$then(function(x) {
+    val <<- x
+  })
+
+  deadline <- Sys.time() + 5
+  while (is.null(val) && Sys.time() < deadline) {
+    later::run_now(0.05)
+    Sys.sleep(0.02)
+  }
+
+  testthat::expect_true(S7::S7_inherits(val, OAuthToken))
+  testthat::expect_identical(val@access_token, "async_new_at")
+  testthat::expect_identical(val@refresh_token, "async_new_rt")
+})
+
 testthat::test_that("refresh_token can fetch userinfo and optionally introspect", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
   # Set URLs first to satisfy provider validation when toggling userinfo_required
@@ -75,7 +129,7 @@ testthat::test_that("refresh_token can fetch userinfo and optionally introspect"
   # First, mock both token response and userinfo + introspection
   calls <- list(token = 0L, userinfo = 0L, introspection = 0L)
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       url <- as.character(req$url)
       if (grepl("/token", url, fixed = TRUE)) {
         calls$token <<- calls$token + 1L
@@ -83,7 +137,9 @@ testthat::test_that("refresh_token can fetch userinfo and optionally introspect"
           url = url,
           status = 200,
           headers = list("content-type" = "application/json"),
-          body = charToRaw('{"access_token":"at3","expires_in":120}')
+          body = charToRaw(
+            '{"access_token":"at3","token_type":"Bearer","expires_in":120}'
+          )
         )
       } else if (grepl("/userinfo", url, fixed = TRUE)) {
         calls$userinfo <<- calls$userinfo + 1L
@@ -121,9 +177,218 @@ testthat::test_that("refresh_token can fetch userinfo and optionally introspect"
   # We expect at least one token call and one userinfo call
   testthat::expect_gte(calls$token, 1L)
   testthat::expect_gte(calls$userinfo, 1L)
-  # Introspection is best-effort/optional, but with introspect=TRUE and URL set,
-  # it should have been called once.
+  # With introspect = TRUE and an endpoint configured, refresh should enforce
+  # the same introspection policy as login.
   testthat::expect_gte(calls$introspection, 1L)
+})
+
+expect_refresh_introspection_error <- function(
+  cli,
+  token,
+  introspection_result,
+  regexp
+) {
+  testthat::with_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(
+          '{"access_token":"new_at","token_type":"Bearer","expires_in":120}'
+        )
+      )
+    },
+    introspect_token = function(oauth_client, oauth_token, which, async, ...) {
+      introspection_result
+    },
+    .package = "shinyOAuth",
+    {
+      testthat::expect_error(
+        refresh_token(cli, token, async = FALSE, introspect = TRUE),
+        class = "shinyOAuth_token_error",
+        regexp = regexp
+      )
+    }
+  )
+}
+
+testthat::test_that("refresh_token fails when required introspection is unsupported", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  token <- OAuthToken(
+    access_token = "old",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = NA_character_
+  )
+
+  expect_refresh_introspection_error(
+    cli = cli,
+    token = token,
+    introspection_result = list(
+      supported = FALSE,
+      active = NA,
+      raw = NULL,
+      status = "introspection_unsupported"
+    ),
+    regexp = "does not support"
+  )
+})
+
+testthat::test_that("refresh_token fails when introspection marks token inactive", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  token <- OAuthToken(
+    access_token = "old",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = NA_character_
+  )
+
+  expect_refresh_introspection_error(
+    cli = cli,
+    token = token,
+    introspection_result = list(
+      supported = TRUE,
+      active = FALSE,
+      raw = list(),
+      status = "inactive"
+    ),
+    regexp = "not active"
+  )
+})
+
+testthat::test_that("refresh_token fails when introspection is missing required sub", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@introspection_url <- "https://example.com/introspect"
+  cli@introspect <- TRUE
+  cli@introspect_elements <- "sub"
+
+  token <- OAuthToken(
+    access_token = "old",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = build_dummy_jwt(list(sub = "user-1"))
+  )
+
+  expect_refresh_introspection_error(
+    cli = cli,
+    token = token,
+    introspection_result = list(
+      supported = TRUE,
+      active = TRUE,
+      raw = list(),
+      status = "ok"
+    ),
+    regexp = "missing required sub"
+  )
+})
+
+testthat::test_that("refresh_token fails when introspection client_id mismatches", {
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@introspection_url <- "https://example.com/introspect"
+  cli@introspect <- TRUE
+  cli@introspect_elements <- "client_id"
+
+  token <- OAuthToken(
+    access_token = "old",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = NA_character_
+  )
+
+  expect_refresh_introspection_error(
+    cli = cli,
+    token = token,
+    introspection_result = list(
+      supported = TRUE,
+      active = TRUE,
+      raw = list(client_id = "wrong-client"),
+      status = "ok"
+    ),
+    regexp = "client_id does not match"
+  )
+})
+
+testthat::test_that("refresh_token fails when introspection omits required scope", {
+  cli <- make_test_client(
+    use_pkce = TRUE,
+    use_nonce = FALSE,
+    scopes = c("openid", "profile")
+  )
+  cli@scope_validation <- "strict"
+  cli@provider@introspection_url <- "https://example.com/introspect"
+  cli@introspect <- TRUE
+  cli@introspect_elements <- "scope"
+
+  token <- OAuthToken(
+    access_token = "old",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = NA_character_
+  )
+
+  expect_refresh_introspection_error(
+    cli = cli,
+    token = token,
+    introspection_result = list(
+      supported = TRUE,
+      active = TRUE,
+      raw = list(),
+      status = "ok"
+    ),
+    regexp = "missing scope"
+  )
+})
+
+testthat::test_that("refresh_token rejects introspection token_type conflicts", {
+  key <- openssl::rsa_keygen()
+  jkt <- shinyOAuth:::compute_jwk_thumbprint(
+    shinyOAuth:::dpop_public_jwk(key)
+  )
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  cli@provider@introspection_url <- "https://example.com/introspect"
+  cli@introspect <- TRUE
+  cli@dpop_private_key <- key
+
+  token <- OAuthToken(
+    access_token = "old",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = NA_character_
+  )
+
+  testthat::with_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req$url),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(
+          '{"access_token":"new_at","token_type":"Bearer","expires_in":120}'
+        )
+      )
+    },
+    introspect_token = function(oauth_client, oauth_token, which, async, ...) {
+      list(
+        supported = TRUE,
+        active = TRUE,
+        raw = list(
+          token_type = "DPoP",
+          cnf = list(jkt = jkt)
+        ),
+        status = "ok"
+      )
+    },
+    .package = "shinyOAuth",
+    {
+      testthat::expect_error(
+        refresh_token(cli, token, async = FALSE, introspect = TRUE),
+        class = "shinyOAuth_token_error",
+        regexp = "token_type conflicts"
+      )
+    }
+  )
 })
 
 testthat::test_that("refresh_token validates token_type before fetching userinfo", {
@@ -135,7 +400,7 @@ testthat::test_that("refresh_token validates token_type before fetching userinfo
 
   calls <- list(token = 0L, userinfo = 0L)
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       url <- as.character(req$url)
       if (grepl("/token", url, fixed = TRUE)) {
         calls$token <<- calls$token + 1L
@@ -181,12 +446,14 @@ testthat::test_that("refresh_token treats expires_in = 0 as expiring now", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
         headers = list("content-type" = "application/json"),
-        body = charToRaw('{"access_token":"new_at","expires_in":0}')
+        body = charToRaw(
+          '{"access_token":"new_at","token_type":"Bearer","expires_in":0}'
+        )
       )
     },
     .package = "shinyOAuth"
@@ -216,12 +483,14 @@ testthat::test_that("refresh_token rejects negative expires_in", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
         headers = list("content-type" = "application/json"),
-        body = charToRaw('{"access_token":"new_at","expires_in":-1}')
+        body = charToRaw(
+          '{"access_token":"new_at","token_type":"Bearer","expires_in":-1}'
+        )
       )
     },
     .package = "shinyOAuth"
@@ -271,7 +540,7 @@ testthat::test_that("refresh_token succeeds with id_token_validation=TRUE when r
 
   # Mock a refresh response that does NOT include an id_token
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -368,7 +637,7 @@ testthat::test_that("refresh_token rejects new id_token with mismatched sub (OID
 
   # Mock refresh response returning the mismatched ID token
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         new_id_token
@@ -390,7 +659,8 @@ testthat::test_that("refresh_token rejects new id_token with mismatched sub (OID
     access_token = "old_at",
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
-    id_token = original_id_token
+    id_token = original_id_token,
+    id_token_validated = TRUE
   )
 
   # Should fail: new ID token has different sub than original
@@ -467,7 +737,7 @@ testthat::test_that("refresh_token accepts new id_token with matching sub (OIDC 
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         new_id_token
@@ -486,7 +756,8 @@ testthat::test_that("refresh_token accepts new id_token with matching sub (OIDC 
     access_token = "old_at",
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
-    id_token = original_id_token
+    id_token = original_id_token,
+    id_token_validated = TRUE
   )
 
   # Should succeed: sub matches
@@ -545,7 +816,7 @@ testthat::test_that("refresh_token rejects new id_token when original id_token i
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         new_id_token
@@ -618,7 +889,7 @@ testthat::test_that("refresh_token rejects new id_token when original id_token i
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         new_id_token
@@ -692,7 +963,7 @@ testthat::test_that("refresh_token preserves original id_token when refresh omit
 
   # Refresh response WITHOUT id_token
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -709,7 +980,8 @@ testthat::test_that("refresh_token preserves original id_token when refresh omit
     access_token = "old_at",
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
-    id_token = original_id_token
+    id_token = original_id_token,
+    id_token_validated = TRUE
   )
 
   t2 <- refresh_token(cli, t, async = FALSE, introspect = FALSE)
@@ -769,7 +1041,7 @@ testthat::test_that("refresh_token fails when original id_token is unparseable b
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         new_id_token
@@ -829,7 +1101,7 @@ testthat::test_that("refresh with id_token_required=TRUE succeeds when response 
 
   # Response without id_token
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
@@ -927,7 +1199,7 @@ testthat::test_that("refresh_token validates new id_token claims (issuer, aud, e
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         bad_issuer_token
@@ -1019,7 +1291,7 @@ testthat::test_that("refresh_token validates new id_token audience", {
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         bad_aud_token
@@ -1111,7 +1383,7 @@ testthat::test_that("refresh_token rejects expired new id_token", {
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       body <- sprintf(
         '{"access_token":"new_at","token_type":"Bearer","expires_in":3600,"id_token":"%s"}',
         expired_token
@@ -1186,7 +1458,8 @@ testthat::test_that("refresh_token validates userinfo_id_token_match when both p
     access_token = "old_at",
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
-    id_token = original_id_token
+    id_token = original_id_token,
+    id_token_validated = TRUE
   )
 
   # New ID token with correct sub
@@ -1209,7 +1482,7 @@ testthat::test_that("refresh_token validates userinfo_id_token_match when both p
 
   # Mock userinfo to return DIFFERENT subject - should fail validation
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       url <- as.character(req$url)
       if (grepl("userinfo", url, fixed = TRUE)) {
         # Userinfo returns different sub
@@ -1242,8 +1515,9 @@ testthat::test_that("refresh_token validates userinfo_id_token_match when both p
   )
 })
 
-testthat::test_that("refresh_token skips userinfo_id_token_match when id_token missing", {
-  # When refresh omits id_token but userinfo is fetched, skip the match check
+testthat::test_that("refresh_token errors when userinfo_id_token_match lacks an id_token baseline", {
+  # When refresh omits id_token and no original id_token is available,
+  # fail closed rather than storing unverifiable userinfo.
 
   prov <- oauth_provider(
     name = "oidc-example",
@@ -1280,7 +1554,7 @@ testthat::test_that("refresh_token skips userinfo_id_token_match when id_token m
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       url <- as.character(req$url)
       if (grepl("userinfo", url, fixed = TRUE)) {
         httr2::response(
@@ -1304,10 +1578,179 @@ testthat::test_that("refresh_token skips userinfo_id_token_match when id_token m
     .package = "shinyOAuth"
   )
 
-  # Should succeed - no id_token to match against
-  t2 <- refresh_token(cli, t, async = FALSE, introspect = FALSE)
-  testthat::expect_true(S7::S7_inherits(t2, OAuthToken))
-  testthat::expect_identical(t2@access_token, "new_at")
+  testthat::expect_error(
+    refresh_token(cli, t, async = FALSE, introspect = FALSE),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "validated ID token"
+  )
+})
+
+testthat::test_that("refresh_token rejects refreshed userinfo that mismatches preserved id_token", {
+  prov <- oauth_provider(
+    name = "oidc-example",
+    auth_url = "https://issuer.example.com/auth",
+    token_url = "https://issuer.example.com/token",
+    userinfo_url = "https://issuer.example.com/userinfo",
+    issuer = "https://issuer.example.com",
+    id_token_validation = TRUE,
+    id_token_required = FALSE,
+    userinfo_required = TRUE,
+    userinfo_id_token_match = TRUE,
+    userinfo_id_selector = function(ui) ui$sub,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    token_auth_style = "body"
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    )
+  )
+
+  original_payload <- list(
+    iss = "https://issuer.example.com",
+    sub = "user-123",
+    aud = "abc",
+    exp = as.numeric(Sys.time()) + 3600,
+    iat = as.numeric(Sys.time())
+  )
+  original_id_token <- paste(
+    shinyOAuth:::base64url_encode(charToRaw('{"alg":"none"}')),
+    shinyOAuth:::base64url_encode(charToRaw(jsonlite::toJSON(
+      original_payload,
+      auto_unbox = TRUE
+    ))),
+    "",
+    sep = "."
+  )
+
+  t <- OAuthToken(
+    access_token = "old_at",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = original_id_token,
+    id_token_validated = TRUE,
+    userinfo = list(sub = "user-123", name = "Old Name")
+  )
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      url <- as.character(req$url)
+      if (grepl("userinfo", url, fixed = TRUE)) {
+        httr2::response(
+          url = url,
+          status = 200,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw('{"sub":"different-user","name":"Imposter"}')
+        )
+      } else {
+        httr2::response(
+          url = url,
+          status = 200,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw(
+            '{"access_token":"new_at","token_type":"Bearer","expires_in":3600}'
+          )
+        )
+      }
+    },
+    .package = "shinyOAuth"
+  )
+
+  testthat::expect_error(
+    refresh_token(cli, t, async = FALSE, introspect = FALSE),
+    class = "shinyOAuth_userinfo_mismatch"
+  )
+})
+
+testthat::test_that("refresh_token still binds refreshed userinfo to a preserved validated id_token when the flag is FALSE", {
+  prov <- oauth_provider(
+    name = "oidc-example",
+    auth_url = "https://issuer.example.com/auth",
+    token_url = "https://issuer.example.com/token",
+    userinfo_url = "https://issuer.example.com/userinfo",
+    issuer = "https://issuer.example.com",
+    id_token_validation = TRUE,
+    id_token_required = FALSE,
+    userinfo_required = TRUE,
+    userinfo_id_token_match = FALSE,
+    userinfo_id_selector = function(ui) ui$sub,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    token_auth_style = "body"
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    state_store = cachem::cache_mem(max_age = 600),
+    state_key = paste0(
+      "0123456789abcdefghijklmnopqrstuvwxyz",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    )
+  )
+
+  original_payload <- list(
+    iss = "https://issuer.example.com",
+    sub = "user-123",
+    aud = "abc",
+    exp = as.numeric(Sys.time()) + 3600,
+    iat = as.numeric(Sys.time())
+  )
+  original_id_token <- paste(
+    shinyOAuth:::base64url_encode(charToRaw('{"alg":"none"}')),
+    shinyOAuth:::base64url_encode(charToRaw(jsonlite::toJSON(
+      original_payload,
+      auto_unbox = TRUE
+    ))),
+    "",
+    sep = "."
+  )
+
+  t <- OAuthToken(
+    access_token = "old_at",
+    refresh_token = "rt",
+    expires_at = as.numeric(Sys.time()) + 10,
+    id_token = original_id_token,
+    id_token_validated = TRUE,
+    userinfo = list(sub = "user-123", name = "Old Name")
+  )
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      url <- as.character(req$url)
+      if (grepl("userinfo", url, fixed = TRUE)) {
+        httr2::response(
+          url = url,
+          status = 200,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw('{"sub":"different-user","name":"Imposter"}')
+        )
+      } else {
+        httr2::response(
+          url = url,
+          status = 200,
+          headers = list("content-type" = "application/json"),
+          body = charToRaw(
+            '{"access_token":"new_at","token_type":"Bearer","expires_in":3600}'
+          )
+        )
+      }
+    },
+    .package = "shinyOAuth"
+  )
+
+  testthat::expect_error(
+    refresh_token(cli, t, async = FALSE, introspect = FALSE),
+    class = "shinyOAuth_userinfo_mismatch"
+  )
 })
 
 testthat::test_that("refresh_token succeeds when userinfo and id_token subjects match", {
@@ -1364,6 +1807,7 @@ testthat::test_that("refresh_token succeeds when userinfo and id_token subjects 
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
     id_token = original_id_token,
+    id_token_validated = TRUE,
     userinfo = list(sub = "user-123", name = "Old Name")
   )
 
@@ -1387,7 +1831,7 @@ testthat::test_that("refresh_token succeeds when userinfo and id_token subjects 
 
   # Mock userinfo to return MATCHING subject with updated info
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       url <- as.character(req$url)
       if (grepl("userinfo", url, fixed = TRUE)) {
         httr2::response(
@@ -1426,10 +1870,9 @@ testthat::test_that("refresh_token succeeds when userinfo and id_token subjects 
   testthat::expect_identical(t2@id_token, new_id_token)
 })
 
-testthat::test_that("refresh_token updates userinfo even when id_token omitted", {
-  # When refresh omits id_token but userinfo_required is TRUE,
-
-  # userinfo should still be fetched and updated
+testthat::test_that("refresh_token updates userinfo when it matches the preserved id_token", {
+  # When refresh omits id_token, refreshed userinfo can still be stored if it
+  # matches the preserved original id_token subject.
 
   prov <- oauth_provider(
     name = "oidc-example",
@@ -1480,11 +1923,12 @@ testthat::test_that("refresh_token updates userinfo even when id_token omitted",
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
     id_token = original_id_token,
+    id_token_validated = TRUE,
     userinfo = list(sub = "user-123", name = "Old Name")
   )
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       url <- as.character(req$url)
       if (grepl("userinfo", url, fixed = TRUE)) {
         httr2::response(
@@ -1511,9 +1955,9 @@ testthat::test_that("refresh_token updates userinfo even when id_token omitted",
   t2 <- refresh_token(cli, t, async = FALSE, introspect = FALSE)
   testthat::expect_true(S7::S7_inherits(t2, OAuthToken))
   testthat::expect_identical(t2@access_token, "new_at")
-  # Userinfo should be updated with fresh data
+  # Userinfo should be updated with fresh data.
   testthat::expect_identical(t2@userinfo$name, "Fresh Name")
-  # Original id_token should be preserved (refresh didn't return a new one)
+  # Original id_token should be preserved when refresh omits a new one.
   testthat::expect_identical(t2@id_token, original_id_token)
 })
 
@@ -1524,7 +1968,8 @@ testthat::test_that("refresh_token updates userinfo even when id_token omitted",
 testthat::test_that("refresh_token succeeds when provider omits scope (RFC 6749 §6)", {
   # Per RFC 6749 Section 6, providers MAY omit scope from refresh responses
 
-  # when unchanged. With is_refresh=TRUE and scope=NULL, we skip validation.
+  # when unchanged. Keep the prior grant instead of widening back to the
+  # client's configured scopes.
   cli <- make_test_client(
     use_pkce = TRUE,
     use_nonce = FALSE,
@@ -1533,14 +1978,14 @@ testthat::test_that("refresh_token succeeds when provider omits scope (RFC 6749 
   cli@scope_validation <- "strict"
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
         headers = list("content-type" = "application/json"),
         # Provider omits scope from refresh response
         body = charToRaw(
-          '{"access_token":"refreshed_at","expires_in":3600}'
+          '{"access_token":"refreshed_at","token_type":"Bearer","expires_in":3600}'
         )
       )
     },
@@ -1551,13 +1996,17 @@ testthat::test_that("refresh_token succeeds when provider omits scope (RFC 6749 
     access_token = "old_at",
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
-    id_token = NA_character_
+    id_token = NA_character_,
+    granted_scopes = c("openid", "profile"),
+    granted_scopes_verified = TRUE
   )
 
   # Should NOT error even with strict scope_validation
   t2 <- refresh_token(cli, t, async = FALSE, introspect = FALSE)
   testthat::expect_true(S7::S7_inherits(t2, OAuthToken))
   testthat::expect_identical(t2@access_token, "refreshed_at")
+  testthat::expect_identical(t2@granted_scopes, c("openid", "profile"))
+  testthat::expect_false(t2@granted_scopes_verified)
 })
 
 testthat::test_that("refresh_token validates scope when provider returns it", {
@@ -1569,14 +2018,14 @@ testthat::test_that("refresh_token validates scope when provider returns it", {
   cli@scope_validation <- "strict"
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
         headers = list("content-type" = "application/json"),
         # Provider returns scope matching requested scopes
         body = charToRaw(
-          '{"access_token":"refreshed_at","scope":"openid profile email","expires_in":3600}'
+          '{"access_token":"refreshed_at","token_type":"Bearer","scope":"openid profile email","expires_in":3600}'
         )
       )
     },
@@ -1587,12 +2036,19 @@ testthat::test_that("refresh_token validates scope when provider returns it", {
     access_token = "old_at",
     refresh_token = "rt",
     expires_at = as.numeric(Sys.time()) + 10,
-    id_token = NA_character_
+    id_token = NA_character_,
+    granted_scopes = c("openid", "profile"),
+    granted_scopes_verified = TRUE
   )
 
   t2 <- refresh_token(cli, t, async = FALSE, introspect = FALSE)
   testthat::expect_true(S7::S7_inherits(t2, OAuthToken))
   testthat::expect_identical(t2@access_token, "refreshed_at")
+  testthat::expect_identical(
+    t2@granted_scopes,
+    c("email", "openid", "profile")
+  )
+  testthat::expect_true(t2@granted_scopes_verified)
 })
 
 testthat::test_that("refresh_token errors when provider returns reduced scope (strict)", {
@@ -1604,14 +2060,14 @@ testthat::test_that("refresh_token errors when provider returns reduced scope (s
   cli@scope_validation <- "strict"
 
   testthat::local_mocked_bindings(
-    req_with_retry = function(req) {
+    req_with_retry = function(req, ...) {
       httr2::response(
         url = as.character(req$url),
         status = 200,
         headers = list("content-type" = "application/json"),
         # Provider returns only subset of requested scopes
         body = charToRaw(
-          '{"access_token":"refreshed_at","scope":"openid profile","expires_in":3600}'
+          '{"access_token":"refreshed_at","token_type":"Bearer","scope":"openid profile","expires_in":3600}'
         )
       )
     },
