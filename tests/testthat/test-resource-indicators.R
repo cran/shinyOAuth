@@ -4,15 +4,15 @@ count_fixed_matches <- function(text, pattern) {
 }
 
 request_body_text <- function(req) {
-  body <- req$body %||% NULL
+  body <- req[["body"]] %||% NULL
   if (is.null(body)) {
     return(NA_character_)
   }
-  if (identical(body$type, "raw")) {
-    return(rawToChar(body$data))
+  if (identical(body[["type"]], "raw")) {
+    return(rawToChar(body[["data"]]))
   }
-  if (identical(body$type, "form")) {
-    data <- body$data %||% list()
+  if (identical(body[["type"]], "form")) {
+    data <- body[["data"]] %||% list()
     if (!length(data)) {
       return("")
     }
@@ -75,6 +75,35 @@ test_that("prepare_call includes repeated RFC 8707 resource indicators", {
   expect_match(auth_url, "resource=urn%3Aexample%3Aledger")
 })
 
+test_that("repeated form fields encode literal percent escapes and delimiters", {
+  params <- list(
+    "na%41&me" = c(
+      "value%41&code_verifier=attack +:#",
+      "caf\u00e9%"
+    )
+  )
+
+  encoded <- shinyOAuth:::encode_www_form_params(params)
+  fields <- strsplit(encoded, "&", fixed = TRUE)[[1]]
+  decoded <- lapply(fields, function(field) {
+    pair <- strsplit(field, "=", fixed = TRUE)[[1]]
+    c(
+      utils::URLdecode(gsub("+", " ", pair[[1]], fixed = TRUE)),
+      utils::URLdecode(gsub("+", " ", pair[[2]], fixed = TRUE))
+    )
+  })
+
+  expect_length(fields, 2L)
+  expect_identical(vapply(decoded, `[[`, "", 1L), rep("na%41&me", 2L))
+  expect_identical(
+    decoded[[1]][[2]],
+    "value%41&code_verifier=attack +:#"
+  )
+  expect_match(encoded, "%2541")
+  expect_match(encoded, "%26code_verifier%3Dattack")
+  expect_match(encoded, "caf%C3%A9%25")
+})
+
 test_that("swap_code_for_token_set sends resource indicators in token body", {
   cli <- make_test_client(
     resource = c(
@@ -88,7 +117,7 @@ test_that("swap_code_for_token_set sends resource indicators in token body", {
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -106,7 +135,7 @@ test_that("swap_code_for_token_set sends resource indicators in token body", {
     }
   )
 
-  expect_identical(token_set$access_token, "at")
+  expect_identical(token_set[["access_token"]], "at")
   expect_identical(count_fixed_matches(body_text, "resource="), 2L)
   expect_match(body_text, "resource=https%3A%2F%2Fapi\\.example\\.com")
   expect_match(body_text, "resource=urn%3Aexample%3Aledger")
@@ -125,7 +154,7 @@ test_that("refresh_token sends resource indicators in refresh body", {
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(

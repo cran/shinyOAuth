@@ -22,12 +22,35 @@ client_has_dpop <- function(client) {
   !is.null(client@dpop_private_key)
 }
 
-# Cache DPoP nonces per issuing server, request class, and client key so later
-# requests can reuse server-provided nonces across same-server endpoints without
-# mixing token-endpoint and protected-resource nonce state. Bound the cache by
+# Cache DPoP nonces per issuer, endpoint path, request class, and client key.
+# An origin can host independent tenants and resource protection spaces; reuse
+# is conservatively limited to the same endpoint. Bound the cache by
 # age and entry count so long-lived apps do not accumulate unbounded state.
 dpop_nonce_cache <- cachem::cache_mem(max_age = 300, max_n = 256, evict = "lru")
-dpop_nonce_max_bytes <- 512L
+
+#' Resolve the local DPoP nonce resource limit
+#'
+#' RFC 9449 specifies nonce syntax but no maximum length. Operators can raise
+#' this implementation limit for their provider without unbounded cache growth.
+#' @return Maximum nonce length in bytes.
+#' @keywords internal
+#' @noRd
+dpop_nonce_max_bytes <- function() {
+  limit <- getOption("shinyOAuth.dpop_nonce_max_bytes", 4096L)
+  if (
+    !is.numeric(limit) ||
+      length(limit) != 1L ||
+      !is.finite(limit) ||
+      limit < 1 ||
+      limit > 65536 ||
+      limit != floor(limit)
+  ) {
+    err_config(
+      "shinyOAuth.dpop_nonce_max_bytes must be an integer from 1 to 65536"
+    )
+  }
+  as.integer(limit)
+}
 
 #' Normalize a DPoP nonce value
 #'
@@ -45,7 +68,7 @@ normalize_dpop_nonce <- function(nonce) {
   }
 
   nonce <- as.character(nonce[[1]])
-  if (!nzchar(nonce) || nchar(nonce, type = "bytes") > dpop_nonce_max_bytes) {
+  if (!nzchar(nonce) || nchar(nonce, type = "bytes") > dpop_nonce_max_bytes()) {
     return(NA_character_)
   }
 
@@ -94,25 +117,7 @@ dpop_nonce_cache_key <- function(
 
   request_kind <- match.arg(request_kind)
 
-  parsed <- try(httr2::url_parse(url), silent = TRUE)
-  if (inherits(parsed, "try-error")) {
-    return(NA_character_)
-  }
-  parsed$query <- NULL
-  parsed$fragment <- NULL
-  parsed$path <- "/"
-  parsed$scheme <- tolower(parsed$scheme %||% "")
-  parsed$hostname <- tolower(parsed$hostname %||% "")
-
-  port <- as.character(parsed$port %||% "")
-  if (identical(parsed$scheme, "https") && identical(port, "443")) {
-    parsed$port <- NULL
-  }
-  if (identical(parsed$scheme, "http") && identical(port, "80")) {
-    parsed$port <- NULL
-  }
-
-  server_uri <- try(httr2::url_build(parsed), silent = TRUE)
+  server_uri <- try(dpop_target_uri(url), silent = TRUE)
   if (inherits(server_uri, "try-error") || !is_valid_string(server_uri)) {
     return(NA_character_)
   }
@@ -128,6 +133,8 @@ dpop_nonce_cache_key <- function(
 
   cache_input <- paste(
     server_uri,
+    client@provider@issuer,
+    paste(sort(unique(client@resource)), collapse = " "),
     request_kind,
     client_id_key,
     dpop_jkt,
@@ -161,11 +168,11 @@ dpop_nonce_cache_get <- function(
   if (!is_valid_string(cache_key)) {
     return(NULL)
   }
-  if (!isTRUE(dpop_nonce_cache$exists(cache_key))) {
+  if (!isTRUE(dpop_nonce_cache[["exists"]](cache_key))) {
     return(NULL)
   }
 
-  nonce <- dpop_nonce_cache$get(cache_key)
+  nonce <- dpop_nonce_cache[["get"]](cache_key)
   nonce <- normalize_dpop_nonce(nonce)
   if (!is_valid_string(nonce)) {
     return(NULL)
@@ -198,7 +205,7 @@ dpop_nonce_cache_set <- function(
     return(invisible(nonce))
   }
 
-  dpop_nonce_cache$set(cache_key, nonce)
+  dpop_nonce_cache[["set"]](cache_key, nonce)
   invisible(nonce)
 }
 
@@ -263,7 +270,7 @@ client_dpop_jkt <- function(client) {
 #' @param token Optional [OAuthToken] object or raw access-token string.
 #' @param access_token Optional raw access-token string.
 #' @param cnf Optional explicit cnf claim data.
-#' @return `cnf$jkt` as a scalar string, or `NA_character_` when absent.
+#' @return `cnf[["jkt"]]` as a scalar string, or `NA_character_` when absent.
 #' @keywords internal
 #' @noRd
 token_cnf_jkt <- function(token = NULL, access_token = NULL, cnf = NULL) {
@@ -288,9 +295,8 @@ token_cnf_jkt <- function(token = NULL, access_token = NULL, cnf = NULL) {
 
 #' Detect whether DPoP cnf.jkt was observable on a token surface
 #'
-#' Used by strict DPoP validation to distinguish opaque access tokens that do
-#' not expose confirmation data from JWT or introspection-based surfaces that
-#' should reveal a `cnf$jkt` binding when one exists.
+#' Used to defer a required binding observation until introspection when no
+#' actual `cnf[["jkt"]]` has been supplied by a configured token surface.
 #'
 #' @param access_token Optional raw access-token string.
 #' @param cnf Optional explicit cnf claim data.
@@ -304,32 +310,14 @@ token_dpop_cnf_observable <- function(
   cnf = NULL,
   introspection_result = NULL
 ) {
-  if (is.list(cnf) && length(cnf) > 0L) {
-    return(TRUE)
-  }
-
-  if (is_valid_string(access_token)) {
-    payload <- parse_jwt_payload_or_null(access_token)
-    if (is.list(payload)) {
-      return(TRUE)
-    }
-  }
-
-  raw <- NULL
-  if (is.list(introspection_result)) {
-    raw <- introspection_result$raw %||% NULL
-    if (is.data.frame(raw)) {
-      raw <- as.list(raw)
-    }
-  }
-
-  is.list(raw)
+  resolved <- resolve_token_cnf(cnf, access_token, introspection_result)
+  is_valid_string(resolved[["jkt"]])
 }
 
 #' Require observable DPoP cnf.jkt in strict mode
 #'
-#' Used when `dpop_require_access_token = TRUE` so JWT access tokens and token
-#' introspection results fail closed if they expose no `cnf$jkt` binding.
+#' Used only when `dpop_require_observed_cnf = TRUE`. Token type enforcement
+#' is independent of the access token's internal representation.
 #'
 #' @param oauth_client Optional [OAuthClient] expected to own the DPoP key.
 #' @param token Optional [OAuthToken] object.
@@ -345,6 +333,7 @@ validate_observed_dpop_cnf_required <- function(
   oauth_client,
   token = NULL,
   access_token = NULL,
+  token_type = NULL,
   cnf = NULL,
   introspection_result = NULL,
   error_context = c("input", "token"),
@@ -355,21 +344,19 @@ validate_observed_dpop_cnf_required <- function(
   if (S7::S7_inherits(token, class = OAuthToken)) {
     cnf <- token@cnf
     access_token <- token@access_token
+    token_type <- token@token_type %||% token_type
   }
 
-  if (
-    !S7::S7_inherits(oauth_client, class = OAuthClient) ||
-      !isTRUE(oauth_client@dpop_require_access_token)
-  ) {
+  if (!S7::S7_inherits(oauth_client, class = OAuthClient)) {
     return(invisible(TRUE))
   }
 
+  require_observed_cnf <- isTRUE(oauth_client@dpop_require_observed_cnf)
+  if (!require_observed_cnf) {
+    return(invisible(TRUE))
+  }
   if (
-    !token_dpop_cnf_observable(
-      access_token = access_token,
-      cnf = cnf,
-      introspection_result = introspection_result
-    )
+    require_observed_cnf && !is_dpop_token_type(token_type %||% NA_character_)
   ) {
     return(invisible(TRUE))
   }
@@ -381,6 +368,25 @@ validate_observed_dpop_cnf_required <- function(
       err_token(message, context = compact_list(list(phase = phase)))
     }
   )
+
+  if (
+    !token_dpop_cnf_observable(
+      access_token = access_token,
+      cnf = cnf,
+      introspection_result = introspection_result
+    )
+  ) {
+    if (require_observed_cnf) {
+      fail(c(
+        "x" = "Expected observable token cnf.jkt for a DPoP access token",
+        "i" = paste(
+          "dpop_require_observed_cnf = TRUE rejects DPoP access tokens",
+          "unless cnf.jkt is visible in the token or introspection response."
+        )
+      ))
+    }
+    return(invisible(TRUE))
+  }
 
   validate_token_cnf_consistency(
     access_token = access_token,
@@ -402,8 +408,8 @@ validate_observed_dpop_cnf_required <- function(
   fail(c(
     "x" = "Expected observable token cnf.jkt for a strict DPoP access token",
     "i" = paste(
-      "dpop_require_access_token = TRUE rejects JWT or introspection-backed",
-      "DPoP access tokens that do not expose a local key binding."
+      "dpop_require_observed_cnf = TRUE requires a local cnf.jkt binding",
+      "from a configured token surface."
     )
   ))
 }
@@ -521,6 +527,17 @@ dpop_public_jwk <- function(key) {
   if (inherits(pub, "try-error")) {
     err_config("Failed to derive public key from dpop_private_key")
   }
+  if (inherits(pub, "ed25519")) {
+    public_bytes <- as.list(pub)[["data"]]
+    if (!is.raw(public_bytes) || length(public_bytes) != 32L) {
+      err_config("Invalid Ed25519 public key")
+    }
+    return(canonicalize_local_public_jwk(list(
+      kty = "OKP",
+      crv = "Ed25519",
+      x = base64url_encode(public_bytes)
+    )))
+  }
 
   jwk_json <- try(jose::jwk_write(pub), silent = TRUE)
   if (inherits(jwk_json, "try-error")) {
@@ -545,7 +562,7 @@ dpop_public_jwk <- function(key) {
     )
   }
 
-  jwk
+  canonicalize_local_public_jwk(jwk)
 }
 
 #' Normalize a DPoP target URI
@@ -567,20 +584,38 @@ dpop_target_uri <- function(url) {
     err_input("Failed to parse DPoP target URL")
   }
 
-  parsed$query <- NULL
-  parsed$fragment <- NULL
-  parsed$scheme <- tolower(parsed$scheme %||% "")
-  parsed$hostname <- tolower(parsed$hostname %||% "")
+  parsed[["query"]] <- NULL
+  parsed[["fragment"]] <- NULL
+  parsed[["scheme"]] <- tolower(parsed[["scheme"]] %||% "")
+  parsed[["hostname"]] <- tolower(
+    parsed[["hostname"]] %||% ""
+  )
 
-  port <- as.character(parsed$port %||% "")
-  if (identical(parsed$scheme, "https") && identical(port, "443")) {
-    parsed$port <- NULL
+  port <- as.character(parsed[["port"]] %||% "")
+  if (
+    identical(parsed[["scheme"]], "https") &&
+      identical(port, "443")
+  ) {
+    parsed[["port"]] <- NULL
   }
-  if (identical(parsed$scheme, "http") && identical(port, "80")) {
-    parsed$port <- NULL
+  if (identical(parsed[["scheme"]], "http") && identical(port, "80")) {
+    parsed[["port"]] <- NULL
   }
 
-  httr2::url_build(parsed)
+  # url_parse() decodes the path, and url_build() can turn an escaped reserved
+  # delimiter into a literal one. Retain the wire path for RFC 9449 binding.
+  hostname <- parsed[["hostname"]]
+  if (grepl(":", hostname, fixed = TRUE) && !startsWith(hostname, "[")) {
+    hostname <- paste0("[", hostname, "]")
+  }
+  port <- parsed[["port"]]
+  paste0(
+    parsed[["scheme"]],
+    "://",
+    hostname,
+    if (!is.null(port) && nzchar(port)) paste0(":", port) else "",
+    url_raw_path(url)
+  )
 }
 
 #' Compute the DPoP access-token hash
@@ -635,7 +670,7 @@ build_dpop_proof <- function(
       paste(
         "DPoP nonce must be a single RFC 9449 nonce using visible ASCII",
         "without spaces, double quotes, or backslashes, and no more than",
-        dpop_nonce_max_bytes,
+        dpop_nonce_max_bytes(),
         "bytes"
       )
     )
@@ -663,25 +698,25 @@ build_dpop_proof <- function(
 
   kid <- client@dpop_private_key_kid %||% NA_character_
   if (is.character(kid) && length(kid) == 1L && !is.na(kid) && nzchar(kid)) {
-    header$kid <- kid
+    header[["kid"]] <- kid
   }
 
   claims <- list(
     jti = random_urlsafe(32),
     htm = toupper(as.character(method %||% "GET")[[1]]),
     htu = dpop_target_uri(as.character(url)[[1]]),
-    iat = as.integer(floor(as.numeric(Sys.time())))
+    iat = floor(as.numeric(Sys.time()))
   )
   if (is_valid_string(access_token)) {
-    claims$ath <- dpop_access_token_hash(access_token)
+    claims[["ath"]] <- dpop_access_token_hash(access_token)
   }
   if (is_valid_string(nonce)) {
-    claims$nonce <- nonce
+    claims[["nonce"]] <- nonce
   }
 
   clm <- do.call(jose::jwt_claim, claims)
   proof <- try(
-    jose::jwt_encode_sig(clm, key = key, header = header),
+    encode_asymmetric_jwt_with_header(clm, key = key, header = header),
     silent = TRUE
   )
   if (inherits(proof, "try-error")) {
@@ -722,7 +757,7 @@ req_add_dpop_proof <- function(
     return(req)
   }
 
-  method <- req$method %||% "GET"
+  method <- resolve_client_bearer_method(req = req)
   url <- req[["url"]] %||% NA_character_
   if (!is_valid_string(url)) {
     err_config("Request URL missing while building DPoP proof")
@@ -763,8 +798,135 @@ resp_get_dpop_nonce <- function(resp) {
   if (inherits(nonce, "try-error")) {
     return(NA_character_)
   }
-
+  if (
+    is_valid_string(nonce) &&
+      nchar(nonce, type = "bytes") > dpop_nonce_max_bytes()
+  ) {
+    err_token(paste0(
+      "DPoP-Nonce response header exceeds the configured ",
+      "shinyOAuth.dpop_nonce_max_bytes limit (",
+      dpop_nonce_max_bytes(),
+      " bytes)"
+    ))
+  }
   normalize_dpop_nonce(as.character(nonce)[1])
+}
+
+#' Parse HTTP authentication challenges
+#'
+#' Splits a `WWW-Authenticate` field without treating commas inside quoted
+#' strings as challenge separators, then associates authentication parameters
+#' with their scheme. This is intentionally small, but follows the challenge
+#' and auth-param shape from RFC 9110 Section 11.2 closely enough to avoid
+#' substring matching across schemes or parameter values.
+#'
+#' @param value A `WWW-Authenticate` field value.
+#' @return A list of challenges, each containing `scheme` and named `params`.
+#' @keywords internal
+#' @noRd
+parse_http_auth_challenges <- function(value) {
+  if (!is_valid_string(value)) {
+    return(list())
+  }
+
+  chars <- strsplit(value, "", fixed = TRUE)[[1]]
+  parts <- character()
+  current <- character()
+  quoted <- FALSE
+  escaped <- FALSE
+  for (ch in chars) {
+    if (escaped) {
+      current <- c(current, ch)
+      escaped <- FALSE
+      next
+    }
+    if (quoted && identical(ch, "\\")) {
+      current <- c(current, ch)
+      escaped <- TRUE
+      next
+    }
+    if (identical(ch, '"')) {
+      quoted <- !quoted
+      current <- c(current, ch)
+      next
+    }
+    if (!quoted && identical(ch, ",")) {
+      parts <- c(parts, paste0(current, collapse = ""))
+      current <- character()
+      next
+    }
+    current <- c(current, ch)
+  }
+  parts <- trimws(c(parts, paste0(current, collapse = "")))
+  parts <- parts[nzchar(parts)]
+
+  token_pattern <- "[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+  challenges <- list()
+  current_challenge <- NULL
+  for (part in parts) {
+    scheme_match <- regexec(
+      paste0("^(?i:((?:", token_pattern, ")))(?:[ \\t]+(.*))?$"),
+      part,
+      perl = TRUE
+    )
+    scheme_fields <- regmatches(part, scheme_match)[[1]]
+    is_new_challenge <- length(scheme_fields) > 0L
+    if (is_new_challenge && length(scheme_fields) >= 3L) {
+      remainder <- trimws(scheme_fields[[3]])
+      if (startsWith(remainder, "=")) {
+        is_new_challenge <- FALSE
+      }
+    }
+
+    if (is_new_challenge) {
+      if (!is.null(current_challenge)) {
+        challenges[[length(challenges) + 1L]] <- current_challenge
+      }
+      current_challenge <- list(
+        scheme = scheme_fields[[2]],
+        param_parts = character()
+      )
+      if (length(scheme_fields) >= 3L && nzchar(trimws(scheme_fields[[3]]))) {
+        current_challenge[["param_parts"]] <- trimws(scheme_fields[[3]])
+      }
+    } else if (!is.null(current_challenge)) {
+      current_challenge[["param_parts"]] <- c(
+        current_challenge[["param_parts"]],
+        part
+      )
+    }
+  }
+  if (!is.null(current_challenge)) {
+    challenges[[length(challenges) + 1L]] <- current_challenge
+  }
+
+  lapply(challenges, function(challenge) {
+    params <- list()
+    for (part in challenge[["param_parts"]]) {
+      param_match <- regexec(
+        paste0(
+          "^(",
+          token_pattern,
+          ")\\s*=\\s*(?:\"((?:\\\\.|[^\"\\\\])*)\"|(",
+          token_pattern,
+          "))\\s*$"
+        ),
+        part,
+        perl = TRUE
+      )
+      fields <- regmatches(part, param_match)[[1]]
+      if (length(fields) == 0L) {
+        next
+      }
+      param_value <- if (nzchar(fields[[3]])) {
+        gsub("\\\\(.)", "\\1", fields[[3]], perl = TRUE)
+      } else {
+        fields[[4]]
+      }
+      params[[tolower(fields[[2]])]] <- param_value
+    }
+    list(scheme = challenge[["scheme"]], params = params)
+  })
 }
 
 #' Detect a DPoP nonce challenge
@@ -782,33 +944,45 @@ resp_is_dpop_nonce_challenge <- function(resp) {
     return(FALSE)
   }
 
-  body <- try(
-    httr2::resp_body_json(resp, simplifyVector = TRUE),
-    silent = TRUE
-  )
-  if (is.list(body)) {
-    err <- body$error %||% NA_character_
-    if (
-      is.character(err) &&
-        length(err) == 1L &&
-        identical(err, "use_dpop_nonce")
-    ) {
-      return(TRUE)
+  status <- try(httr2::resp_status(resp), silent = TRUE)
+  if (inherits(status, "try-error") || !status %in% c(400L, 401L)) {
+    return(FALSE)
+  }
+
+  if (identical(status, 400L)) {
+    body <- try(
+      httr2::resp_body_json(resp, simplifyVector = TRUE),
+      silent = TRUE
+    )
+    if (is.list(body)) {
+      err <- body[["error"]] %||% NA_character_
+      if (
+        is.character(err) &&
+          length(err) == 1L &&
+          identical(err, "use_dpop_nonce")
+      ) {
+        return(TRUE)
+      }
     }
+    return(FALSE)
   }
 
   www_authenticate <- try(
     httr2::resp_header(resp, "www-authenticate"),
     silent = TRUE
   )
-  !inherits(www_authenticate, "try-error") &&
-    is_valid_string(www_authenticate) &&
-    grepl(
-      "use_dpop_nonce",
-      www_authenticate,
-      fixed = TRUE,
-      ignore.case = TRUE
-    )
+  if (inherits(www_authenticate, "try-error")) {
+    return(FALSE)
+  }
+  challenges <- parse_http_auth_challenges(www_authenticate)
+  any(vapply(
+    challenges,
+    function(challenge) {
+      identical(tolower(challenge[["scheme"]]), "dpop") &&
+        identical(challenge[["params"]][["error"]] %||% NULL, "use_dpop_nonce")
+    },
+    logical(1)
+  ))
 }
 
 #' Retry a DPoP-protected request once with a fresh nonce
@@ -839,9 +1013,27 @@ req_with_dpop_retry <- function(
 
   url <- req[["url"]] %||% NA_character_
   request_kind <- if (is_valid_string(access_token)) "resource" else "token"
-  prior_prepare_attempt <- req$shinyOAuth_prepare_attempt %||% NULL
+  prior_prepare_attempt <- req[["shinyOAuth_prepare_attempt"]] %||% NULL
+  prior_response_observer <- req[["shinyOAuth_response_observer"]] %||% NULL
+  current_nonce <- nonce
 
-  build_prepare_attempt <- function(nonce_value) {
+  # RFC 9449 permits a fresh nonce on any response, including transient errors.
+  # Observe each response before the generic loop builds the next proof.
+  req[["shinyOAuth_response_observer"]] <- function(resp) {
+    received_nonce <- resp_get_dpop_nonce(resp)
+    if (is_valid_string(received_nonce)) {
+      current_nonce <<- received_nonce
+      dpop_nonce_cache_set(
+        client,
+        url,
+        received_nonce,
+        request_kind = request_kind
+      )
+    }
+    if (is.function(prior_response_observer)) prior_response_observer(resp)
+  }
+
+  build_prepare_attempt <- function() {
     function(attempt_req, attempt) {
       if (is.function(prior_prepare_attempt)) {
         attempt_req <- prior_prepare_attempt(attempt_req, attempt)
@@ -851,7 +1043,7 @@ req_with_dpop_retry <- function(
         attempt_req,
         client,
         access_token = access_token,
-        nonce = nonce_value
+        nonce = current_nonce
       )
     }
   }
@@ -862,7 +1054,7 @@ req_with_dpop_retry <- function(
     access_token = access_token,
     nonce = nonce
   )
-  req_with_proof$shinyOAuth_prepare_attempt <- build_prepare_attempt(nonce)
+  req_with_proof[["shinyOAuth_prepare_attempt"]] <- build_prepare_attempt()
 
   resp <- req_with_retry(
     req_with_proof,
@@ -890,13 +1082,14 @@ req_with_dpop_retry <- function(
     return(resp)
   }
 
+  current_nonce <- nonce
   retry_req <- req_add_dpop_proof(
     req,
     client,
     access_token = access_token,
     nonce = nonce
   )
-  retry_req$shinyOAuth_prepare_attempt <- build_prepare_attempt(nonce)
+  retry_req[["shinyOAuth_prepare_attempt"]] <- build_prepare_attempt()
 
   resp <- req_with_retry(retry_req, idempotent = idempotent)
 

@@ -27,7 +27,7 @@ mk_client <- function(extra_auth_params = list()) {
     issuer = "https://issuer.example.com",
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("RS256", "ES256"),
+    id_token_allowed_algs = c("RS256", "ES256"),
     leeway = 5,
     extra_auth_params = extra_auth_params
   )
@@ -58,12 +58,45 @@ test_that("oauth_provider validates extra_auth_params$max_age early", {
         issuer = "https://issuer.example.com",
         id_token_validation = TRUE,
         id_token_required = TRUE,
-        allowed_algs = c("RS256", "ES256"),
+        id_token_allowed_algs = c("RS256", "ES256"),
         extra_auth_params = list(max_age = bad_value)
       ),
       regexp = "extra_auth_params\\$max_age"
     )
   }
+})
+
+
+test_that("prepare_call binds the normalized transmitted max_age to state", {
+  client <- mk_client(extra_auth_params = list(max_age = "0"))
+
+  auth_url <- shinyOAuth:::prepare_call(
+    client,
+    browser_token = valid_browser_token()
+  )
+  encrypted_state <- parse_query_param(auth_url, "state")
+  state <- shinyOAuth:::state_decrypt_gcm(
+    encrypted_state,
+    key = client@state_key
+  )
+
+  expect_identical(parse_query_param(auth_url, "max_age", decode = TRUE), "0")
+  expect_equal(state[["max_age"]], 0)
+})
+
+
+test_that("max_age changes provider and callback-policy fingerprints", {
+  without_max_age <- mk_client()
+  with_max_age <- mk_client(extra_auth_params = list(max_age = 0))
+
+  expect_false(identical(
+    shinyOAuth:::provider_fingerprint(without_max_age@provider),
+    shinyOAuth:::provider_fingerprint(with_max_age@provider)
+  ))
+  expect_false(identical(
+    shinyOAuth:::state_client_policy_fingerprint(without_max_age),
+    shinyOAuth:::state_client_policy_fingerprint(with_max_age)
+  ))
 })
 
 
@@ -270,11 +303,41 @@ test_that("validate_id_token works with max_age = 0 (equivalent to prompt=login)
 })
 
 
-test_that("validate_id_token ignores auth_time when max_age is not requested", {
+test_that("optional auth_time respects the clock-skew boundary without max_age", {
+  client <- mk_client()
+  fixed_now <- as.POSIXct(1800000000, origin = "1970-01-01", tz = "UTC")
+  local_mocked_bindings(Sys.time = function() fixed_now, .package = "base")
+  local_options(shinyOAuth.skip_id_sig = TRUE)
+  now <- as.numeric(fixed_now)
+  for (offset in c(-99999, -1, 0, 5, 6, 3600)) {
+    jwt <- build_jwt(
+      list(alg = "none"),
+      list(
+        iss = client@provider@issuer,
+        aud = client@client_id,
+        sub = "user-1",
+        iat = now - 1,
+        exp = now + 300,
+        auth_time = now + offset
+      )
+    )
+    if (offset <= client@provider@leeway) {
+      expect_silent(validate_id_token(client, jwt, max_age = NULL))
+    } else {
+      expect_error(
+        validate_id_token(client, jwt, max_age = NULL),
+        "auth_time is in the future",
+        class = "shinyOAuth_id_token_error"
+      )
+    }
+  }
+})
+
+test_that("validate_id_token validates optional auth_time without max_age", {
   client <- mk_client()
   now <- floor(as.numeric(Sys.time()))
 
-  # auth_time present but very old; without max_age, no validation occurs
+  # A valid but very old auth_time is accepted because age is not enforced.
   jwt <- build_jwt(
     list(alg = "none"),
     list(
@@ -291,16 +354,42 @@ test_that("validate_id_token ignores auth_time when max_age is not requested", {
     expect_silent(
       shinyOAuth:::validate_id_token(client, jwt)
     )
+
+    bad_auth_times <- list(
+      "123",
+      list(value = 123),
+      I(c(123, 124)),
+      NULL
+    )
+    for (bad_auth_time in bad_auth_times) {
+      invalid_jwt <- build_jwt(
+        list(alg = "none"),
+        list(
+          iss = "https://issuer.example.com",
+          aud = "client-xyz",
+          sub = "user-1",
+          exp = now + 300,
+          iat = now - 1,
+          auth_time = bad_auth_time
+        )
+      )
+      expect_error(
+        shinyOAuth:::validate_id_token(client, invalid_jwt),
+        regexp = "auth_time claim must be a single finite number"
+      )
+    }
   })
 })
 
 
-# --- verify_token_set: max_age propagation from extra_auth_params ---
+# --- verify_token_set: transaction-bound max_age propagation ---
 
-test_that("verify_token_set passes max_age from extra_auth_params to validate_id_token", {
+test_that("verify_token_set uses the max_age bound to the transaction", {
   now <- floor(as.numeric(Sys.time()))
 
-  client <- mk_client(extra_auth_params = list(max_age = 300))
+  # The callback worker no longer has max_age configured. The transaction's
+  # sealed value must still be enforced.
+  client <- mk_client()
 
   # Token set with an ID token where auth_time is too old (400s ago)
   jwt <- build_jwt(
@@ -328,7 +417,8 @@ test_that("verify_token_set passes max_age from extra_auth_params to validate_id
         client,
         token_set = token_set,
         nonce = NULL,
-        is_refresh = FALSE
+        is_refresh = FALSE,
+        requested_max_age = 300
       ),
       regexp = "auth_time exceeded max_age"
     )
@@ -419,7 +509,8 @@ test_that("verify_token_set accepts token when auth_time is within max_age", {
         client,
         token_set = token_set,
         nonce = NULL,
-        is_refresh = FALSE
+        is_refresh = FALSE,
+        requested_max_age = 300
       )
     )
   })
@@ -535,7 +626,8 @@ test_that("verify_token_set rejects ID token missing auth_time when max_age requ
         client,
         token_set = token_set,
         nonce = NULL,
-        is_refresh = FALSE
+        is_refresh = FALSE,
+        requested_max_age = 300
       ),
       regexp = "auth_time"
     )

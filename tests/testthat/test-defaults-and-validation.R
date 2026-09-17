@@ -33,6 +33,19 @@ test_that("OAuthClient state_entropy fails fast on NA and non-scalar", {
     ),
     regexp = "state_entropy"
   )
+
+  # Oversized whole numbers should reach the range check without overflowing.
+  withr::local_options(list(warn = 2))
+  expect_error(
+    oauth_client(
+      provider = prov,
+      client_id = "id",
+      client_secret = "",
+      redirect_uri = "https://app.example.com/callback",
+      state_entropy = as.double(.Machine[["integer.max"]]) + 1
+    ),
+    regexp = "state_entropy must be between 22 and 128"
+  )
 })
 
 test_that("OAuthProvider accepts advertised JWS algorithm supersets", {
@@ -75,6 +88,32 @@ test_that("OAuthProvider default issuer_match is url", {
     token_url = "https://example.com/token"
   )
   expect_identical(p@issuer_match, "url")
+})
+
+test_that("OAuthProvider requires PKCE for public clients", {
+  for (style in c("public", "none")) {
+    expect_error(
+      oauth_provider(
+        name = "public-client",
+        auth_url = "https://example.com/authorize",
+        token_url = "https://example.com/token",
+        token_auth_style = style,
+        use_pkce = FALSE
+      ),
+      regexp = "public clients must enable PKCE"
+    )
+  }
+
+  expect_error(
+    OAuthProvider(
+      name = "public-client",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      token_auth_style = "public",
+      use_pkce = FALSE
+    ),
+    regexp = "public clients must enable PKCE"
+  )
 })
 
 test_that("OAuthProvider HS* algs require allow_hs opt-in", {
@@ -175,14 +214,17 @@ test_that("shinyOAuth.unblock_auth_params allows reserved keys when configured",
     regexp = "extra_auth_params must not contain reserved keys"
   )
 
-  # With unblock option, 'state' is allowed
+  # Transaction fields cannot be unblocked.
   withr::with_options(list(shinyOAuth.unblock_auth_params = "state"), {
-    expect_no_error(OAuthProvider(
-      name = "test",
-      auth_url = "https://example.com/authorize",
-      token_url = "https://example.com/token",
-      extra_auth_params = list(state = "custom")
-    ))
+    expect_error(
+      OAuthProvider(
+        name = "test",
+        auth_url = "https://example.com/authorize",
+        token_url = "https://example.com/token",
+        extra_auth_params = list(state = "custom")
+      ),
+      "reserved keys"
+    )
   })
 
   # Other params still blocked

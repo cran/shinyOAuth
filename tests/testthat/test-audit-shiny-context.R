@@ -26,20 +26,28 @@ testthat::test_that("session_started audit event is emitted and enriched", {
   )
 
   # Extract types and find session_started
-  types <- vapply(events, function(e) as.character(e$type), character(1))
+  types <- vapply(
+    events,
+    function(e) as.character(e[["type"]]),
+    character(1)
+  )
   idx <- grep("^audit_session_started$", types)
   testthat::expect_true(length(idx) >= 1)
 
   ev <- events[[idx[[1]]]]
   # Basic shape checks (non-sensitive fields only)
-  testthat::expect_equal(ev$module_id %||% NA_character_, "auth")
-  testthat::expect_true(!is.null(ev$client_id_digest))
+  testthat::expect_equal(
+    ev[["module_id"]] %||% NA_character_,
+    "auth"
+  )
+  testthat::expect_true(!is.null(ev[["client_id_digest"]]))
 
   # Shiny enrichment is grouped under `shiny_session`
   testthat::expect_true("shiny_session" %in% names(ev))
-  ss <- ev$shiny_session
+  ss <- ev[["shiny_session"]]
   # Subfields may be NULL in test env; we only assert presence of names
-  testthat::expect_true(all(c("http", "token") %in% names(ss)))
+  testthat::expect_true(all(c("http", "session_token_digest") %in% names(ss)))
+  testthat::expect_false("token" %in% names(ss))
 
   # Ensure it is JSON-serializable
   j <- jsonlite::toJSON(ev, auto_unbox = TRUE, null = "null")
@@ -75,44 +83,47 @@ testthat::test_that("shinyOAuth.audit_include_http = FALSE excludes http from ev
   )
 
   # Find session_started event
-  types <- vapply(events, function(e) as.character(e$type), character(1))
+  types <- vapply(
+    events,
+    function(e) as.character(e[["type"]]),
+    character(1)
+  )
   idx <- grep("^audit_session_started$", types)
   testthat::expect_true(length(idx) >= 1)
 
   ev <- events[[idx[[1]]]]
-  ss <- ev$shiny_session
+  ss <- ev[["shiny_session"]]
 
   # http should be NULL when audit_include_http = FALSE
 
-  testthat::expect_null(ss$http)
-  # token should still be present
-  testthat::expect_true("token" %in% names(ss))
+  testthat::expect_null(ss[["http"]])
+  # session digest should still be present
+  testthat::expect_true("session_token_digest" %in% names(ss))
+  testthat::expect_false("token" %in% names(ss))
 })
 
-testthat::test_that("audit_event includes redacted HTTP context by default", {
+testthat::test_that("audit_event omits query values and headers by default", {
+  sentinels <- c(
+    "TOPSECRET_UNKNOWN_QUERY",
+    "alice.sentinel@example.test",
+    "ey.SENTINEL.jwt",
+    "203.0.113.9"
+  )
   events <- list()
   req <- list(
     REQUEST_METHOD = "GET",
     PATH_INFO = "/callback",
-    QUERY_STRING = paste(
-      "code=authcode123",
-      "state=mystate",
-      "client_secret=super-secret",
-      "client_assertion=jwt-assertion",
-      "request=signed.request.jwt",
-      "request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Aabc123",
-      "code_challenge=challenge123",
-      "claims=%7B%22userinfo%22%3A%7B%22email%22%3A%7B%22essential%22%3Atrue%7D%7D%7D",
-      "login_hint=alice%40example.com",
-      "error_description=Sensitive%20provider%20detail",
-      "safe=keep_me",
-      sep = "&"
+    QUERY_STRING = paste0(
+      "api_key=",
+      sentinels[[1L]],
+      "&email=",
+      sentinels[[2L]]
     ),
     HTTP_HOST = "example.com",
-    HTTP_COOKIE = "session=secret123",
-    HTTP_AUTHORIZATION = "Bearer token123",
-    HTTP_USER_AGENT = "TestClient/1.0",
-    HTTP_X_FORWARDED_FOR = "192.168.1.1"
+    HTTP_CF_ACCESS_JWT_ASSERTION = sentinels[[3L]],
+    HTTP_FORWARDED = paste0("for=", sentinels[[4L]]),
+    HTTP_X_FORWARDED_FOR = sentinels[[4L]],
+    REMOTE_ADDR = sentinels[[4L]]
   )
 
   withr::local_options(list(
@@ -120,47 +131,51 @@ testthat::test_that("audit_event includes redacted HTTP context by default", {
       events[[length(events) + 1L]] <<- e
     },
     shinyOAuth.audit_include_http = TRUE,
-    shinyOAuth.audit_redact_http = TRUE
+    shinyOAuth.audit_redact_http = NULL
   ))
-  testthat::local_mocked_bindings(
-    url_query_parse = function(...) {
-      stop("query parse failed")
-    },
-    .package = "shinyOAuth"
-  )
 
   testthat::with_mocked_bindings(
     get_current_shiny_request = function() req,
     get_current_shiny_session_token = function() "session-token",
     .package = "shinyOAuth",
     {
-      shinyOAuth:::audit_event("http_context")
+      shinyOAuth:::audit_event("test_http_context")
     }
   )
 
-  http_event <- Filter(function(e) e$type == "audit_http_context", events)
+  http_event <- Filter(
+    function(e) e[["type"]] == "audit_test_http_context",
+    events
+  )
   testthat::expect_length(http_event, 1L)
 
-  http <- http_event[[1L]]$shiny_session$http
-  testthat::expect_equal(http$method, "GET")
-  testthat::expect_match(http$query_string, "safe=keep_me")
-  testthat::expect_no_match(http$query_string, "authcode123")
-  testthat::expect_no_match(http$query_string, "mystate")
-  testthat::expect_no_match(http$query_string, "super-secret")
-  testthat::expect_no_match(http$query_string, "jwt-assertion")
-  testthat::expect_no_match(http$query_string, "signed.request.jwt")
-  testthat::expect_no_match(http$query_string, "request_uri%3Aabc123")
-  testthat::expect_no_match(http$query_string, "challenge123")
-  testthat::expect_no_match(http$query_string, "alice%40example.com")
-  testthat::expect_no_match(http$query_string, "Sensitive%20provider%20detail")
-  testthat::expect_null(http$headers$cookie)
-  testthat::expect_null(http$headers$authorization)
-  testthat::expect_equal(http$headers$user_agent, "TestClient/1.0")
-  testthat::expect_equal(http$headers$x_forwarded_for, "[REDACTED]")
-  testthat::expect_equal(http$remote_addr, "[REDACTED]")
+  http <- http_event[[1L]][["shiny_session"]][[
+    "http",
+    exact = TRUE
+  ]]
+  testthat::expect_identical(
+    http_event[[1L]][["shiny_session"]][["session_token_digest"]],
+    shinyOAuth:::string_digest("session-token")
+  )
+  testthat::expect_null(
+    http_event[[1L]][["shiny_session"]][["token"]]
+  )
+  testthat::expect_equal(http[["method"]], "GET")
+  testthat::expect_null(http[["query_string"]])
+  testthat::expect_null(http[["headers"]])
+  testthat::expect_null(http[["remote_addr"]])
+
+  serialized <- as.character(jsonlite::toJSON(
+    http_event[[1L]],
+    auto_unbox = TRUE,
+    null = "null"
+  ))
+  for (sentinel in sentinels) {
+    testthat::expect_no_match(serialized, sentinel, fixed = TRUE)
+  }
 })
 
-testthat::test_that("audit_event redacts malformed callback query strings", {
+testthat::test_that("audit_event omits malformed callback query strings", {
   events <- list()
   req <- list(
     REQUEST_METHOD = "GET",
@@ -190,22 +205,22 @@ testthat::test_that("audit_event redacts malformed callback query strings", {
     get_current_shiny_session_token = function() "session-token",
     .package = "shinyOAuth",
     {
-      shinyOAuth:::audit_event("http_context_malformed")
+      shinyOAuth:::audit_event("test_http_context_malformed")
     }
   )
 
   http_event <- Filter(
-    function(e) e$type == "audit_http_context_malformed",
+    function(e) e[["type"]] == "audit_test_http_context_malformed",
     events
   )
   testthat::expect_length(http_event, 1L)
 
-  http <- http_event[[1L]]$shiny_session$http
-  testthat::expect_match(http$query_string, "safe=keep_me")
-  testthat::expect_no_match(http$query_string, "authcode123")
-  testthat::expect_no_match(http$query_string, "mystate")
-  testthat::expect_no_match(http$query_string, "signed.request.jwt")
-  testthat::expect_no_match(http$query_string, "request_uri:abc123")
+  http <- http_event[[1L]][["shiny_session"]][[
+    "http",
+    exact = TRUE
+  ]]
+  testthat::expect_null(http[["query_string"]])
+  testthat::expect_null(http[["headers"]])
 })
 
 testthat::test_that("raw query fallback redacts sensitive callback values", {
@@ -283,18 +298,65 @@ testthat::test_that("audit_event can include raw HTTP context when redaction is 
     get_current_shiny_session_token = function() "session-token",
     .package = "shinyOAuth",
     {
-      shinyOAuth:::audit_event("http_context_raw")
+      shinyOAuth:::audit_event("test_http_context_raw")
     }
   )
 
-  http_event <- Filter(function(e) e$type == "audit_http_context_raw", events)
+  http_event <- Filter(
+    function(e) e[["type"]] == "audit_test_http_context_raw",
+    events
+  )
   testthat::expect_length(http_event, 1L)
 
-  http <- http_event[[1L]]$shiny_session$http
-  testthat::expect_match(http$query_string, "authcode123")
-  testthat::expect_match(http$query_string, "mystate")
-  testthat::expect_equal(http$headers$cookie, "session=secret123")
-  testthat::expect_equal(http$headers$authorization, "Bearer token123")
-  testthat::expect_equal(http$headers$x_forwarded_for, "192.168.1.1")
-  testthat::expect_equal(http$remote_addr, "192.168.1.1")
+  http <- http_event[[1L]][["shiny_session"]][[
+    "http",
+    exact = TRUE
+  ]]
+  headers <- http[["headers"]]
+  testthat::expect_match(http[["query_string"]], "authcode123")
+  testthat::expect_match(http[["query_string"]], "mystate")
+  testthat::expect_equal(headers[["cookie"]], "session=secret123")
+  testthat::expect_equal(
+    headers[["authorization"]],
+    "Bearer token123"
+  )
+  testthat::expect_equal(
+    headers[["x_forwarded_for"]],
+    "192.168.1.1"
+  )
+  testthat::expect_equal(http[["remote_addr"]], "192.168.1.1")
+})
+
+testthat::test_that("audit hooks can opt back into raw Shiny session tokens", {
+  events <- list()
+
+  withr::local_options(list(
+    shinyOAuth.audit_hook = function(e) {
+      events[[length(events) + 1L]] <<- e
+    },
+    shinyOAuth.audit_include_raw_session_token = TRUE
+  ))
+
+  testthat::with_mocked_bindings(
+    get_current_shiny_request = function() NULL,
+    get_current_shiny_session_token = function() "session-token",
+    .package = "shinyOAuth",
+    {
+      shinyOAuth:::audit_event("test_raw_session_token")
+    }
+  )
+
+  raw_event <- Filter(
+    function(e) e[["type"]] == "audit_test_raw_session_token",
+    events
+  )
+  testthat::expect_length(raw_event, 1L)
+  testthat::expect_identical(
+    raw_event[[1L]][["shiny_session"]][["token"]],
+    "session-token"
+  )
+  testthat::expect_identical(
+    raw_event[[1L]][["shiny_session"]][["session_token_digest"]],
+    shinyOAuth:::string_digest("session-token")
+  )
 })

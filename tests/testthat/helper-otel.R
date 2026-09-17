@@ -1,3 +1,23 @@
+local_test_otel_log_file <- function(.local_envir = parent.frame()) {
+  log_file <- tempfile(fileext = ".jsonl")
+  withr::local_envvar(
+    c(
+      OTEL_R_LOGS_EXPORTER = "otlp/file",
+      OTEL_LOGS_EXPORTER = "otlp/file",
+      OTEL_EXPORTER_OTLP_LOGS_FILE = log_file,
+      OTEL_EXPORTER_OTLP_LOGS_FILE_FLUSH_COUNT = "1",
+      OTEL_EXPORTER_OTLP_LOGS_FILE_FLUSH_INTERVAL = "1ms"
+    ),
+    .local_envir = .local_envir
+  )
+  withr::local_options(
+    shinyOAuth.otel_logging_enabled = TRUE,
+    .local_envir = .local_envir
+  )
+  get("otel_clean_cache", envir = asNamespace("otel"))()
+  log_file
+}
+
 reset_test_otel_cache <- function() {
   # Keep tests hermetic even when the developer shell has ambient OTLP exporters
   # configured. Package tests only need local in-process recording.
@@ -31,14 +51,21 @@ reset_test_otel_cache <- function() {
   # isolation we want to drop exporter state, not flush buffered data to
   # whatever OTLP endpoint happened to be configured earlier in the process.
   otel_test_cache <- get("otel_save_cache", envir = asNamespace("otel"))()
-  otel_test_cache[["tracer_provider"]] <- otel::tracer_provider_noop$new()
-  otel_test_cache[["logger_provider"]] <- otel::logger_provider_noop$new()
-  otel_test_cache[["meter_provider"]] <- otel::meter_provider_noop$new()
+  otel_test_cache[["tracer_provider"]] <- otel::tracer_provider_noop[["new"]]()
+  otel_test_cache[["logger_provider"]] <- otel::logger_provider_noop[["new"]]()
+  otel_test_cache[["meter_provider"]] <- otel::meter_provider_noop[["new"]]()
   otel_test_cache[["tracer_app"]] <- NULL
   otel_test_cache[["instruments"]] <- NULL
   get("otel_restore_cache", envir = asNamespace("otel"))(otel_test_cache)
 
-  if (requireNamespace("mirai", quietly = TRUE)) {
+  if (
+    requireNamespace("mirai", quietly = TRUE) &&
+      exists(
+        "otel_cache_tracer",
+        envir = asNamespace("mirai"),
+        inherits = FALSE
+      )
+  ) {
     mirai_otel_env <- environment(
       get("otel_cache_tracer", envir = asNamespace("mirai"))
     )
@@ -78,14 +105,24 @@ capture_test_otel_state <- function() {
   )
 
   if (requireNamespace("otel", quietly = TRUE)) {
-    state$otel_cache <- get("otel_save_cache", envir = asNamespace("otel"))()
+    state[["otel_cache"]] <- get(
+      "otel_save_cache",
+      envir = asNamespace("otel")
+    )()
   }
 
-  if (requireNamespace("mirai", quietly = TRUE)) {
+  if (
+    requireNamespace("mirai", quietly = TRUE) &&
+      exists(
+        "otel_cache_tracer",
+        envir = asNamespace("mirai"),
+        inherits = FALSE
+      )
+  ) {
     mirai_otel_env <- environment(
       get("otel_cache_tracer", envir = asNamespace("mirai"))
     )
-    state$mirai_cache <- list(
+    state[["mirai_cache"]] <- list(
       env = mirai_otel_env,
       otel_is_tracing = get("otel_is_tracing", envir = mirai_otel_env),
       otel_tracer = get("otel_tracer", envir = mirai_otel_env)
@@ -100,7 +137,7 @@ restore_test_otel_state <- function(state) {
     return(invisible(NULL))
   }
 
-  envvars <- state$envvars %||% character()
+  envvars <- state[["envvars"]] %||% character()
   if (length(envvars)) {
     restore_values <- envvars[!is.na(envvars)]
     restore_unset <- names(envvars)[is.na(envvars)]
@@ -112,24 +149,31 @@ restore_test_otel_state <- function(state) {
     }
   }
 
-  do.call(options, state$options %||% list())
+  do.call(options, state[["options"]] %||% list())
 
-  if (!is.null(state$otel_cache) && requireNamespace("otel", quietly = TRUE)) {
-    get("otel_restore_cache", envir = asNamespace("otel"))(state$otel_cache)
+  if (
+    !is.null(state[["otel_cache"]]) &&
+      requireNamespace("otel", quietly = TRUE)
+  ) {
+    get("otel_restore_cache", envir = asNamespace("otel"))(
+      state[["otel_cache"]]
+    )
   }
 
   if (
-    !is.null(state$mirai_cache) && requireNamespace("mirai", quietly = TRUE)
+    !is.null(state[["mirai_cache"]]) &&
+      requireNamespace("mirai", quietly = TRUE)
   ) {
+    mirai_cache <- state[["mirai_cache"]]
     assign(
       "otel_is_tracing",
-      state$mirai_cache$otel_is_tracing,
-      envir = state$mirai_cache$env
+      mirai_cache[["otel_is_tracing"]],
+      envir = mirai_cache[["env"]]
     )
     assign(
       "otel_tracer",
-      state$mirai_cache$otel_tracer,
-      envir = state$mirai_cache$env
+      mirai_cache[["otel_tracer"]],
+      envir = mirai_cache[["env"]]
     )
   }
 

@@ -41,7 +41,7 @@ test_that("validate_id_token accepts Microsoft common issuer template", {
 
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
     dec <- shinyOAuth:::validate_id_token(client, jwt)
-    expect_identical(dec$tid, tid)
+    expect_identical(dec[["tid"]], tid)
   })
 })
 
@@ -63,7 +63,7 @@ test_that("validate_id_token accepts Microsoft organizations issuer template", {
 
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
     dec <- shinyOAuth:::validate_id_token(client, jwt)
-    expect_identical(dec$tid, tid)
+    expect_identical(dec[["tid"]], tid)
   })
 })
 
@@ -99,12 +99,12 @@ test_that("validate_id_token accepts templated Microsoft key issuers", {
   now <- as.numeric(Sys.time())
 
   rsa <- openssl::rsa_keygen(bits = 2048)
-  priv_jwk_json <- jose::write_jwk(rsa)
+  priv_jwk_json <- write_test_jwk(rsa)
   priv_jwk <- jsonlite::fromJSON(priv_jwk_json, simplifyVector = TRUE)
   pub_jwk <- list(
-    kty = priv_jwk$kty,
-    n = priv_jwk$n,
-    e = priv_jwk$e,
+    kty = priv_jwk[["kty"]],
+    n = priv_jwk[["n"]],
+    e = priv_jwk[["e"]],
     kid = "ms-common-key",
     use = "sig",
     alg = "RS256",
@@ -120,7 +120,7 @@ test_that("validate_id_token accepts templated Microsoft key issuers", {
       iat = now - 1
     ),
     key = rsa,
-    header = list(alg = "RS256", kid = pub_jwk$kid, typ = "JWT")
+    header = list(alg = "RS256", kid = pub_jwk[["kid"]], typ = "JWT")
   )
   jwks <- list(keys = list(pub_jwk))
 
@@ -138,7 +138,7 @@ test_that("validate_id_token accepts templated Microsoft key issuers", {
     .package = "shinyOAuth",
     {
       dec <- shinyOAuth:::validate_id_token(client, id_token)
-      expect_identical(dec$tid, tid)
+      expect_identical(dec[["tid"]], tid)
     }
   ))
 })
@@ -152,12 +152,12 @@ test_that("validate_id_token rejects Microsoft keys outside issuer scope", {
   now <- as.numeric(Sys.time())
 
   rsa <- openssl::rsa_keygen(bits = 2048)
-  priv_jwk_json <- jose::write_jwk(rsa)
+  priv_jwk_json <- write_test_jwk(rsa)
   priv_jwk <- jsonlite::fromJSON(priv_jwk_json, simplifyVector = TRUE)
   pub_jwk <- list(
-    kty = priv_jwk$kty,
-    n = priv_jwk$n,
-    e = priv_jwk$e,
+    kty = priv_jwk[["kty"]],
+    n = priv_jwk[["n"]],
+    e = priv_jwk[["e"]],
     kid = "ms-wrong-scope-key",
     use = "sig",
     alg = "RS256",
@@ -173,7 +173,7 @@ test_that("validate_id_token rejects Microsoft keys outside issuer scope", {
       iat = now - 1
     ),
     key = rsa,
-    header = list(alg = "RS256", kid = pub_jwk$kid, typ = "JWT")
+    header = list(alg = "RS256", kid = pub_jwk[["kid"]], typ = "JWT")
   )
   jwks <- list(keys = list(pub_jwk))
 

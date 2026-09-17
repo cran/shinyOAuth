@@ -22,10 +22,38 @@ make_signed_jwt <- function(
 ) {
   header <- list(typ = typ, alg = alg)
   if (!is.null(kid)) {
-    header$kid <- kid
+    header[["kid"]] <- kid
   }
   clm <- do.call(jose::jwt_claim, payload_list)
   jose::jwt_encode_sig(clm, key = key, header = header)
+}
+
+make_signed_userinfo_json <- function(
+  payload_json,
+  key,
+  kid,
+  extra_header = list()
+) {
+  header <- utils::modifyList(
+    list(typ = "JWT", alg = "RS256", kid = kid),
+    extra_header
+  )
+  header_json <- jsonlite::toJSON(
+    header,
+    auto_unbox = TRUE
+  )
+  signing_input <- paste0(
+    shinyOAuth:::base64url_encode(charToRaw(header_json)),
+    ".",
+    shinyOAuth:::base64url_encode(charToRaw(payload_json))
+  )
+  signature <- openssl::signature_create(
+    charToRaw(signing_input),
+    hash = openssl::sha256,
+    key = key
+  )
+
+  paste0(signing_input, ".", shinyOAuth:::base64url_encode(signature))
 }
 
 make_eddsa_signed_jwt <- function(
@@ -36,7 +64,7 @@ make_eddsa_signed_jwt <- function(
 ) {
   header <- list(alg = "EdDSA", typ = typ)
   if (!is.null(kid)) {
-    header$kid <- kid
+    header[["kid"]] <- kid
   }
 
   header_json <- jsonlite::toJSON(header, auto_unbox = TRUE, null = "null")
@@ -50,11 +78,72 @@ make_eddsa_signed_jwt <- function(
     ".",
     shinyOAuth:::base64url_encode(charToRaw(as.character(payload_json)))
   )
-  secret <- if (!is.null(keypair$key)) keypair$key else keypair$secretkey
-  sig <- sodium::signature(charToRaw(signing_input), secret)
+  secret <- if (!is.null(keypair[["key"]])) {
+    keypair[["key"]]
+  } else {
+    keypair[["secretkey"]]
+  }
+  sig <- sodium::sig_sign(charToRaw(signing_input), secret)
 
   paste0(signing_input, ".", shinyOAuth:::base64url_encode(sig))
 }
+
+test_that("JSON and signed JWT UserInfo preserve types through claim policy", {
+  key <- openssl::rsa_keygen(2048)
+  jwk <- jsonlite::fromJSON(
+    write_test_jwk(key[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  jwk[["kid"]] <- "type-parity"
+  cli <- make_test_client(use_nonce = FALSE)
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@issuer <- "https://example.com"
+  cli@claims_validation <- "strict"
+  body <- ""
+  content_type <- "application/json"
+  testthat::local_mocked_bindings(
+    req_with_retry = function(...) {
+      httr2::response(
+        status_code = 200L,
+        headers = list(`Content-Type` = content_type),
+        body = charToRaw(body)
+      )
+    },
+    fetch_jwks = function(...) list(keys = list(jwk)),
+    .package = "shinyOAuth"
+  )
+  for (value in list("staff", list("staff"), list(groups = list("staff")))) {
+    claims <- list(
+      sub = "user",
+      iss = cli@provider@issuer,
+      aud = cli@client_id,
+      role = value
+    )
+    json <- as.character(jsonlite::toJSON(claims, auto_unbox = TRUE))
+    for (content_type in c("application/json", "application/jwt")) {
+      body <- if (content_type == "application/json") {
+        json
+      } else {
+        make_signed_userinfo_json(json, key, "type-parity")
+      }
+      cli@claims <- list(userinfo = list(role = list(value = value)))
+      ui <- shinyOAuth:::fetch_userinfo(cli, "synthetic-token")
+      expected <- jsonlite::fromJSON(
+        json,
+        simplifyVector = content_type == "application/json"
+      )
+      expect_identical(ui, expected)
+
+      cli@claims <- list(userinfo = list(role = list(value = "staff")))
+      if (is.list(value)) {
+        expect_error(
+          shinyOAuth:::fetch_userinfo(cli, "synthetic-token"),
+          class = "shinyOAuth_userinfo_error"
+        )
+      }
+    }
+  }
+})
 
 test_that("get_userinfo rejects unsigned JWT response (alg=none) by default", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -70,7 +159,7 @@ test_that("get_userinfo rejects unsigned JWT response (alg=none) by default", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -96,7 +185,7 @@ test_that("get_userinfo still works with application/json content-type", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(claims, auto_unbox = TRUE))
@@ -106,8 +195,8 @@ test_that("get_userinfo still works with application/json content-type", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-456")
-  expect_equal(result$name, "JSON User")
+  expect_equal(result[["sub"]], "user-456")
+  expect_equal(result[["name"]], "JSON User")
 })
 
 test_that("get_userinfo verifies signed JWT userinfo against JWKS", {
@@ -116,10 +205,10 @@ test_that("get_userinfo verifies signed JWT userinfo against JWKS", {
   pub <- as.list(openssl::read_key(openssl::write_pem(key), der = FALSE))
 
   # Build JWK for the public key
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "test-kid-1"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "test-kid-1"
+  jwk[["use"]] <- "sig"
 
   jwks <- list(keys = list(jwk))
 
@@ -138,7 +227,7 @@ test_that("get_userinfo verifies signed JWT userinfo against JWKS", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -149,29 +238,22 @@ test_that("get_userinfo verifies signed JWT userinfo against JWKS", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-sig")
-  expect_equal(result$name, "Signed User")
+  expect_equal(result[["sub"]], "user-sig")
+  expect_equal(result[["name"]], "Signed User")
 })
 
 test_that("get_userinfo verifies signed EdDSA JWT userinfo against JWKS", {
   testthat::skip_if_not_installed("sodium")
 
-  keypair <- NULL
-  if ("signature_keygen" %in% getNamespaceExports("sodium")) {
-    keypair <- try(sodium::signature_keygen(), silent = TRUE)
-  } else if ("signature_keypair" %in% getNamespaceExports("sodium")) {
-    keypair <- try(sodium::signature_keypair(), silent = TRUE)
-  }
-  if (inherits(keypair, "try-error") || is.null(keypair)) {
-    testthat::skip("Ed25519 key generation not supported on this platform")
-  }
+  secret <- sodium::sig_keygen()
+  keypair <- list(key = secret, pubkey = sodium::sig_pubkey(secret))
 
   kid <- "test-ed25519-1"
   jwks <- list(
     keys = list(list(
       kty = "OKP",
       crv = "Ed25519",
-      x = shinyOAuth:::base64url_encode(keypair$pubkey),
+      x = shinyOAuth:::base64url_encode(keypair[["pubkey"]]),
       kid = kid,
       use = "sig"
     ))
@@ -197,7 +279,7 @@ test_that("get_userinfo verifies signed EdDSA JWT userinfo against JWKS", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -208,17 +290,17 @@ test_that("get_userinfo verifies signed EdDSA JWT userinfo against JWKS", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-ed25519")
-  expect_equal(result$name, "EdDSA User")
+  expect_equal(result[["sub"]], "user-ed25519")
+  expect_equal(result[["name"]], "EdDSA User")
 })
 
 test_that("get_userinfo rejects signed JWT userinfo with invalid typ header", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-invalid-typ"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-invalid-typ"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -240,7 +322,7 @@ test_that("get_userinfo rejects signed JWT userinfo with invalid typ header", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -260,10 +342,10 @@ test_that("get_userinfo rejects signed JWT userinfo with invalid typ header", {
 test_that("get_userinfo accepts signed JWT with valid temporal claims", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "test-kid-time-valid"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "test-kid-time-valid"
+  jwk[["use"]] <- "sig"
 
   jwks <- list(keys = list(jwk))
   now <- floor(as.numeric(Sys.time()))
@@ -286,7 +368,7 @@ test_that("get_userinfo accepts signed JWT with valid temporal claims", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -297,17 +379,17 @@ test_that("get_userinfo accepts signed JWT with valid temporal claims", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-time-valid")
-  expect_equal(result$name, "Signed Timely User")
+  expect_equal(result[["sub"]], "user-time-valid")
+  expect_equal(result[["name"]], "Signed Timely User")
 })
 
 test_that("get_userinfo honors provider leeway above 60 seconds", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-leeway-over-60"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-leeway-over-60"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
   now <- floor(as.numeric(Sys.time()))
 
@@ -329,7 +411,7 @@ test_that("get_userinfo honors provider leeway above 60 seconds", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -340,17 +422,17 @@ test_that("get_userinfo honors provider leeway above 60 seconds", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-leeway-over-60")
-  expect_equal(result$name, "Leeway User")
+  expect_equal(result[["sub"]], "user-leeway-over-60")
+  expect_equal(result[["name"]], "Leeway User")
 })
 
-test_that("get_userinfo accepts signed JWT exactly at leeway boundaries", {
+test_that("get_userinfo accepts signed JWT iat and nbf at leeway boundaries", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-leeway-boundary"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-leeway-boundary"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   fixed_now <- as.POSIXct("2024-01-01 00:00:00", tz = "UTC")
@@ -361,7 +443,7 @@ test_that("get_userinfo accepts signed JWT exactly at leeway boundaries", {
     name = "Boundary User",
     iss = "https://issuer.example.com",
     aud = "abc",
-    exp = now - 30,
+    exp = now + 300,
     iat = now + 30,
     nbf = now + 30
   )
@@ -375,7 +457,7 @@ test_that("get_userinfo accepts signed JWT exactly at leeway boundaries", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -391,17 +473,41 @@ test_that("get_userinfo accepts signed JWT exactly at leeway boundaries", {
     get_userinfo(cli, token = "access-token")
   )
 
-  expect_equal(result$sub, "user-leeway-boundary")
-  expect_equal(result$name, "Boundary User")
+  expect_equal(result[["sub"]], "user-leeway-boundary")
+  expect_equal(result[["name"]], "Boundary User")
+})
+
+test_that("signed UserInfo JWT expires at the exact exp boundary", {
+  fixed_now <- as.POSIXct("2026-01-01 00:00:00", tz = "UTC")
+  now <- floor(as.numeric(fixed_now))
+
+  expect_error(
+    testthat::with_mocked_bindings(
+      Sys.time = function() fixed_now,
+      .package = "base",
+      shinyOAuth:::validate_signed_userinfo_claims(
+        claims = list(
+          sub = "user-exp-boundary",
+          iss = "https://issuer.example.com",
+          aud = "abc",
+          exp = now
+        ),
+        expected_issuer = "https://issuer.example.com",
+        expected_client_id = "abc"
+      )
+    ),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "expired"
+  )
 })
 
 test_that("get_userinfo can require exp on signed JWT userinfo", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-required-exp"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-required-exp"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   now <- floor(as.numeric(Sys.time()))
@@ -416,7 +522,7 @@ test_that("get_userinfo can require exp on signed JWT userinfo", {
   cli <- make_test_client(
     use_pkce = TRUE,
     use_nonce = FALSE,
-    userinfo_jwt_required_temporal_claims = "exp"
+    userinfo_jwt_required_time_claims = "exp"
   )
   cli@provider@userinfo_url <- "https://example.com/userinfo"
   cli@provider@issuer <- "https://issuer.example.com"
@@ -424,7 +530,7 @@ test_that("get_userinfo can require exp on signed JWT userinfo", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -435,16 +541,16 @@ test_that("get_userinfo can require exp on signed JWT userinfo", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-required-exp")
+  expect_equal(result[["sub"]], "user-required-exp")
 })
 
 test_that("get_userinfo errors when signed JWT is missing required exp", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-missing-required-exp"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-missing-required-exp"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -457,7 +563,7 @@ test_that("get_userinfo errors when signed JWT is missing required exp", {
   cli <- make_test_client(
     use_pkce = TRUE,
     use_nonce = FALSE,
-    userinfo_jwt_required_temporal_claims = "exp"
+    userinfo_jwt_required_time_claims = "exp"
   )
   cli@provider@userinfo_url <- "https://example.com/userinfo"
   cli@provider@issuer <- "https://issuer.example.com"
@@ -465,7 +571,7 @@ test_that("get_userinfo errors when signed JWT is missing required exp", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -480,6 +586,94 @@ test_that("get_userinfo errors when signed JWT is missing required exp", {
     class = "shinyOAuth_userinfo_error",
     regexp = "missing required temporal claim\\(s\\): exp"
   )
+})
+
+test_that("get_userinfo rejects b64=false with or without crit", {
+  key <- openssl::rsa_keygen(2048)
+  client <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  client@provider@userinfo_url <- "https://example.com/userinfo"
+  client@provider@issuer <- "https://issuer.example.com"
+  payload_json <- jsonlite::toJSON(
+    list(
+      sub = "user-b64",
+      iss = client@provider@issuer,
+      aud = client@client_id
+    ),
+    auto_unbox = TRUE
+  )
+
+  crit_cases <- list(without_crit = NULL, with_crit = list("b64"))
+  for (crit in crit_cases) {
+    extra_header <- list(b64 = FALSE)
+    if (!is.null(crit)) {
+      extra_header[["crit"]] <- crit
+    }
+    jwt_body <- make_signed_userinfo_json(
+      payload_json,
+      key,
+      kid = "userinfo-b64-key",
+      extra_header = extra_header
+    )
+    response <- httr2::response(
+      url = "https://example.com/userinfo",
+      status = 200,
+      headers = list("content-type" = "application/jwt"),
+      body = charToRaw(jwt_body)
+    )
+
+    expect_error(
+      shinyOAuth:::decode_userinfo_jwt(response, client),
+      class = "shinyOAuth_userinfo_error",
+      regexp = "b64=false header is not allowed"
+    )
+  }
+})
+
+test_that("required signed UserInfo time claims reject JSON null", {
+  key <- openssl::rsa_keygen(2048)
+  kid <- "kid-null-required-times"
+  jwk <- jsonlite::fromJSON(
+    write_test_jwk(key[["pubkey"]]),
+    simplifyVector = TRUE
+  )
+  jwk[["kid"]] <- kid
+  jwk[["use"]] <- "sig"
+  jwt_body <- NULL
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req[["url"]]),
+        status = 200,
+        headers = list("content-type" = "application/jwt"),
+        body = charToRaw(jwt_body)
+      )
+    },
+    fetch_jwks = function(...) list(keys = list(jwk)),
+    .package = "shinyOAuth"
+  )
+
+  for (claim_name in c("exp", "iat", "nbf")) {
+    payload_json <- paste0(
+      '{"sub":"user-null-times",',
+      '"iss":"https://issuer.example.com","aud":"abc","',
+      claim_name,
+      '":null}'
+    )
+    jwt_body <- make_signed_userinfo_json(payload_json, key, kid)
+    cli <- make_test_client(
+      userinfo_jwt_required_time_claims = claim_name
+    )
+    cli@provider@userinfo_url <- "https://example.com/userinfo"
+    cli@provider@issuer <- "https://issuer.example.com"
+
+    expect_error(
+      get_userinfo(cli, token = "access-token"),
+      class = "shinyOAuth_userinfo_error",
+      regexp = paste0(claim_name, ".*single finite number"),
+      info = claim_name
+    )
+  }
 })
 
 test_that("oauth_client rejects invalid required UserInfo JWT temporal claims", {
@@ -497,19 +691,19 @@ test_that("oauth_client rejects invalid required UserInfo JWT temporal claims", 
         "0123456789abcdefghijklmnopqrstuvwxyz",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
       ),
-      userinfo_jwt_required_temporal_claims = c("exp", "foo")
+      userinfo_jwt_required_time_claims = c("exp", "foo")
     ),
-    regexp = "invalid userinfo_jwt_required_temporal_claims"
+    regexp = "invalid userinfo_jwt_required_time_claims"
   )
 })
 
 test_that("get_userinfo errors when signed JWT is expired", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-expired"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-expired"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   now <- floor(as.numeric(Sys.time()))
@@ -528,7 +722,7 @@ test_that("get_userinfo errors when signed JWT is expired", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -548,10 +742,10 @@ test_that("get_userinfo errors when signed JWT is expired", {
 test_that("get_userinfo errors when signed JWT has iat in the future", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-iat-future"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-iat-future"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   now <- floor(as.numeric(Sys.time()))
@@ -571,7 +765,7 @@ test_that("get_userinfo errors when signed JWT has iat in the future", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -591,10 +785,10 @@ test_that("get_userinfo errors when signed JWT has iat in the future", {
 test_that("get_userinfo errors when signed JWT is not yet valid", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-nbf-future"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-nbf-future"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   now <- floor(as.numeric(Sys.time()))
@@ -614,7 +808,7 @@ test_that("get_userinfo errors when signed JWT is not yet valid", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -634,11 +828,11 @@ test_that("get_userinfo errors when signed JWT is not yet valid", {
 test_that("get_userinfo rejects signed JWT when JWK alg mismatches header alg", {
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "test-kid-alg-mismatch"
-  jwk$use <- "sig"
-  jwk$alg <- "RS512"
+  jwk[["kid"]] <- "test-kid-alg-mismatch"
+  jwk[["use"]] <- "sig"
+  jwk[["alg"]] <- "RS512"
 
   jwks <- list(keys = list(jwk))
 
@@ -657,7 +851,7 @@ test_that("get_userinfo rejects signed JWT when JWK alg mismatches header alg", 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -679,10 +873,10 @@ test_that("get_userinfo errors when JWKS has no compatible keys for signed JWT",
   sign_key <- openssl::rsa_keygen(2048)
   wrong_key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(wrong_key$pubkey)
+  jwk_json <- write_test_jwk(wrong_key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "wrong-kid"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "wrong-kid"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(sub = "user-fallback", name = "Fallback User")
@@ -695,7 +889,7 @@ test_that("get_userinfo errors when JWKS has no compatible keys for signed JWT",
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -726,7 +920,7 @@ test_that("get_userinfo errors when JWKS fetch fails for signed JWT", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -746,10 +940,10 @@ test_that("get_userinfo errors when JWKS fetch fails for signed JWT", {
 
 test_that("get_userinfo errors when signed JWT has wrong issuer", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-iss"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-iss"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -766,7 +960,7 @@ test_that("get_userinfo errors when signed JWT has wrong issuer", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -785,10 +979,10 @@ test_that("get_userinfo errors when signed JWT has wrong issuer", {
 
 test_that("get_userinfo errors when signed JWT has wrong audience", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-aud"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-aud"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -805,7 +999,7 @@ test_that("get_userinfo errors when signed JWT has wrong audience", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -824,10 +1018,10 @@ test_that("get_userinfo errors when signed JWT has wrong audience", {
 
 test_that("get_userinfo errors when signed JWT is missing iss claim", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-no-iss"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-no-iss"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(sub = "user-no-iss", aud = "abc")
@@ -840,7 +1034,7 @@ test_that("get_userinfo errors when signed JWT is missing iss claim", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -859,10 +1053,10 @@ test_that("get_userinfo errors when signed JWT is missing iss claim", {
 
 test_that("get_userinfo errors when signed JWT is missing aud claim", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-no-aud"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-no-aud"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(sub = "user-no-aud", iss = "https://issuer.example.com")
@@ -875,7 +1069,7 @@ test_that("get_userinfo errors when signed JWT is missing aud claim", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -905,7 +1099,7 @@ test_that("get_userinfo errors on encrypted JWT (JWE)", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwe_body)
@@ -928,7 +1122,7 @@ test_that("get_userinfo errors on invalid JWT in application/jwt response", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw("not-a-valid-jwt")
@@ -958,7 +1152,7 @@ test_that("get_userinfo emits audit event on JWT parse failure", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw("bad.jwt")
@@ -972,13 +1166,17 @@ test_that("get_userinfo emits audit event on JWT parse failure", {
     class = "shinyOAuth_userinfo_error"
   )
 
-  types <- vapply(events, function(e) e$type %||% NA_character_, character(1))
+  types <- vapply(
+    events,
+    function(e) e[["type"]] %||% NA_character_,
+    character(1)
+  )
   expect_true(any(types == "audit_userinfo"))
 
   ui_events <- events[types == "audit_userinfo"]
   statuses <- vapply(
     ui_events,
-    function(e) e$status %||% NA_character_,
+    function(e) e[["status"]] %||% NA_character_,
     character(1)
   )
   expect_true(any(statuses == "parse_error"))
@@ -986,10 +1184,10 @@ test_that("get_userinfo emits audit event on JWT parse failure", {
 
 test_that("get_userinfo handles application/jwt with charset parameter (signed)", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-charset"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-charset"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -1007,7 +1205,7 @@ test_that("get_userinfo handles application/jwt with charset parameter (signed)"
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt; charset=utf-8"),
         body = charToRaw(jwt_body)
@@ -1018,8 +1216,8 @@ test_that("get_userinfo handles application/jwt with charset parameter (signed)"
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-charset")
-  expect_equal(result$name, "Charset User")
+  expect_equal(result[["sub"]], "user-charset")
+  expect_equal(result[["name"]], "Charset User")
 })
 
 test_that("decode_userinfo_jwt rejects JWT without issuer configured", {
@@ -1063,7 +1261,7 @@ test_that("signed JWT required: non-JWT response fails with clear error + audit"
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(
@@ -1082,11 +1280,15 @@ test_that("signed JWT required: non-JWT response fails with clear error + audit"
   )
 
   # Verify audit event
-  types <- vapply(events, function(e) e$type %||% NA_character_, character(1))
+  types <- vapply(
+    events,
+    function(e) e[["type"]] %||% NA_character_,
+    character(1)
+  )
   ui_events <- events[types == "audit_userinfo"]
   statuses <- vapply(
     ui_events,
-    function(e) e$status %||% NA_character_,
+    function(e) e[["status"]] %||% NA_character_,
     character(1)
   )
   expect_true("userinfo_not_jwt" %in% statuses)
@@ -1112,7 +1314,7 @@ test_that("signed JWT required: alg=none JWT fails with clear error + audit", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1127,11 +1329,15 @@ test_that("signed JWT required: alg=none JWT fails with clear error + audit", {
     regexp = "alg=none.*not allowed"
   )
 
-  types <- vapply(events, function(e) e$type %||% NA_character_, character(1))
+  types <- vapply(
+    events,
+    function(e) e[["type"]] %||% NA_character_,
+    character(1)
+  )
   ui_events <- events[types == "audit_userinfo"]
   statuses <- vapply(
     ui_events,
-    function(e) e$status %||% NA_character_,
+    function(e) e[["status"]] %||% NA_character_,
     character(1)
   )
   expect_true("userinfo_jwt_unsigned" %in% statuses)
@@ -1159,7 +1365,7 @@ test_that("signed JWT required: alg not in allowed_algs fails + audit", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1174,11 +1380,15 @@ test_that("signed JWT required: alg not in allowed_algs fails + audit", {
     regexp = "not in provider.*allowed"
   )
 
-  types <- vapply(events, function(e) e$type %||% NA_character_, character(1))
+  types <- vapply(
+    events,
+    function(e) e[["type"]] %||% NA_character_,
+    character(1)
+  )
   ui_events <- events[types == "audit_userinfo"]
   statuses <- vapply(
     ui_events,
-    function(e) e$status %||% NA_character_,
+    function(e) e[["status"]] %||% NA_character_,
     character(1)
   )
   expect_true("userinfo_jwt_alg_rejected" %in% statuses)
@@ -1186,10 +1396,10 @@ test_that("signed JWT required: alg not in allowed_algs fails + audit", {
 
 test_that("signed JWT required: valid signed JWT succeeds", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-req-sig"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-req-sig"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -1209,7 +1419,7 @@ test_that("signed JWT required: valid signed JWT succeeds", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1220,8 +1430,8 @@ test_that("signed JWT required: valid signed JWT succeeds", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-signed-ok")
-  expect_equal(result$name, "Signed OK")
+  expect_equal(result[["sub"]], "user-signed-ok")
+  expect_equal(result[["name"]], "Signed OK")
 })
 
 test_that("signed JWT required: JWKS fetch failure still blocks", {
@@ -1242,7 +1452,7 @@ test_that("signed JWT required: JWKS fetch failure still blocks", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1269,7 +1479,7 @@ test_that("unsigned JWT is now rejected even without required flag (fail-closed)
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1295,7 +1505,7 @@ test_that("signed JWT NOT required: JSON response still works (backward compat)"
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(claims, auto_unbox = TRUE))
@@ -1305,8 +1515,8 @@ test_that("signed JWT NOT required: JSON response still works (backward compat)"
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-json-compat")
-  expect_equal(result$name, "JSON Compat")
+  expect_equal(result[["sub"]], "user-json-compat")
+  expect_equal(result[["name"]], "JSON Compat")
 })
 
 test_that("OAuthProvider validator: userinfo_signed_jwt_required without userinfo_required fails", {
@@ -1343,10 +1553,10 @@ test_that("signed JWT required: uses provider allowed_algs for verification", {
   # Confirm that allowed_algs from provider is respected (ES256 key with
   # provider that only allows ES256)
   key <- openssl::ec_keygen("P-256")
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-es256"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-es256"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -1368,7 +1578,7 @@ test_that("signed JWT required: uses provider allowed_algs for verification", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1379,8 +1589,8 @@ test_that("signed JWT required: uses provider allowed_algs for verification", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-es256")
-  expect_equal(result$name, "ES256 User")
+  expect_equal(result[["sub"]], "user-es256")
+  expect_equal(result[["name"]], "ES256 User")
 })
 
 # ── Attacker / unhappy path tests ───────────────────────────────────────────
@@ -1390,10 +1600,10 @@ test_that("signed JWT required: wrong signature (attacker key) is rejected + aud
   legit_key <- openssl::rsa_keygen(2048)
   attacker_key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(legit_key$pubkey)
+  jwk_json <- write_test_jwk(legit_key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "legit-kid"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "legit-kid"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -1421,7 +1631,7 @@ test_that("signed JWT required: wrong signature (attacker key) is rejected + aud
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1442,10 +1652,10 @@ test_that("signed JWT required: tampered payload is rejected", {
   # Sign a legitimate JWT, then modify the payload after signing
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-tamper"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-tamper"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -1481,7 +1691,7 @@ test_that("signed JWT required: tampered payload is rejected", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(tampered_jwt)
@@ -1502,10 +1712,10 @@ test_that("signed JWT required: stripped signature (header.payload. with empty s
   # Attacker takes a legitimate JWT header with RS256 but empties the signature
   key <- openssl::rsa_keygen(2048)
 
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-stripped"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-stripped"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -1528,7 +1738,7 @@ test_that("signed JWT required: stripped signature (header.payload. with empty s
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(stripped_jwt)
@@ -1548,10 +1758,10 @@ test_that("signed JWT required: stripped signature (header.payload. with empty s
 
 test_that("signed JWT required: wrong iss claim is rejected even with valid signature", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-iss-req"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-iss-req"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   # Correctly signed, but iss doesn't match provider issuer
@@ -1571,7 +1781,7 @@ test_that("signed JWT required: wrong iss claim is rejected even with valid sign
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1590,10 +1800,10 @@ test_that("signed JWT required: wrong iss claim is rejected even with valid sign
 
 test_that("signed JWT required: wrong aud claim is rejected even with valid signature", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-aud-req"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-aud-req"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -1612,7 +1822,7 @@ test_that("signed JWT required: wrong aud claim is rejected even with valid sign
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1643,7 +1853,7 @@ test_that("alg=none is always rejected even WITHOUT required flag (fix for fail-
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1679,7 +1889,7 @@ test_that("content-type downgrade: attacker sends JSON when signed JWT is requir
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json; charset=utf-8"),
         body = charToRaw(jsonlite::toJSON(
@@ -1697,11 +1907,15 @@ test_that("content-type downgrade: attacker sends JSON when signed JWT is requir
     regexp = "not application/jwt.*signed JWT is required"
   )
 
-  types <- vapply(events, function(e) e$type %||% NA_character_, character(1))
+  types <- vapply(
+    events,
+    function(e) e[["type"]] %||% NA_character_,
+    character(1)
+  )
   ui_events <- events[types == "audit_userinfo"]
   statuses <- vapply(
     ui_events,
-    function(e) e$status %||% NA_character_,
+    function(e) e[["status"]] %||% NA_character_,
     character(1)
   )
   expect_true("userinfo_not_jwt" %in% statuses)
@@ -1718,7 +1932,7 @@ test_that("content-type downgrade: no content-type header when signed JWT is req
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list(),
         body = charToRaw(jsonlite::toJSON(
@@ -1749,7 +1963,7 @@ test_that("alg=none with unsafe opt-in allows unverified JWT (testing only)", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1772,8 +1986,8 @@ test_that("alg=none with unsafe opt-in allows unverified JWT (testing only)", {
   on.exit(options(shinyOAuth.allow_unsigned_userinfo_jwt = old_opt), add = TRUE)
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "test-unsafe")
-  expect_equal(result$name, "Unsafe Opt-in User")
+  expect_equal(result[["sub"]], "test-unsafe")
+  expect_equal(result[["name"]], "Unsafe Opt-in User")
 })
 
 test_that("application/jwt with missing issuer must fail by default", {
@@ -1788,7 +2002,7 @@ test_that("application/jwt with missing issuer must fail by default", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1816,7 +2030,7 @@ test_that("application/jwt with HS256 algorithm must fail (non-asymmetric)", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -1830,4 +2044,48 @@ test_that("application/jwt with HS256 algorithm must fail (non-asymmetric)", {
     class = "shinyOAuth_userinfo_error",
     regexp = "not in provider.*allowed"
   )
+})
+test_that("signed UserInfo enforces scalar Boolean verification claims", {
+  key <- openssl::rsa_keygen(2048)
+  jwk <- jsonlite::fromJSON(write_test_jwk(key[["pubkey"]]))
+  jwk[["kid"]] <- "boolean-schema"
+  cli <- make_test_client(use_nonce = FALSE)
+  cli@provider@issuer <- "https://issuer.example.com"
+  cli@provider@userinfo_url <- "https://example.com/userinfo"
+  jwt_body <- ""
+  local_mocked_bindings(
+    req_with_retry = function(...) {
+      httr2::response(
+        status_code = 200L,
+        headers = list("Content-Type" = "application/jwt"),
+        body = charToRaw(jwt_body)
+      )
+    },
+    fetch_jwks = function(...) list(keys = list(jwk)),
+    .package = "shinyOAuth"
+  )
+  for (field in c("email_verified", "phone_number_verified")) {
+    for (value in c('"false"', '0', '[true]', 'null', 'true', 'false')) {
+      payload <- paste0(
+        '{"sub":"user","iss":"https://issuer.example.com",',
+        '"aud":"abc","',
+        field,
+        '":',
+        value,
+        '}'
+      )
+      jwt_body <- make_signed_userinfo_json(payload, key, "boolean-schema")
+      if (value %in% c('true', 'false')) {
+        expect_identical(get_userinfo(cli, "token")[[field]], value == 'true')
+      } else {
+        expect_error(get_userinfo(cli, "token"), "JSON Boolean")
+      }
+    }
+    claims <- list(sub = "user")
+    claims[[field]] <- NA
+    expect_error(
+      shinyOAuth:::validate_userinfo_json_claim_types(claims, cli),
+      "JSON Boolean"
+    )
+  }
 })

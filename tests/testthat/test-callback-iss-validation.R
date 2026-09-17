@@ -7,7 +7,11 @@
 make_iss_test_client <- function(
   issuer = "https://issuer.example.com",
   enforce_callback_issuer = NULL,
-  authorization_response_iss_parameter_supported = FALSE
+  authorization_response_iss_parameter_supported = FALSE,
+  authorization_server_mode = "single",
+  authorization_server_redirect_uris = character(0),
+  response_mode = NULL,
+  compare_callback_issuer = NULL
 ) {
   prov <- oauth_provider(
     name = "oidc-iss-test",
@@ -27,6 +31,10 @@ make_iss_test_client <- function(
     client_secret = "",
     redirect_uri = "http://localhost:8100",
     enforce_callback_issuer = enforce_callback_issuer,
+    compare_callback_issuer = compare_callback_issuer,
+    authorization_server_mode = authorization_server_mode,
+    authorization_server_redirect_uris = authorization_server_redirect_uris,
+    response_mode = response_mode,
     scopes = c("openid"),
     scope_validation = "none",
     state_store = cachem::cache_mem(max_age = 600),
@@ -50,6 +58,121 @@ test_that("callback issuer enforcement is configured on OAuthClient", {
   )
 })
 
+test_that("present-issuer comparison is independent of legacy issuer absence", {
+  client <- make_iss_test_client()
+  expect_true(client@compare_callback_issuer)
+  expect_false(client@enforce_callback_issuer)
+  expect_silent(enforce_callback_issuer(client, NULL))
+  expect_silent(enforce_callback_issuer(client, client@provider@issuer))
+  expect_error(
+    enforce_callback_issuer(client, paste0(client@provider@issuer, "/")),
+    "does not match"
+  )
+  opted_out <- make_iss_test_client(enforce_callback_issuer = FALSE)
+  expect_false(opted_out@compare_callback_issuer)
+  expect_silent(enforce_callback_issuer(opted_out, "https://different.example"))
+  comparison <- make_iss_test_client(
+    enforce_callback_issuer = FALSE,
+    compare_callback_issuer = TRUE
+  )
+  expect_silent(enforce_callback_issuer(comparison, NULL))
+  expect_error(
+    enforce_callback_issuer(comparison, "https://different.example"),
+    "does not match"
+  )
+  expect_false(identical(
+    state_client_policy_fingerprint(comparison),
+    state_client_policy_fingerprint(opted_out)
+  ))
+  expect_true(unserialize(serialize(comparison, NULL))@compare_callback_issuer)
+})
+
+test_that("raw constructors preserve explicit opt-out and validate comparison settings", {
+  args <- list(
+    provider = make_iss_test_client()@provider,
+    client_id = "test",
+    client_secret = "",
+    redirect_uri = "http://localhost:8100",
+    scopes = "openid",
+    state_key = strrep("a", 64)
+  )
+  expect_true(do.call(OAuthClient, args)@compare_callback_issuer)
+  args[["enforce_callback_issuer"]] <- FALSE
+  expect_false(do.call(OAuthClient, args)@compare_callback_issuer)
+  args[["compare_callback_issuer"]] <- TRUE
+  expect_true(do.call(OAuthClient, args)@compare_callback_issuer)
+  for (value in list(NA, logical(), c(TRUE, FALSE))) {
+    args[["compare_callback_issuer"]] <- value
+    expect_error(do.call(OAuthClient, args), "compare_callback_issuer")
+    expect_error(do.call(oauth_client, args), "compare_callback_issuer")
+  }
+  required <- make_iss_test_client(
+    enforce_callback_issuer = TRUE,
+    compare_callback_issuer = FALSE
+  )
+  expect_error(
+    enforce_callback_issuer(required, "https://different.example"),
+    "does not match"
+  )
+})
+
+test_that("optional issuer presence still compares before low-level exchange", {
+  client <- make_iss_test_client(
+    enforce_callback_issuer = FALSE,
+    compare_callback_issuer = TRUE
+  )
+  browser <- valid_browser_token()
+  state <- parse_query_param(
+    prepare_call(client, browser_token = browser),
+    "state"
+  )
+  testthat::local_mocked_bindings(
+    swap_code_for_token_set = function(...) stop("exchange must not run"),
+    .package = "shinyOAuth"
+  )
+  expect_error(
+    handle_callback(
+      client,
+      code = "ok",
+      state = state,
+      browser_token = browser,
+      iss = "https://different.example"
+    ),
+    "does not match expected issuer"
+  )
+})
+
+test_that("module success and error paths compare optional present issuers", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+  client <- make_iss_test_client(
+    enforce_callback_issuer = FALSE,
+    compare_callback_issuer = TRUE
+  )
+  testthat::local_mocked_bindings(
+    swap_code_for_token_set = function(...) stop("exchange must not run"),
+    .package = "shinyOAuth"
+  )
+  for (response in c("code=ok", "error=access_denied")) {
+    shiny::testServer(
+      oauth_module_server,
+      args = list(id = "auth", client = client, auto_redirect = FALSE),
+      {
+        state <- parse_query_param(values[["build_auth_url"]](), "state")
+        values[[".process_query"]](paste0(
+          "?",
+          response,
+          "&state=",
+          state,
+          "&iss=https%3A%2F%2Fdifferent.example"
+        ))
+        session[["flushReact"]]()
+        expect_identical(values[["error"]], "issuer_mismatch")
+        expect_null(values[["token"]])
+      }
+    )
+  }
+})
+
 test_that("oauth_client auto-enables callback issuer enforcement from provider metadata", {
   cli_auto <- make_iss_test_client(
     authorization_response_iss_parameter_supported = TRUE
@@ -61,6 +184,123 @@ test_that("oauth_client auto-enables callback issuer enforcement from provider m
     authorization_response_iss_parameter_supported = TRUE
   )
   expect_false(isTRUE(cli_opt_out@enforce_callback_issuer))
+})
+
+test_that("multi-issuer mode requires advertised RFC 9207 for direct callbacks", {
+  expect_error(
+    make_iss_test_client(
+      enforce_callback_issuer = TRUE,
+      authorization_response_iss_parameter_supported = FALSE,
+      authorization_server_mode = "multi_issuer"
+    ),
+    regexp = "advertised RFC 9207|authorization_response_iss_parameter_supported"
+  )
+
+  cli <- make_iss_test_client(
+    authorization_response_iss_parameter_supported = TRUE,
+    authorization_server_mode = "multi_issuer"
+  )
+  expect_true(isTRUE(cli@enforce_callback_issuer))
+
+  expect_error(
+    make_iss_test_client(
+      enforce_callback_issuer = FALSE,
+      authorization_response_iss_parameter_supported = TRUE,
+      authorization_server_mode = "multi_issuer"
+    ),
+    regexp = "cannot be disabled"
+  )
+})
+
+test_that("JARM satisfies multi-issuer mode without RFC 9207 metadata", {
+  for (mode in c("jwt", "query.jwt", "form_post.jwt")) {
+    cli <- make_iss_test_client(
+      authorization_response_iss_parameter_supported = FALSE,
+      authorization_server_mode = "multi_issuer",
+      response_mode = mode
+    )
+
+    expect_identical(cli@authorization_server_mode, "multi_issuer")
+    expect_identical(cli@response_mode, mode)
+    expect_false(isTRUE(cli@enforce_callback_issuer))
+    expect_silent(S7::validate(cli))
+  }
+})
+
+test_that("multi-redirect mode requires a complete distinct callback set", {
+  expect_error(
+    make_iss_test_client(
+      authorization_server_mode = "multi_redirect_uri"
+    ),
+    regexp = "at least two"
+  )
+  expect_error(
+    make_iss_test_client(
+      authorization_server_mode = "multi_redirect_uri",
+      authorization_server_redirect_uris = c(
+        "http://localhost:8100/callback?provider=one",
+        "http://localhost:8100/callback?provider=two"
+      )
+    ),
+    regexp = "distinct canonical|query string"
+  )
+  expect_error(
+    make_iss_test_client(
+      authorization_server_mode = "multi_redirect_uri",
+      authorization_server_redirect_uris = c(
+        "http://localhost:8100/other",
+        "http://localhost:8100/another"
+      )
+    ),
+    regexp = "must be included"
+  )
+
+  cli <- make_iss_test_client(
+    authorization_response_iss_parameter_supported = FALSE,
+    authorization_server_mode = "multi_redirect_uri",
+    authorization_server_redirect_uris = c(
+      "http://localhost:8100",
+      "http://localhost:8100/other-provider"
+    )
+  )
+  expect_identical(cli@authorization_server_mode, "multi_redirect_uri")
+  expect_false(isTRUE(cli@enforce_callback_issuer))
+})
+
+test_that("multi-server mode is bound into sealed callback policy", {
+  single <- make_iss_test_client()
+  multi <- make_iss_test_client(
+    authorization_server_mode = "multi_redirect_uri",
+    authorization_server_redirect_uris = c(
+      "http://localhost:8100",
+      "http://localhost:8100/other-provider"
+    )
+  )
+
+  expect_false(identical(
+    shinyOAuth:::state_client_policy_fingerprint(single),
+    shinyOAuth:::state_client_policy_fingerprint(multi)
+  ))
+})
+
+test_that("low-level callbacks reject multi-redirect mode", {
+  cli <- make_iss_test_client(
+    authorization_server_mode = "multi_redirect_uri",
+    authorization_server_redirect_uris = c(
+      "http://localhost:8100",
+      "http://localhost:8100/other-provider"
+    )
+  )
+
+  expect_error(
+    handle_callback(
+      client = cli,
+      code = "unused",
+      state = "unused",
+      browser_token = valid_browser_token()
+    ),
+    regexp = "cannot verify the received redirect URI"
+  )
 })
 
 test_that("callback iss matching expected issuer is accepted", {
@@ -76,8 +316,8 @@ test_that("callback iss matching expected issuer is accepted", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       token <- testthat::with_mocked_bindings(
@@ -86,20 +326,20 @@ test_that("callback iss matching expected issuer is accepted", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0(
+          values[[".process_query"]](paste0(
             "?code=ok&state=",
             enc,
             "&iss=",
             utils::URLencode("https://issuer.example.com", reserved = TRUE)
           ))
-          session$flushReact()
-          values$token
+          session[["flushReact"]]()
+          values[["token"]]
         }
       )
 
       testthat::expect_false(is.null(token))
-      testthat::expect_true(isTRUE(values$authenticated))
-      testthat::expect_null(values$error)
+      testthat::expect_true(isTRUE(values[["authenticated"]]))
+      testthat::expect_null(values[["error"]])
     }
   )
 })
@@ -117,8 +357,8 @@ test_that("callback iss matching expected issuer is accepted in strict mode", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       token <- testthat::with_mocked_bindings(
@@ -127,22 +367,66 @@ test_that("callback iss matching expected issuer is accepted in strict mode", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0(
+          values[[".process_query"]](paste0(
             "?code=ok&state=",
             enc,
             "&iss=",
             utils::URLencode("https://issuer.example.com", reserved = TRUE)
           ))
-          session$flushReact()
-          values$token
+          session[["flushReact"]]()
+          values[["token"]]
         }
       )
 
       testthat::expect_false(is.null(token))
-      testthat::expect_true(isTRUE(values$authenticated))
-      testthat::expect_null(values$error)
+      testthat::expect_true(isTRUE(values[["authenticated"]]))
+      testthat::expect_null(values[["error"]])
     }
   )
+})
+
+test_that("query issuer mismatch audits distinguish realms without revealing paths", {
+  expected <- "https://issuer.example.test/private-expected"
+  received <- "https://issuer.example.test/private-received"
+  client <- make_iss_test_client(issuer = expected)
+  events <- list()
+  local_options(
+    shinyOAuth.skip_browser_token = TRUE,
+    shinyOAuth.telemetry_path_scrubber = NULL,
+    shinyOAuth.audit_hook = function(event) {
+      events[[length(events) + 1L]] <<- event
+    }
+  )
+  shiny::testServer(
+    oauth_module_server,
+    args = list(id = "auth", client = client, auto_redirect = FALSE),
+    {
+      state <- parse_query_param(values[["build_auth_url"]](), "state")
+      values[[".process_query"]](paste0(
+        "?code=ok&state=",
+        state,
+        "&iss=",
+        utils::URLencode(received, reserved = TRUE)
+      ))
+      session[["flushReact"]]()
+      expect_identical(values[["error"]], "issuer_mismatch")
+    }
+  )
+  events <- Filter(
+    function(e) identical(e[["type"]], "audit_callback_iss_mismatch"),
+    events
+  )
+  expect_length(events, 1L)
+  event <- events[[1]]
+  expect_identical(event[["expected_issuer"]], "https://issuer.example.test/")
+  expect_identical(event[["callback_issuer"]], event[["expected_issuer"]])
+  expect_identical(event[["expected_issuer_digest"]], string_digest(expected))
+  expect_identical(event[["callback_issuer_digest"]], string_digest(received))
+  expect_false(identical(
+    event[["expected_issuer_digest"]],
+    event[["callback_issuer_digest"]]
+  ))
+  expect_false(any(grepl("private-expected|private-received", unlist(event))))
 })
 
 test_that("callback iss mismatching expected issuer is rejected", {
@@ -160,8 +444,8 @@ test_that("callback iss mismatching expected issuer is rejected", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       testthat::with_mocked_bindings(
@@ -170,19 +454,19 @@ test_that("callback iss mismatching expected issuer is rejected", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0(
+          values[[".process_query"]](paste0(
             "?code=ok&state=",
             enc,
             "&iss=",
             utils::URLencode("https://evil.example.com", reserved = TRUE)
           ))
-          session$flushReact()
+          session[["flushReact"]]()
         }
       )
 
-      testthat::expect_null(values$token)
-      testthat::expect_false(isTRUE(values$authenticated))
-      testthat::expect_identical(values$error, "issuer_mismatch")
+      testthat::expect_null(values[["token"]])
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_identical(values[["error"]], "issuer_mismatch")
     }
   )
 })
@@ -203,8 +487,8 @@ test_that("callback issuer opt-out skips mismatched iss in module callbacks", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       token <- testthat::with_mocked_bindings(
@@ -213,20 +497,20 @@ test_that("callback issuer opt-out skips mismatched iss in module callbacks", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0(
+          values[[".process_query"]](paste0(
             "?code=ok&state=",
             enc,
             "&iss=",
             utils::URLencode("https://evil.example.com", reserved = TRUE)
           ))
-          session$flushReact()
-          values$token
+          session[["flushReact"]]()
+          values[["token"]]
         }
       )
 
       testthat::expect_false(is.null(token))
-      testthat::expect_true(isTRUE(values$authenticated))
-      testthat::expect_null(values$error)
+      testthat::expect_true(isTRUE(values[["authenticated"]]))
+      testthat::expect_null(values[["error"]])
     }
   )
 })
@@ -244,8 +528,8 @@ test_that("callback without iss parameter retains current behavior", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       token <- testthat::with_mocked_bindings(
@@ -254,14 +538,14 @@ test_that("callback without iss parameter retains current behavior", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=ok&state=", enc))
-          session$flushReact()
-          values$token
+          values[[".process_query"]](paste0("?code=ok&state=", enc))
+          session[["flushReact"]]()
+          values[["token"]]
         }
       )
 
       testthat::expect_false(is.null(token))
-      testthat::expect_true(isTRUE(values$authenticated))
+      testthat::expect_true(isTRUE(values[["authenticated"]]))
     }
   )
 })
@@ -279,8 +563,8 @@ test_that("callback without iss parameter is rejected in strict mode", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       testthat::with_mocked_bindings(
@@ -289,14 +573,14 @@ test_that("callback without iss parameter is rejected in strict mode", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=ok&state=", enc))
-          session$flushReact()
+          values[[".process_query"]](paste0("?code=ok&state=", enc))
+          session[["flushReact"]]()
         }
       )
 
-      testthat::expect_null(values$token)
-      testthat::expect_false(isTRUE(values$authenticated))
-      testthat::expect_identical(values$error, "issuer_missing")
+      testthat::expect_null(values[["token"]])
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_identical(values[["error"]], "issuer_missing")
     }
   )
 })
@@ -316,8 +600,8 @@ test_that("callback without iss parameter is rejected when provider advertises R
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       testthat::with_mocked_bindings(
@@ -326,14 +610,14 @@ test_that("callback without iss parameter is rejected when provider advertises R
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=ok&state=", enc))
-          session$flushReact()
+          values[[".process_query"]](paste0("?code=ok&state=", enc))
+          session[["flushReact"]]()
         }
       )
 
-      testthat::expect_null(values$token)
-      testthat::expect_false(isTRUE(values$authenticated))
-      testthat::expect_identical(values$error, "issuer_missing")
+      testthat::expect_null(values[["token"]])
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_identical(values[["error"]], "issuer_missing")
     }
   )
 })
@@ -384,8 +668,8 @@ test_that("callback iss with trailing slash rejected under strict equality", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       testthat::with_mocked_bindings(
@@ -394,16 +678,16 @@ test_that("callback iss with trailing slash rejected under strict equality", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0(
+          values[[".process_query"]](paste0(
             "?code=ok&state=",
             enc,
             "&iss=",
             utils::URLencode("https://issuer.example.com/", reserved = TRUE)
           ))
-          session$flushReact()
+          session[["flushReact"]]()
           # Strict issuer matching: trailing slash difference is rejected (RFC 9207)
-          testthat::expect_null(values$token)
-          testthat::expect_false(isTRUE(values$authenticated))
+          testthat::expect_null(values[["token"]])
+          testthat::expect_false(isTRUE(values[["authenticated"]]))
         }
       )
     }
@@ -425,19 +709,19 @@ test_that("callback iss rejected for error response too (RFC 9207)", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
-      values$.process_query(paste0(
+      values[[".process_query"]](paste0(
         "?error=access_denied&state=",
         enc,
         "&iss=",
         utils::URLencode("https://evil.example.com", reserved = TRUE)
       ))
-      session$flushReact()
+      session[["flushReact"]]()
 
-      testthat::expect_identical(values$error, "issuer_mismatch")
+      testthat::expect_identical(values[["error"]], "issuer_mismatch")
     }
   )
 })
@@ -455,18 +739,18 @@ test_that("callback with empty iss parameter is rejected as invalid query", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       # Empty iss (e.g., ?iss=) should be rejected by validate_untrusted_query_param
       # as non-empty is required, rather than silently skipping RFC 9207 check
-      values$.process_query(paste0("?code=ok&state=", enc, "&iss="))
-      session$flushReact()
+      values[[".process_query"]](paste0("?code=ok&state=", enc, "&iss="))
+      session[["flushReact"]]()
 
-      testthat::expect_null(values$token)
-      testthat::expect_false(isTRUE(values$authenticated))
-      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_null(values[["token"]])
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
     }
   )
 })
@@ -487,23 +771,23 @@ test_that("callback with oversized iss parameter is rejected", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
-      url <- values$build_auth_url()
+      testthat::expect_true(values[["has_browser_token"]]())
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       # iss exceeding byte cap should be rejected
       long_iss <- paste0("https://issuer.example.com/", strrep("x", 100))
-      values$.process_query(paste0(
+      values[[".process_query"]](paste0(
         "?code=ok&state=",
         enc,
         "&iss=",
         utils::URLencode(long_iss, reserved = TRUE)
       ))
-      session$flushReact()
+      session[["flushReact"]]()
 
-      testthat::expect_null(values$token)
-      testthat::expect_false(isTRUE(values$authenticated))
-      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_null(values[["token"]])
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
     }
   )
 })
@@ -523,7 +807,7 @@ test_that("handle_callback accepts matching callback iss", {
       shinyOAuth::handle_callback(
         cli,
         code = "ok",
-        payload = enc,
+        state = enc,
         browser_token = browser_token,
         iss = "https://issuer.example.com"
       )
@@ -555,7 +839,7 @@ test_that("handle_callback rejects mismatched callback iss before token exchange
         shinyOAuth::handle_callback(
           cli,
           code = "ok",
-          payload = enc,
+          state = enc,
           browser_token = browser_token,
           iss = "https://evil.example.com"
         ),
@@ -584,7 +868,7 @@ test_that("handle_callback skips mismatched callback iss when opt-out is explici
       shinyOAuth::handle_callback(
         cli,
         code = "ok",
-        payload = enc,
+        state = enc,
         browser_token = browser_token,
         iss = "https://evil.example.com"
       )
@@ -614,7 +898,7 @@ test_that("handle_callback rejects missing iss in strict mode before token excha
         shinyOAuth::handle_callback(
           cli,
           code = "ok",
-          payload = enc,
+          state = enc,
           browser_token = browser_token
         ),
         class = "shinyOAuth_state_error",

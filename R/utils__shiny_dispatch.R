@@ -9,29 +9,18 @@
 
 #' Check whether mirai daemons are active
 #'
-#' Uses `mirai::daemons_set()` when available, and falls back to
-#' `mirai::info()` for older mirai versions that lack that helper.
+#' Uses the public `mirai::daemons_set()` API (mirai >= 2.5.1).
 #'
 #' @return `TRUE` when mirai daemons are active; otherwise `FALSE`.
 #' @keywords internal
 #' @noRd
 mirai_daemons_active <- function() {
-  tryCatch(
-    mirai::daemons_set(),
-    error = function(...) {
-      # Fallback for mirai < 2.3.0: daemons_set() doesn't exist.
-      # info() returns NULL when no daemons are configured.
-      tryCatch(
-        !is.null(mirai::info()),
-        error = function(...) FALSE
-      )
-    }
-  )
+  tryCatch(isTRUE(mirai::daemons_set()), error = function(...) FALSE)
 }
 
 #' Get the number of mirai daemon connections
 #'
-#' Uses `mirai::info()$connections`, which is the stable interface recommended
+#' Uses `mirai::info()[["connections"]]`, which is the stable interface recommended
 #' by mirai.
 #'
 #' @return Integer count of connections, or `0L` on error.
@@ -39,9 +28,42 @@ mirai_daemons_active <- function() {
 #' @noRd
 mirai_connection_count <- function() {
   tryCatch(
-    as.integer(mirai::info()$connections),
+    as.integer(mirai::info()[["connections"]] %||% 0L),
     error = function(...) 0L
   )
+}
+
+#' Resolve and validate the mirai task timeout
+#'
+#' @param timeout Optional timeout in milliseconds. When `NULL`, the
+#'   `shinyOAuth.async_timeout` option is used.
+#' @return `NULL` or a non-negative integer accepted by mirai.
+#' @keywords internal
+#' @noRd
+resolve_async_timeout <- function(timeout = NULL) {
+  timeout <- timeout %||% getOption("shinyOAuth.async_timeout")
+  if (is.null(timeout)) {
+    return(NULL)
+  }
+  if (
+    !is.numeric(timeout) ||
+      length(timeout) != 1L ||
+      is.na(timeout) ||
+      !is.finite(timeout) ||
+      timeout < 0 ||
+      timeout != floor(timeout) ||
+      timeout > .Machine[["integer.max"]]
+  ) {
+    err_config(c(
+      "Invalid async timeout",
+      "i" = paste0(
+        "Use NULL or one whole number from 0 to ",
+        .Machine[["integer.max"]],
+        " milliseconds."
+      )
+    ))
+  }
+  as.integer(timeout)
 }
 
 #' Dispatch async work through the configured backend
@@ -61,13 +83,12 @@ mirai_connection_count <- function() {
 #' @keywords internal
 #' @noRd
 async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
-  .timeout <- .timeout %||% getOption("shinyOAuth.async_timeout")
   captured_otel_envvars <- capture_async_otel_envvars()
   captured_otel_option_gates <- capture_async_otel_option_gates()
   captured_trace_id <- get_current_trace_id()
   if (!is.null(otel_context)) {
-    otel_context$attributes <- otel_with_trace_attribute(
-      attributes = otel_context$attributes,
+    otel_context[["attributes"]] <- otel_with_trace_attribute(
+      attributes = otel_context[["attributes"]],
       trace_id = captured_trace_id
     )
   }
@@ -80,56 +101,74 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
     .ns <- asNamespace("shinyOAuth")
     .otel_worker_span <- NULL
     .async_error <- NULL
+    .async_value <- NULL
     .otel_envvars <- .(captured_otel_envvars)
     .otel_option_gates <- .(captured_otel_option_gates)
     .otel_context <- .(otel_context)
     if (!is.null(.otel_option_gates) && length(.otel_option_gates) > 0) {
-      .otel_option_state <- .ns$apply_async_otel_option_gates(
+      .otel_option_state <- .ns[["apply_async_otel_option_gates"]](
         .otel_option_gates
       )
       on.exit(
-        .ns$restore_async_otel_option_gates(.otel_option_state$old_options),
+        .ns[["restore_async_otel_option_gates"]](.otel_option_state[[
+          "old_options",
+          exact = TRUE
+        ]]),
         add = TRUE
       )
     }
     if (!is.null(.otel_envvars) && length(.otel_envvars) > 0) {
-      .otel_env_state <- .ns$apply_async_otel_envvars(.otel_envvars)
-      if (isTRUE(.otel_env_state$changed)) {
+      .otel_env_state <- .ns[["apply_async_otel_envvars"]](.otel_envvars)
+      if (!isTRUE(.otel_env_state[["cache_reset"]])) {
+        options(
+          shinyOAuth.otel_tracing_enabled = FALSE,
+          shinyOAuth.otel_logging_enabled = FALSE
+        )
+      }
+      if (isTRUE(.otel_env_state[["changed"]])) {
         on.exit(
-          .ns$restore_async_otel_envvars(.otel_env_state$old_envvars),
+          .ns[["restore_async_otel_envvars"]](.otel_env_state[[
+            "old_envvars",
+            exact = TRUE
+          ]]),
           add = TRUE
         )
       }
     }
     if (!is.null(.otel_context)) {
-      .otel_worker_span <- .ns$otel_restore_parent_in_worker(
-        otel_headers = if (!is.null(.otel_context$headers)) {
-          .otel_context$headers
+      .otel_worker_span <- .ns[["otel_restore_parent_in_worker"]](
+        otel_headers = if (!is.null(.otel_context[["headers"]])) {
+          .otel_context[["headers"]]
         } else {
           NULL
         },
-        name = if (!is.null(.otel_context$worker_span_name)) {
-          .otel_context$worker_span_name
+        name = if (!is.null(.otel_context[["worker_span_name"]])) {
+          .otel_context[["worker_span_name"]]
         } else {
           "shinyOAuth.async.worker"
         },
-        attributes = if (!is.null(.otel_context$attributes)) {
-          .otel_context$attributes
+        attributes = if (!is.null(.otel_context[["attributes"]])) {
+          .otel_context[["attributes"]]
         } else {
           list()
         },
-        shiny_session = if (!is.null(.otel_context$shiny_session)) {
-          .otel_context$shiny_session
+        shiny_session = if (!is.null(.otel_context[["shiny_session"]])) {
+          .otel_context[["shiny_session"]]
         } else {
           NULL
         }
       )
     }
     on.exit(
-      .ns$otel_end_async_parent(
+      .ns[["otel_end_async_parent"]](
         list(span = .otel_worker_span),
         status = if (is.null(.async_error)) "ok" else "error",
-        error = .async_error
+        error = .async_error,
+        result = if (isTRUE(.otel_context[["token_operation_result"]])) {
+          .async_value
+        } else {
+          NULL
+        }
       ),
       add = TRUE
     )
@@ -137,7 +176,7 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
     .async_messages <- list()
     .async_value <- tryCatch(
       withCallingHandlers(
-        .ns$otel_with_active_span(.otel_worker_span, {
+        .ns[["otel_with_active_span"]](.otel_worker_span, {
           .(expr)
         }),
         warning = function(w) {
@@ -151,6 +190,11 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
       ),
       error = function(e) {
         .async_error <<- e
+        # mirai may reduce thrown conditions to text. Return refresh lifecycle
+        # errors as data so the main process can retire the old credential.
+        if (!is.null(e[["refresh_credential_outcome"]])) {
+          return(list(.shinyOAuth_async_error = e))
+        }
         stop(e)
       }
     )
@@ -168,6 +212,7 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
   if (mirai_available) {
     # Use mirai - inject the expression and args into the call.
     # .timeout enables per-task cancellation when using dispatcher.
+    .timeout <- resolve_async_timeout(.timeout)
     return(rlang::inject(
       mirai::mirai(!!wrapped_expr, .args = args, .timeout = .timeout)
     ))
@@ -191,7 +236,8 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
     return(promises::future_promise(
       expr = wrapped_expr,
       envir = env,
-      substitute = FALSE
+      substitute = FALSE,
+      seed = TRUE
     ))
   }
 
@@ -221,17 +267,27 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
 replay_async_conditions <- function(result) {
   if (
     is.list(result) &&
-      isTRUE(result$.shinyOAuth_async_wrapped)
+      isTRUE(result[[".shinyOAuth_async_wrapped"]])
   ) {
     if (!isFALSE(getOption("shinyOAuth.replay_async_conditions", TRUE))) {
-      for (m in result$messages) {
+      for (m in result[["messages"]]) {
         message(m)
       }
-      for (w in result$warnings) {
-        warning(w)
+      for (w in result[["warnings"]]) {
+        if (inherits(w, "shinyOAuth_event_sink_warning")) {
+          with_event_sink_warning_policy(warning(w))
+        } else {
+          warning(w)
+        }
       }
     }
-    return(result$value)
+    value <- result[["value"]]
+    if (
+      is.list(value) && inherits(value[[".shinyOAuth_async_error"]], "error")
+    ) {
+      stop(value[[".shinyOAuth_async_error"]])
+    }
+    return(value)
   }
   result
 }

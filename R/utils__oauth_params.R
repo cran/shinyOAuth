@@ -5,6 +5,81 @@
 
 # 1 OAuth parameter helpers ----------------------------------------------------
 
+# These transaction/credential fields cannot be replaced through escape hatches.
+immutable_oauth_params <- function() {
+  c(
+    "state",
+    "nonce",
+    "client_id",
+    "code",
+    "code_challenge",
+    "code_challenge_method",
+    "code_verifier",
+    "refresh_token",
+    "client_secret",
+    "client_assertion",
+    "client_assertion_type",
+    "request",
+    "request_uri",
+    "response_type",
+    "grant_type"
+  )
+}
+
+# Merge explicit overrides without creating ambiguous repeated protocol fields.
+merge_oauth_extra_params <- function(params, extra) {
+  resolved <- oauth_extra_params_resolution(params, extra)
+  if (!is.null(resolved[["problem"]])) {
+    err_config(resolved[["problem"]])
+  }
+  resolved[["params"]]
+}
+
+# Token scope overrides need a dedicated model for the refresh-token grant,
+# previous access-token grant, and current request. Reject before serialization,
+# including for provider objects created by an older package version.
+merge_token_extra_params <- function(params, extra) {
+  if ("scope" %in% tolower(trimws(names(extra)))) {
+    err_config(
+      "scope is reserved in extra_token_params; use a managed connection's refresh(scopes = ...)"
+    )
+  }
+  merge_oauth_extra_params(params, extra)
+}
+
+# Pure counterpart used by request construction and configuration assessment.
+oauth_extra_params_resolution <- function(params, extra) {
+  if (!length(extra)) {
+    return(list(params = params, problem = NULL))
+  }
+  keys <- tolower(trimws(names(extra)))
+  if (
+    length(keys) != length(extra) || !all(nzchar(keys)) || anyDuplicated(keys)
+  ) {
+    return(list(
+      problem = "Extra OAuth parameters must have unique, non-empty names"
+    ))
+  }
+  if (any(keys %in% immutable_oauth_params())) {
+    return(list(
+      problem = "Extra OAuth parameters cannot override transaction or credential fields"
+    ))
+  }
+  singletons <- keys %in% c("redirect_uri", "scope", "response_mode")
+  if (any(lengths(extra)[singletons] != 1L)) {
+    return(list(
+      problem = "OAuth redirect_uri, scope, and response_mode overrides must have exactly one value"
+    ))
+  }
+  existing <- tolower(trimws(names(params)))
+  for (i in seq_along(extra)) {
+    matched <- which(existing == keys[[i]])
+    # Keep the canonical protocol spelling of an existing field.
+    if (length(matched)) names(extra)[[i]] <- names(params)[[matched[[1]]]]
+  }
+  list(params = c(params[!existing %in% keys], extra), problem = NULL)
+}
+
 ## 1.1 Normalize protocol parameters -------------------------------------------
 
 #' Internal: normalize token endpoint auth style names
@@ -91,7 +166,8 @@ normalize_pkce_method <- function(pkce_method, default = NULL) {
 #' @param raw_mode Candidate response mode value.
 #' @param arg Label used in validation errors.
 #' @param context Prefix used in validation errors.
-#' @return A list containing the normalized mode and optional error text.
+#' @return A list containing the normalized mode, the effective mode used for
+#'   internal validation, and optional error text.
 #' @keywords internal
 #' @noRd
 resolve_auth_response_mode <- function(
@@ -99,7 +175,7 @@ resolve_auth_response_mode <- function(
   arg = "response_mode",
   context = "OAuthClient"
 ) {
-  out <- list(mode = NULL, error = NULL)
+  out <- list(mode = NULL, effective_mode = NULL, error = NULL)
 
   if (is.null(raw_mode)) {
     return(out)
@@ -114,7 +190,7 @@ resolve_auth_response_mode <- function(
       length(raw_mode) != 1L ||
       !nzchar(trimws(raw_mode))
   ) {
-    out$error <- paste0(
+    out[["error"]] <- paste0(
       context,
       ": ",
       arg,
@@ -124,35 +200,46 @@ resolve_auth_response_mode <- function(
   }
 
   mode <- tolower(trimws(raw_mode))
-  if (!mode %in% c("query", "form_post")) {
-    jarm_modes <- c("jwt", "query.jwt", "fragment.jwt", "form_post.jwt")
-    if (mode %in% jarm_modes) {
-      out$error <- paste0(
+  effective_mode <- if (identical(mode, "jwt")) "query.jwt" else mode
+
+  supported_modes <- c(
+    "query",
+    "form_post",
+    "jwt",
+    "query.jwt",
+    "form_post.jwt"
+  )
+  if (!mode %in% supported_modes) {
+    if (identical(mode, "fragment.jwt")) {
+      out[["error"]] <- paste0(
         context,
         ": ",
         arg,
         " = ",
         sQuote(raw_mode),
-        " is a JWT Secured Authorization Response Mode (JARM) value, ",
-        "which shinyOAuth does not currently support. shinyOAuth supports ",
-        "plain 'query' and 'form_post' response modes for authorization-code ",
-        "callbacks."
+        " is a JWT Secured Authorization Response Mode (JARM) value that ",
+        "depends on fragment-based callbacks, which shinyOAuth does not yet ",
+        "support. Supported authorization-code response modes are 'query', ",
+        "'form_post', 'query.jwt', 'form_post.jwt', and the 'jwt' alias for ",
+        "'query.jwt'."
       )
     } else {
-      out$error <- paste0(
+      out[["error"]] <- paste0(
         context,
         ": ",
         arg,
         " = ",
         sQuote(raw_mode),
-        " is not supported. shinyOAuth supports plain 'query' and ",
-        "'form_post' response modes for authorization-code callbacks."
+        " is not supported. Supported authorization-code response modes are ",
+        "'query', 'form_post', 'query.jwt', 'form_post.jwt', and the 'jwt' ",
+        "alias for 'query.jwt'."
       )
     }
     return(out)
   }
 
-  out$mode <- mode
+  out[["mode"]] <- mode
+  out[["effective_mode"]] <- effective_mode
   out
 }
 
@@ -166,7 +253,12 @@ resolve_auth_response_mode <- function(
 #' @keywords internal
 #' @noRd
 inspect_auth_response_mode <- function(extra_auth_params) {
-  out <- list(index = integer(0), mode = NULL, error = NULL)
+  out <- list(
+    index = integer(0),
+    mode = NULL,
+    effective_mode = NULL,
+    error = NULL
+  )
 
   if (!is.list(extra_auth_params) || length(extra_auth_params) == 0) {
     return(out)
@@ -182,27 +274,28 @@ inspect_auth_response_mode <- function(extra_auth_params) {
     return(out)
   }
   if (length(idx) > 1L) {
-    out$error <- paste0(
+    out[["error"]] <- paste0(
       "OAuthProvider: extra_auth_params$response_mode must be supplied at most once"
     )
     return(out)
   }
 
-  out$index <- idx[[1]]
+  out[["index"]] <- idx[[1]]
   resolved <- resolve_auth_response_mode(
-    extra_auth_params[[out$index]],
+    extra_auth_params[[out[["index"]]]],
     arg = "extra_auth_params$response_mode",
     context = "OAuthProvider"
   )
-  out$mode <- resolved$mode
-  out$error <- resolved$error
+  out[["mode"]] <- resolved[["mode"]]
+  out[["effective_mode"]] <- resolved[["effective_mode"]]
+  out[["error"]] <- resolved[["error"]]
   out
 }
 
 #' Resolve the effective OAuthClient authorization response mode
 #'
 #' Merges the client-level `response_mode` with any provider
-#' `extra_auth_params$response_mode`, validates conflicts against advertised
+#' `extra_auth_params[["response_mode"]]`, validates conflicts against advertised
 #' provider support, and strips the provider-level `response_mode` from the
 #' returned auth params so request builders can add it exactly once when
 #' explicitly configured.
@@ -210,8 +303,8 @@ inspect_auth_response_mode <- function(extra_auth_params) {
 #' @param oauth_client [OAuthClient] object.
 #' @param default_mode Fallback response mode when neither client nor provider
 #'   config sets one.
-#' @return A list containing the effective mode, explicit mode (or `NULL`),
-#'   cleaned provider auth params, and optional error text.
+#' @return A list containing the effective mode, the explicit outbound mode (or
+#'   `NULL`), cleaned provider auth params, and optional error text.
 #' @keywords internal
 #' @noRd
 resolve_oauth_client_response_mode <- function(
@@ -233,52 +326,68 @@ resolve_oauth_client_response_mode <- function(
     arg = "response_mode",
     context = "OAuthClient"
   )
-  if (!is.null(client_response_mode_info$error)) {
-    out$error <- client_response_mode_info$error
+  if (!is.null(client_response_mode_info[["error"]])) {
+    out[["error"]] <- client_response_mode_info[["error"]]
     return(out)
   }
 
   provider_response_mode_info <- inspect_auth_response_mode(extra_auth_params)
-  if (!is.null(provider_response_mode_info$error)) {
-    out$error <- provider_response_mode_info$error
+  if (!is.null(provider_response_mode_info[["error"]])) {
+    out[["error"]] <- provider_response_mode_info[["error"]]
     return(out)
   }
 
   if (
-    !is.null(client_response_mode_info$mode) &&
-      !is.null(provider_response_mode_info$mode) &&
+    !is.null(client_response_mode_info[["effective_mode"]]) &&
+      !is.null(provider_response_mode_info[["effective_mode"]]) &&
       !identical(
-        client_response_mode_info$mode,
-        provider_response_mode_info$mode
+        client_response_mode_info[["effective_mode"]],
+        provider_response_mode_info[["effective_mode"]]
       )
   ) {
-    out$error <- paste0(
+    out[["error"]] <- paste0(
       "OAuthClient: response_mode = ",
-      sQuote(client_response_mode_info$mode),
+      sQuote(client_response_mode_info[["mode"]]),
       " conflicts with OAuthProvider.extra_auth_params$response_mode = ",
-      sQuote(provider_response_mode_info$mode),
+      sQuote(provider_response_mode_info[["mode"]]),
       ". Configure response_mode on the client or provider extra_auth_params, not both."
     )
     return(out)
   }
 
-  out$explicit_mode <- client_response_mode_info$mode %||%
-    provider_response_mode_info$mode
-  out$mode <- out$explicit_mode %||% default_mode
+  out[["explicit_mode"]] <- client_response_mode_info[[
+    "mode",
+    exact = TRUE
+  ]] %||%
+    provider_response_mode_info[["mode"]]
+  out[["mode"]] <- client_response_mode_info[[
+    "effective_mode",
+    exact = TRUE
+  ]] %||%
+    provider_response_mode_info[["effective_mode"]] %||%
+    default_mode
 
-  if (length(provider_response_mode_info$index) == 1L) {
-    extra_auth_params[[provider_response_mode_info$index]] <- NULL
+  if (length(provider_response_mode_info[["index"]]) == 1L) {
+    extra_auth_params[[provider_response_mode_info[[
+      "index",
+      exact = TRUE
+    ]]]] <- NULL
   }
-  out$extra_auth_params <- extra_auth_params
+  out[["extra_auth_params"]] <- extra_auth_params
 
+  outbound_mode <- out[["explicit_mode"]] %||%
+    out[["mode"]]
   if (
-    !is.null(out$mode) &&
+    !is.null(outbound_mode) &&
       length(oauth_client@provider@response_modes_supported) > 0 &&
-      !out$mode %in% oauth_client@provider@response_modes_supported
+      !outbound_mode %in%
+        tolower(trimws(
+          oauth_client@provider@response_modes_supported
+        ))
   ) {
-    out$error <- paste0(
+    out[["error"]] <- paste0(
       "OAuthClient: response_mode = ",
-      sQuote(out$mode),
+      sQuote(outbound_mode),
       " is not advertised in provider response_modes_supported"
     )
     return(out)
@@ -313,16 +422,16 @@ inspect_auth_max_age <- function(extra_auth_params) {
     return(out)
   }
   if (length(idx) > 1L) {
-    out$error <- paste0(
+    out[["error"]] <- paste0(
       "OAuthProvider: extra_auth_params$max_age must be supplied at most once"
     )
     return(out)
   }
 
-  out$index <- idx[[1]]
-  raw_max_age <- extra_auth_params[[out$index]]
+  out[["index"]] <- idx[[1]]
+  raw_max_age <- extra_auth_params[[out[["index"]]]]
   if (length(raw_max_age) != 1L) {
-    out$error <- paste0(
+    out[["error"]] <- paste0(
       "OAuthProvider: extra_auth_params$max_age must be a single non-negative number of seconds"
     )
     return(out)
@@ -335,14 +444,38 @@ inspect_auth_max_age <- function(extra_auth_params) {
       !is.finite(max_age) ||
       max_age < 0
   ) {
-    out$error <- paste0(
+    out[["error"]] <- paste0(
       "OAuthProvider: extra_auth_params$max_age must be a single non-negative number of seconds"
     )
     return(out)
   }
 
-  out$value <- as.numeric(max_age)
+  out[["value"]] <- as.numeric(max_age)
   out
+}
+
+#' Resolve a provider's normalized OIDC max_age value
+#'
+#' @param provider Provider configuration. Test doubles without an
+#'   `extra_auth_params` property are treated as having no `max_age`.
+#' @return A non-negative numeric scalar, or `NULL` when not configured.
+#' @keywords internal
+#' @noRd
+provider_auth_max_age <- function(provider) {
+  auth_url <- tryCatch(provider@auth_url, error = function(...) NULL)
+  if (is_valid_string(auth_url)) {
+    problem <- authorization_query_resolution(auth_url)[["problem"]]
+    if (!is.null(problem)) err_config(problem)
+  }
+  extra_auth_params <- tryCatch(
+    provider@extra_auth_params,
+    error = function(...) list()
+  )
+  max_age_info <- inspect_auth_max_age(extra_auth_params)
+  if (!is.null(max_age_info[["error"]])) {
+    err_config(max_age_info[["error"]])
+  }
+  max_age_info[["value"]]
 }
 
 ## 1.2 Claims request parsing and enforcement ----------------------------------
@@ -419,7 +552,7 @@ extract_essential_claims <- function(claims_spec, target) {
     entry <- target_claims[[nm]]
     # A claim is essential if it has a list value with essential = TRUE.
     # NULL entries (claim requested without parameters) are not essential.
-    if (is.list(entry) && isTRUE(entry$essential)) {
+    if (is.list(entry) && isTRUE(entry[["essential"]])) {
       essential_names <- c(essential_names, nm)
     }
   }
@@ -443,11 +576,11 @@ extract_requested_claim_values <- function(entry) {
   requested <- list()
 
   if ("value" %in% names(entry)) {
-    requested <- c(requested, list(entry$value))
+    requested <- c(requested, list(entry[["value"]]))
   }
 
-  if ("values" %in% names(entry) && !is.null(entry$values)) {
-    values <- entry$values
+  if ("values" %in% names(entry) && !is.null(entry[["values"]])) {
+    values <- entry[["values"]]
     if (is.list(values)) {
       value_names <- names(values)
       if (!is.null(value_names) && any(nzchar(value_names))) {
@@ -481,7 +614,9 @@ extract_claim_value_constraints <- function(claims_spec, target) {
 
   constraints <- list()
   for (nm in names(target_claims)) {
-    requested <- extract_requested_claim_values(target_claims[[nm]])
+    requested <- extract_requested_claim_values(
+      target_claims[[nm]]
+    )
     if (length(requested) > 0) {
       constraints[[nm]] <- requested
     }
@@ -541,9 +676,21 @@ claims_request_target_has_enforceable_requirements <- function(
 #' @keywords internal
 #' @noRd
 canonicalize_claim_value <- function(value) {
+  sort_objects <- function(x) {
+    if (!is.list(x)) {
+      return(x)
+    }
+    x[] <- lapply(x, sort_objects)
+    # JSON arrays have no member names and retain their order. Sort object
+    # members recursively so serialization order does not affect equality.
+    if (!is.null(names(x))) {
+      x <- x[order(names(x), method = "radix")]
+    }
+    x
+  }
   encoded <- tryCatch(
     jsonlite::toJSON(
-      value,
+      sort_objects(value),
       auto_unbox = TRUE,
       null = "null",
       na = "null",
@@ -584,16 +731,57 @@ claim_matches_requested_values <- function(actual, requested) {
 #' Used by `validate_essential_claims()` when it builds mismatch messages.
 #'
 #' @param requested Requested value list.
+#' @param expose Whether to include raw values for explicit local debugging.
 #' @return One human-readable expectation string.
 #' @keywords internal
 #' @noRd
-format_claim_value_expectation <- function(requested) {
-  rendered <- vapply(requested, canonicalize_claim_value, character(1))
+format_claim_value_expectation <- function(requested, expose = FALSE) {
+  rendered <- vapply(
+    requested,
+    function(value) {
+      canonical <- canonicalize_claim_value(value)
+      if (isTRUE(expose)) {
+        canonical
+      } else {
+        paste0(
+          "digest=",
+          string_digest(canonical)
+        )
+      }
+    },
+    character(1)
+  )
   if (length(rendered) == 1) {
     return(rendered[[1]])
   }
 
   paste0("one of ", paste(rendered, collapse = ", "))
+}
+
+#' Test whether an essential claim contains a returned value
+#'
+#' JSON `null`, empty strings, and empty arrays do not satisfy an essential
+#' claim request. Boolean `FALSE` and numeric zero remain valid values.
+#'
+#' @param value Decoded claim value.
+#' @return A single logical value.
+#' @keywords internal
+#' @noRd
+claim_has_meaningful_value <- function(value) {
+  if (is.null(value) || length(value) == 0L) {
+    return(FALSE)
+  }
+  if (is.character(value)) {
+    return(any(!is.na(value) & nzchar(value)))
+  }
+  if (is.atomic(value)) {
+    return(!all(is.na(value)))
+  }
+  if (is.list(value)) {
+    return(any(vapply(value, claim_has_meaningful_value, logical(1))))
+  }
+
+  FALSE
 }
 
 #' Validate requested claims against returned claims
@@ -626,7 +814,17 @@ validate_essential_claims <- function(client, claims_present, target) {
     present_names <- names(claims_present) %||% character(0)
   }
 
-  missing_claims <- setdiff(essential, present_names)
+  missing_claims <- essential[
+    !vapply(
+      essential,
+      function(claim_name) {
+        claim_name %in%
+          present_names &&
+          claim_has_meaningful_value(claims_present[[claim_name]])
+      },
+      logical(1)
+    )
+  ]
 
   value_mismatches <- character(0)
   if (length(value_constraints) > 0) {
@@ -635,12 +833,13 @@ validate_essential_claims <- function(client, claims_present, target) {
 
       if (!claim_name %in% present_names) {
         if (!claim_name %in% missing_claims) {
+          expose_values <- isTRUE(allow_expose_error_body())
           value_mismatches <- c(
             value_mismatches,
             paste0(
               claim_name,
               " is missing (expected ",
-              format_claim_value_expectation(expected_values),
+              format_claim_value_expectation(expected_values, expose_values),
               ")"
             )
           )
@@ -650,14 +849,22 @@ validate_essential_claims <- function(client, claims_present, target) {
 
       actual_value <- claims_present[[claim_name]]
       if (!claim_matches_requested_values(actual_value, expected_values)) {
+        expose_values <- isTRUE(allow_expose_error_body())
+        actual_rendered <- canonicalize_claim_value(actual_value)
+        if (!expose_values) {
+          actual_rendered <- paste0(
+            "digest=",
+            string_digest(actual_rendered)
+          )
+        }
         value_mismatches <- c(
           value_mismatches,
           paste0(
             claim_name,
             " expected ",
-            format_claim_value_expectation(expected_values),
+            format_claim_value_expectation(expected_values, expose_values),
             " but got ",
-            canonicalize_claim_value(actual_value)
+            actual_rendered
           )
         )
       }
@@ -674,7 +881,7 @@ validate_essential_claims <- function(client, claims_present, target) {
     msg_parts <- c(
       msg_parts,
       paste0(
-        "Essential claims missing from ",
+        "Essential claims missing or empty in ",
         target_label,
         " response (OIDC Core Section 5.5): ",
         paste(missing_claims, collapse = ", ")

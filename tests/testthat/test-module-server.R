@@ -14,10 +14,10 @@ testthat::test_that("manual login flow yields authenticated TRUE on success", {
     ),
     expr = {
       # We should have a synthetic browser token available in tests
-      testthat::expect_true(values$has_browser_token())
+      testthat::expect_true(values[["has_browser_token"]]())
 
       # Build auth URL and capture state
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       testthat::expect_true(is.character(url) && nzchar(url))
       enc <- parse_query_param(url, "state")
       testthat::expect_true(is.character(enc) && nzchar(enc))
@@ -30,20 +30,21 @@ testthat::test_that("manual login flow yields authenticated TRUE on success", {
         .package = "shinyOAuth",
         {
           # Simulate provider callback
-          values$.process_query(paste0("?code=ok&state=", enc))
-          session$flushReact()
+          values[[".process_query"]](paste0("?code=ok&state=", enc))
+          session[["flushReact"]]()
           # Return the token for assertions
-          values$token
+          values[["token"]]
         }
       )
 
       testthat::expect_false(is.null(token))
-      session$flushReact()
+      session[["flushReact"]]()
       testthat::expect_true(
-        is.logical(values$authenticated) && isTRUE(values$authenticated)
+        is.logical(values[["authenticated"]]) &&
+          isTRUE(values[["authenticated"]])
       )
-      testthat::expect_null(values$error)
-      testthat::expect_null(values$error_description)
+      testthat::expect_null(values[["error"]])
+      testthat::expect_null(values[["error_description"]])
     }
   )
 })
@@ -63,12 +64,12 @@ testthat::test_that("manual build_auth_url keeps PAR lifetime metadata", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
+      testthat::expect_true(values[["has_browser_token"]]())
 
       url <- testthat::with_mocked_bindings(
         req_with_retry = function(req, ...) {
           httr2::response(
-            url = as.character(req$url),
+            url = as.character(req[["url"]]),
             status = 201,
             headers = list("content-type" = "application/json"),
             body = charToRaw(
@@ -78,25 +79,27 @@ testthat::test_that("manual build_auth_url keeps PAR lifetime metadata", {
         },
         .package = "shinyOAuth",
         {
-          values$build_auth_url()
+          values[["build_auth_url"]]()
         }
       )
 
       testthat::expect_true(is.character(url) && nzchar(url))
       testthat::expect_match(url, "[?&]request_uri=")
       testthat::expect_identical(
-        attr(url, "shinyOAuth.par_request_uri"),
+        attr(url, "shinyOAuth.par_request_uri", exact = TRUE),
         "urn:ietf:params:oauth:request_uri:test"
       )
       testthat::expect_identical(
-        attr(url, "shinyOAuth.par_expires_in"),
-        90L
+        attr(url, "shinyOAuth.par_expires_in", exact = TRUE),
+        90
       )
       testthat::expect_s3_class(
-        attr(url, "shinyOAuth.par_expires_at"),
+        attr(url, "shinyOAuth.par_expires_at", exact = TRUE),
         "POSIXct"
       )
-      testthat::expect_true(attr(url, "shinyOAuth.par_expires_at") > Sys.time())
+      testthat::expect_true(
+        attr(url, "shinyOAuth.par_expires_at", exact = TRUE) > Sys.time()
+      )
     }
   )
 })
@@ -114,8 +117,8 @@ testthat::test_that("manual build_auth_url wires request_uri mode through the mo
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
   cli@client_secret <- paste(rep("s", 32), collapse = "")
-  cli@authorization_request_audience <- "https://issuer.example.com"
-  cli@authorization_request_mode <- "request_uri"
+  cli@request_object_audience <- "https://issuer.example.com"
+  cli@request_object_mode <- "request_uri"
 
   shiny::testServer(
     app = oauth_module_server,
@@ -126,7 +129,7 @@ testthat::test_that("manual build_auth_url wires request_uri mode through the mo
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
+      testthat::expect_true(values[["has_browser_token"]]())
 
       url <- testthat::with_mocked_bindings(
         publish_shiny_request_object = function(
@@ -134,7 +137,8 @@ testthat::test_that("manual build_auth_url wires request_uri mode through the mo
           request_object,
           request_handle_id,
           expires_at,
-          base_url
+          base_url,
+          oauth_client
         ) {
           testthat::expect_true(
             is.character(request_object) && nzchar(request_object)
@@ -144,11 +148,12 @@ testthat::test_that("manual build_auth_url wires request_uri mode through the mo
           )
           testthat::expect_true(inherits(expires_at, c("POSIXct", "POSIXt")))
           testthat::expect_null(base_url)
+          testthat::expect_identical(oauth_client@state_store, cli@state_store)
           "https://client.example.com/request-object"
         },
         .package = "shinyOAuth",
         {
-          values$build_auth_url()
+          values[["build_auth_url"]]()
         }
       )
 
@@ -180,7 +185,7 @@ testthat::test_that("manual build_auth_url keeps OIDC outer params in request_ur
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE, scopes = "openid")
   cli@provider@issuer <- "https://example.com"
   cli@client_secret <- paste(rep("s", 32), collapse = "")
-  cli@authorization_request_mode <- "request_uri"
+  cli@request_object_mode <- "request_uri"
 
   shiny::testServer(
     app = oauth_module_server,
@@ -197,7 +202,7 @@ testthat::test_that("manual build_auth_url keeps OIDC outer params in request_ur
         },
         .package = "shinyOAuth",
         {
-          values$build_auth_url()
+          values[["build_auth_url"]]()
         }
       )
 
@@ -222,8 +227,8 @@ testthat::test_that("request_uri mode requires a pinned public origin policy", {
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
   cli@client_secret <- paste(rep("s", 32), collapse = "")
-  cli@authorization_request_audience <- "https://issuer.example.com"
-  cli@authorization_request_mode <- "request_uri"
+  cli@request_object_audience <- "https://issuer.example.com"
+  cli@request_object_mode <- "request_uri"
 
   testthat::expect_error(
     shiny::testServer(
@@ -245,8 +250,8 @@ testthat::test_that("manual build_auth_url forwards request_uri_base_url through
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
   cli@client_secret <- paste(rep("s", 32), collapse = "")
-  cli@authorization_request_audience <- "https://issuer.example.com"
-  cli@authorization_request_mode <- "request_uri"
+  cli@request_object_audience <- "https://issuer.example.com"
+  cli@request_object_mode <- "request_uri"
 
   shiny::testServer(
     app = oauth_module_server,
@@ -258,7 +263,7 @@ testthat::test_that("manual build_auth_url forwards request_uri_base_url through
       request_uri_base_url = "https://public.example.com/app/"
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
+      testthat::expect_true(values[["has_browser_token"]]())
 
       url <- testthat::with_mocked_bindings(
         publish_shiny_request_object = function(
@@ -266,7 +271,8 @@ testthat::test_that("manual build_auth_url forwards request_uri_base_url through
           request_object,
           request_handle_id,
           expires_at,
-          base_url
+          base_url,
+          oauth_client
         ) {
           testthat::expect_true(
             is.character(request_object) && nzchar(request_object)
@@ -276,11 +282,12 @@ testthat::test_that("manual build_auth_url forwards request_uri_base_url through
           )
           testthat::expect_true(inherits(expires_at, c("POSIXct", "POSIXt")))
           testthat::expect_identical(base_url, "https://public.example.com/app")
+          testthat::expect_identical(oauth_client@state_store, cli@state_store)
           "https://public.example.com/app/request-object"
         },
         .package = "shinyOAuth",
         {
-          values$build_auth_url()
+          values[["build_auth_url"]]()
         }
       )
 
@@ -314,15 +321,28 @@ testthat::test_that("manual sync login succeeds with browser-token protection en
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_false(values$has_browser_token())
+      testthat::expect_false(values[["has_browser_token"]]())
 
-      session$setInputs(shinyOAuth_sid = btok)
-      session$flushReact()
+      session[["setInputs"]](shinyOAuth_sid = btok)
+      session[["flushReact"]]()
 
-      testthat::expect_true(values$has_browser_token())
-      testthat::expect_identical(values$browser_token, btok)
+      testthat::expect_true(values[["has_browser_token"]]())
+      testthat::expect_identical(values[["browser_token"]], btok)
 
-      url <- values$build_auth_url()
+      url <- NULL
+      promises::then(values[["build_auth_url"]](), function(value) {
+        url <<- value
+      })
+      session[["setInputs"]](
+        shinyOAuth_sid = browser_ack[["token"]],
+        shinyOAuth_cookie_ack = list(
+          requestId = browser_ack[["id"]]
+        )
+      )
+      for (i in seq_len(8)) {
+        later::run_now()
+        session[["flushReact"]]()
+      }
       testthat::expect_true(is.character(url) && nzchar(url))
       enc <- parse_query_param(url, "state")
       testthat::expect_true(is.character(enc) && nzchar(enc))
@@ -337,21 +357,22 @@ testthat::test_that("manual sync login succeeds with browser-token protection en
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=ok&state=", enc))
-          session$flushReact()
-          values$token
+          values[[".process_query"]](paste0("?code=ok&state=", enc))
+          session[["flushReact"]]()
+          values[["token"]]
         }
       )
 
       testthat::expect_false(is.null(token))
-      testthat::expect_true(isTRUE(values$authenticated))
-      testthat::expect_null(values$error)
-      testthat::expect_null(values$error_description)
+      testthat::expect_true(isTRUE(values[["authenticated"]]))
+      testthat::expect_null(values[["error"]])
+      testthat::expect_null(values[["error_description"]])
     }
   )
 })
 
 testthat::test_that("login fails when introspection validation fails", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -368,9 +389,9 @@ testthat::test_that("login fails when introspection validation fails", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
+      testthat::expect_true(values[["has_browser_token"]]())
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       testthat::with_mocked_bindings(
@@ -379,7 +400,7 @@ testthat::test_that("login fails when introspection validation fails", {
         },
         req_with_retry = function(req, ...) {
           httr2::response(
-            url = as.character(req$url),
+            url = as.character(req[["url"]]),
             status = 200,
             headers = list("content-type" = "application/json"),
             body = charToRaw('{"active":false}')
@@ -387,23 +408,24 @@ testthat::test_that("login fails when introspection validation fails", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=ok&state=", enc))
-          session$flushReact()
+          values[[".process_query"]](paste0("?code=ok&state=", enc))
+          session[["flushReact"]]()
         }
       )
 
-      testthat::expect_false(isTRUE(values$authenticated))
-      testthat::expect_null(values$token)
-      testthat::expect_identical(values$error, "token_exchange_error")
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_null(values[["token"]])
+      testthat::expect_identical(values[["error"]], "token_exchange_error")
       testthat::expect_true(
-        is.character(values$error_description) &&
-          grepl("not active", values$error_description, ignore.case = TRUE)
+        is.character(values[["error_description"]]) &&
+          grepl("not active", values[["error_description"]], ignore.case = TRUE)
       )
     }
   )
 })
 
 testthat::test_that("sync callback state failures surface invalid_state", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -418,12 +440,12 @@ testthat::test_that("sync callback state failures surface invalid_state", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
+      testthat::expect_true(values[["has_browser_token"]]())
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
-      values$browser_token <- paste(rep("cd", 64), collapse = "")
+      values[["browser_token"]] <- paste(rep("cd", 64), collapse = "")
 
       testthat::with_mocked_bindings(
         swap_code_for_token_set = function(client, code, code_verifier) {
@@ -431,26 +453,27 @@ testthat::test_that("sync callback state failures surface invalid_state", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=bad&state=", enc))
-          session$flushReact()
+          values[[".process_query"]](paste0("?code=bad&state=", enc))
+          session[["flushReact"]]()
         }
       )
 
-      testthat::expect_identical(values$error, "invalid_state")
+      testthat::expect_identical(values[["error"]], "invalid_state")
       testthat::expect_true(
-        is.character(values$error_description) &&
+        is.character(values[["error_description"]]) &&
           grepl(
             "browser token mismatch",
-            values$error_description,
+            values[["error_description"]],
             ignore.case = TRUE
           )
       )
-      testthat::expect_null(values$token)
+      testthat::expect_null(values[["token"]])
     }
   )
 })
 
 testthat::test_that("async callback state failures surface invalid_state", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   testthat::skip_if_not_installed("later")
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
@@ -471,9 +494,9 @@ testthat::test_that("async callback state failures surface invalid_state", {
       indefinite_session = TRUE
     ),
     expr = {
-      testthat::expect_true(values$has_browser_token())
+      testthat::expect_true(values[["has_browser_token"]]())
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       testthat::with_mocked_bindings(
@@ -483,27 +506,27 @@ testthat::test_that("async callback state failures surface invalid_state", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=bad&state=", enc))
+          values[[".process_query"]](paste0("?code=bad&state=", enc))
 
           deadline <- Sys.time() + 2
-          while (is.null(values$error) && Sys.time() < deadline) {
+          while (is.null(values[["error"]]) && Sys.time() < deadline) {
             later::run_now(0.05)
-            session$flushReact()
+            session[["flushReact"]]()
             Sys.sleep(0.01)
           }
         }
       )
 
-      testthat::expect_identical(values$error, "invalid_state")
+      testthat::expect_identical(values[["error"]], "invalid_state")
       testthat::expect_true(
-        is.character(values$error_description) &&
+        is.character(values[["error_description"]]) &&
           grepl(
             "async browser token mismatch",
-            values$error_description,
+            values[["error_description"]],
             ignore.case = TRUE
           )
       )
-      testthat::expect_null(values$token)
+      testthat::expect_null(values[["token"]])
     }
   )
 })
@@ -523,9 +546,9 @@ testthat::test_that("auto_redirect triggers when unauthenticated and cookie pres
     ),
     expr = {
       # Simulate the initial empty query string load
-      values$.process_query("")
-      session$flushReact()
-      testthat::expect_true(isTRUE(values$auto_redirected))
+      values[[".process_query"]]("")
+      session[["flushReact"]]()
+      testthat::expect_true(isTRUE(values[["auto_redirected"]]))
     }
   )
 })
@@ -551,10 +574,10 @@ testthat::test_that("authenticated becomes FALSE for expired token (default mode
         expires_at = as.numeric(Sys.time()) - 10,
         id_token = NA_character_
       )
-      values$token <- t
+      values[["token"]] <- t
       # Observer recalculates authenticated when token changes
-      session$flushReact()
-      testthat::expect_false(values$authenticated)
+      session[["flushReact"]]()
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -581,12 +604,12 @@ testthat::test_that("reauth_after_seconds makes authenticated FALSE when max age
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
-      values$auth_started_at <- as.numeric(Sys.time()) - 5
+      values[["token"]] <- t
+      values[["auth_started_at"]] <- as.numeric(Sys.time()) - 5
       # Trigger recompute: poke token (no-op) to invalidate observer deps
-      values$token <- values$token
-      session$flushReact()
-      testthat::expect_false(values$authenticated)
+      values[["token"]] <- values[["token"]]
+      session[["flushReact"]]()
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -619,11 +642,11 @@ testthat::test_that("authenticated flips FALSE after expiry without poking react
         expires_at = as.numeric(Sys.time()) + expire_in_secs,
         id_token = NA_character_
       )
-      values$token <- t
-      session$flushReact()
+      values[["token"]] <- t
+      session[["flushReact"]]()
 
       # Immediately after setting, authenticated should be TRUE
-      testthat::expect_true(values$authenticated)
+      testthat::expect_true(values[["authenticated"]])
 
       # Wait for expiry to pass
       Sys.sleep(expire_in_secs + 0.1)
@@ -632,14 +655,14 @@ testthat::test_that("authenticated flips FALSE after expiry without poking react
       # trigger the authenticated observer to re-run. This verifies that
       # .compute_authenticated() correctly detects expiry via Sys.time().
       # In a real app, invalidateLater() schedules this automatically.
-      old_token <- values$token
-      values$token <- NULL
-      values$token <- old_token
-      session$flushReact()
+      old_token <- values[["token"]]
+      values[["token"]] <- NULL
+      values[["token"]] <- old_token
+      session[["flushReact"]]()
 
       # Authenticated should now be FALSE because .compute_authenticated()
       # checks Sys.time() against expires_at
-      testthat::expect_false(values$authenticated)
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -669,22 +692,22 @@ testthat::test_that("authenticated flips FALSE after reauth_after_seconds withou
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
-      values$auth_started_at <- as.numeric(Sys.time())
-      session$flushReact()
+      values[["token"]] <- t
+      values[["auth_started_at"]] <- as.numeric(Sys.time())
+      session[["flushReact"]]()
 
-      testthat::expect_true(values$authenticated)
+      testthat::expect_true(values[["authenticated"]])
 
       # Wait for reauth window to pass
       Sys.sleep(0.35)
 
       # Trigger reactive re-evaluation by toggling token
-      old_token <- values$token
-      values$token <- NULL
-      values$token <- old_token
-      session$flushReact()
+      old_token <- values[["token"]]
+      values[["token"]] <- NULL
+      values[["token"]] <- old_token
+      session[["flushReact"]]()
 
-      testthat::expect_false(values$authenticated)
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -710,10 +733,10 @@ testthat::test_that("authenticated TRUE for token with NA expires_at (no expiry)
         expires_at = NA_real_,
         id_token = NA_character_
       )
-      values$token <- t
-      session$flushReact()
+      values[["token"]] <- t
+      session[["flushReact"]]()
 
-      testthat::expect_true(values$authenticated)
+      testthat::expect_true(values[["authenticated"]])
     }
   )
 })
@@ -739,10 +762,10 @@ testthat::test_that("authenticated TRUE for token with Inf expires_at", {
         expires_at = Inf,
         id_token = NA_character_
       )
-      values$token <- t
-      session$flushReact()
+      values[["token"]] <- t
+      session[["flushReact"]]()
 
-      testthat::expect_true(values$authenticated)
+      testthat::expect_true(values[["authenticated"]])
     }
   )
 })
@@ -768,19 +791,19 @@ testthat::test_that("authenticated FALSE when error is set (default mode)", {
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
-      session$flushReact()
-      testthat::expect_true(values$authenticated)
+      values[["token"]] <- t
+      session[["flushReact"]]()
+      testthat::expect_true(values[["authenticated"]])
 
       # Setting error should flip authenticated to FALSE
-      values$error <- "some_error"
-      session$flushReact()
-      testthat::expect_false(values$authenticated)
+      values[["error"]] <- "some_error"
+      session[["flushReact"]]()
+      testthat::expect_false(values[["authenticated"]])
 
       # Clearing error should restore authenticated
-      values$error <- NULL
-      session$flushReact()
-      testthat::expect_true(values$authenticated)
+      values[["error"]] <- NULL
+      session[["flushReact"]]()
+      testthat::expect_true(values[["authenticated"]])
     }
   )
 })
@@ -806,14 +829,14 @@ testthat::test_that("authenticated FALSE when token is cleared", {
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
-      session$flushReact()
-      testthat::expect_true(values$authenticated)
+      values[["token"]] <- t
+      session[["flushReact"]]()
+      testthat::expect_true(values[["authenticated"]])
 
       # Clearing token should flip authenticated to FALSE
-      values$token <- NULL
-      session$flushReact()
-      testthat::expect_false(values$authenticated)
+      values[["token"]] <- NULL
+      session[["flushReact"]]()
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -840,11 +863,11 @@ testthat::test_that("authenticated correct at exact expiry boundary", {
         expires_at = now,
         id_token = NA_character_
       )
-      values$token <- t
-      session$flushReact()
+      values[["token"]] <- t
+      session[["flushReact"]]()
 
       # At exact boundary, now >= exp should be TRUE, so authenticated = FALSE
-      testthat::expect_false(values$authenticated)
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -870,27 +893,28 @@ testthat::test_that("indefinite_session keeps authenticated TRUE even when expir
         expires_at = as.numeric(Sys.time()) - 10,
         id_token = NA_character_
       )
-      values$token <- t
+      values[["token"]] <- t
       # Even with an error, authenticated should remain TRUE in indefinite mode
-      values$error <- "some_error"
-      values$error_description <- "desc"
+      values[["error"]] <- "some_error"
+      values[["error_description"]] <- "desc"
       # Poke token to trigger compute observer
-      values$token <- values$token
-      session$flushReact()
-      testthat::expect_true(values$authenticated)
+      values[["token"]] <- values[["token"]]
+      session[["flushReact"]]()
+      testthat::expect_true(values[["authenticated"]])
     }
   )
 })
 
 testthat::test_that("provider error with valid state sets provider error and authenticated FALSE", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
 
   seen <- character(0)
-  sess <- shiny::MockShinySession$new()
-  orig <- sess$sendCustomMessage
-  sess$sendCustomMessage <- function(type, message) {
+  sess <- shiny::MockShinySession[["new"]]()
+  orig <- sess[["sendCustomMessage"]]
+  sess[["sendCustomMessage"]] <- function(type, message) {
     seen <<- c(seen, type)
     orig(type, message)
   }
@@ -905,18 +929,18 @@ testthat::test_that("provider error with valid state sets provider error and aut
     session = sess,
     expr = {
       # Flush any pending reactive events from module initialization
-      session$flushReact()
+      session[["flushReact"]]()
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
-      values$.process_query(paste0(
+      values[[".process_query"]](paste0(
         "?error=access_denied&error_description=Nope&state=",
         enc
       ))
-      session$flushReact()
-      testthat::expect_identical(values$error, "access_denied")
-      testthat::expect_match(values$error_description, "Nope")
-      testthat::expect_false(values$authenticated)
+      session[["flushReact"]]()
+      testthat::expect_identical(values[["error"]], "access_denied")
+      testthat::expect_match(values[["error_description"]], "Nope")
+      testthat::expect_false(values[["authenticated"]])
 
       testthat::expect_true(
         any(seen == "shinyOAuth:clearQueryAndFixTitle"),
@@ -926,7 +950,76 @@ testthat::test_that("provider error with valid state sets provider error and aut
   )
 })
 
-testthat::test_that("error_uri from provider error callback is surfaced", {
+testthat::test_that("query callback rejects code and error before consuming state", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session[["flushReact"]]()
+
+      url <- values[["build_auth_url"]]()
+      enc <- parse_query_param(url, "state")
+      payload <- shinyOAuth:::state_decrypt_gcm(enc, key = cli@state_key)
+      cache_key <- shinyOAuth:::state_cache_key(payload[["state"]])
+      testthat::expect_false(is.null(
+        cli@state_store[["get"]](cache_key, missing = NULL)
+      ))
+
+      values[[".process_query"]](paste0(
+        "?code=ok&error=access_denied&state=",
+        enc
+      ))
+      session[["flushReact"]]()
+
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
+      testthat::expect_match(
+        values[["error_description"]],
+        "must not contain both code and error",
+        fixed = TRUE
+      )
+      testthat::expect_false(is.null(
+        cli@state_store[["get"]](cache_key, missing = NULL)
+      ))
+    }
+  )
+})
+
+testthat::test_that("code callback without state is rejected as invalid state", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session[["flushReact"]]()
+
+      values[[".process_query"]]("?code=ok")
+      session[["flushReact"]]()
+
+      testthat::expect_identical(values[["error"]], "invalid_state")
+      testthat::expect_match(values[["error_description"]], "state")
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_null(values[["token"]])
+    }
+  )
+})
+
+testthat::test_that("error_uri from provider error callback is surfaced on a provider host", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -939,28 +1032,100 @@ testthat::test_that("error_uri from provider error callback is surfaced", {
       auto_redirect = FALSE
     ),
     expr = {
-      session$flushReact()
+      session[["flushReact"]]()
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       # Provider returns error + error_description + error_uri
-      values$.process_query(paste0(
+      values[[".process_query"]](paste0(
         "?error=access_denied",
         "&error_description=Nope",
+        "&error_uri=https%3A%2F%2Fexample.com%2Fhelp%2Faccess_denied",
+        "&state=",
+        enc
+      ))
+      session[["flushReact"]]()
+
+      testthat::expect_identical(values[["error"]], "access_denied")
+      testthat::expect_match(values[["error_description"]], "Nope")
+      testthat::expect_identical(
+        values[["error_uri"]],
+        "https://example.com/help/access_denied"
+      )
+      testthat::expect_false(values[["authenticated"]])
+    }
+  )
+})
+
+testthat::test_that("https error_uri from an unrelated host is dropped", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session[["flushReact"]]()
+
+      url <- values[["build_auth_url"]]()
+      enc <- parse_query_param(url, "state")
+
+      values[[".process_query"]](paste0(
+        "?error=access_denied",
         "&error_uri=https%3A%2F%2Fprovider.example%2Fhelp%2Faccess_denied",
         "&state=",
         enc
       ))
-      session$flushReact()
+      session[["flushReact"]]()
 
-      testthat::expect_identical(values$error, "access_denied")
-      testthat::expect_match(values$error_description, "Nope")
+      testthat::expect_identical(values[["error"]], "access_denied")
+      testthat::expect_null(values[["error_uri"]])
+      testthat::expect_false(values[["authenticated"]])
+    }
+  )
+})
+
+testthat::test_that("error_uri can use an explicitly allowlisted host", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+  withr::local_options(list(
+    shinyOAuth.allowed_hosts = c("provider.example")
+  ))
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE
+    ),
+    expr = {
+      session[["flushReact"]]()
+
+      url <- values[["build_auth_url"]]()
+      enc <- parse_query_param(url, "state")
+
+      values[[".process_query"]](paste0(
+        "?error=access_denied",
+        "&error_uri=https%3A%2F%2Fprovider.example%2Fhelp%2Faccess_denied",
+        "&state=",
+        enc
+      ))
+      session[["flushReact"]]()
+
+      testthat::expect_identical(values[["error"]], "access_denied")
       testthat::expect_identical(
-        values$error_uri,
+        values[["error_uri"]],
         "https://provider.example/help/access_denied"
       )
-      testthat::expect_false(values$authenticated)
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -978,22 +1143,22 @@ testthat::test_that("non-https error_uri from provider error callback is dropped
       auto_redirect = FALSE
     ),
     expr = {
-      session$flushReact()
+      session[["flushReact"]]()
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
-      values$.process_query(paste0(
+      values[[".process_query"]](paste0(
         "?error=access_denied",
         "&error_uri=javascript%3Aalert(1)",
         "&state=",
         enc
       ))
-      session$flushReact()
+      session[["flushReact"]]()
 
-      testthat::expect_identical(values$error, "access_denied")
-      testthat::expect_null(values$error_uri)
-      testthat::expect_false(values$authenticated)
+      testthat::expect_identical(values[["error"]], "access_denied")
+      testthat::expect_null(values[["error_uri"]])
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -1011,22 +1176,22 @@ testthat::test_that("http error_uri from provider error callback is dropped", {
       auto_redirect = FALSE
     ),
     expr = {
-      session$flushReact()
+      session[["flushReact"]]()
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
-      values$.process_query(paste0(
+      values[[".process_query"]](paste0(
         "?error=access_denied",
         "&error_uri=http%3A%2F%2Fprovider.example%2Fhelp%2Faccess_denied",
         "&state=",
         enc
       ))
-      session$flushReact()
+      session[["flushReact"]]()
 
-      testthat::expect_identical(values$error, "access_denied")
-      testthat::expect_null(values$error_uri)
-      testthat::expect_false(values$authenticated)
+      testthat::expect_identical(values[["error"]], "access_denied")
+      testthat::expect_null(values[["error_uri"]])
+      testthat::expect_false(values[["authenticated"]])
     }
   )
 })
@@ -1044,25 +1209,26 @@ testthat::test_that("error_uri is NULL when provider omits it", {
       auto_redirect = FALSE
     ),
     expr = {
-      session$flushReact()
+      session[["flushReact"]]()
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       # Provider returns error without error_uri
-      values$.process_query(paste0(
+      values[[".process_query"]](paste0(
         "?error=server_error&state=",
         enc
       ))
-      session$flushReact()
+      session[["flushReact"]]()
 
-      testthat::expect_identical(values$error, "server_error")
-      testthat::expect_null(values$error_uri)
+      testthat::expect_identical(values[["error"]], "server_error")
+      testthat::expect_null(values[["error_uri"]])
     }
   )
 })
 
 testthat::test_that("oversized error_uri in callback is rejected", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -1076,10 +1242,10 @@ testthat::test_that("oversized error_uri in callback is rejected", {
       indefinite_session = TRUE
     ),
     expr = {
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
-      values$.process_query(
+      values[[".process_query"]](
         paste0(
           "?error=access_denied&error_uri=",
           strrep("x", 3000),
@@ -1087,11 +1253,11 @@ testthat::test_that("oversized error_uri in callback is rejected", {
           enc
         )
       )
-      session$flushReact()
+      session[["flushReact"]]()
 
-      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
       testthat::expect_match(
-        values$error_description %||% "",
+        values[["error_description"]] %||% "",
         "error_uri"
       )
     }
@@ -1099,6 +1265,7 @@ testthat::test_that("oversized error_uri in callback is rejected", {
 })
 
 testthat::test_that("oversized callback query params are rejected", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -1113,7 +1280,7 @@ testthat::test_that("oversized callback query params are rejected", {
     ),
     expr = {
       # Build a real state payload
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       # Oversized code should short-circuit before token exchange
@@ -1125,27 +1292,27 @@ testthat::test_that("oversized callback query params are rejected", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0(
+          values[[".process_query"]](paste0(
             "?code=",
-            strrep("a", 5000),
+            strrep("a", 8193),
             "&state=",
             enc
           ))
-          session$flushReact()
+          session[["flushReact"]]()
         }
       )
 
       testthat::expect_false(called)
-      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
       testthat::expect_match(
-        values$error_description %||% "",
+        values[["error_description"]] %||% "",
         "exceeded maximum length"
       )
 
       # Oversized error_description should also be rejected
-      values$error <- NULL
-      values$error_description <- NULL
-      values$.process_query(
+      values[["error"]] <- NULL
+      values[["error_description"]] <- NULL
+      values[[".process_query"]](
         paste0(
           "?error=access_denied&error_description=",
           strrep("x", 5000),
@@ -1153,10 +1320,10 @@ testthat::test_that("oversized callback query params are rejected", {
           enc
         )
       )
-      session$flushReact()
-      testthat::expect_identical(values$error, "invalid_callback_query")
+      session[["flushReact"]]()
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
       testthat::expect_match(
-        values$error_description %||% "",
+        values[["error_description"]] %||% "",
         "error_description"
       )
     }
@@ -1164,6 +1331,7 @@ testthat::test_that("oversized callback query params are rejected", {
 })
 
 testthat::test_that("oversized raw callback query string is rejected", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -1178,7 +1346,7 @@ testthat::test_that("oversized raw callback query string is rejected", {
     ),
     expr = {
       # Build a real state payload
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       # Construct a very large query string that would otherwise proceed to
@@ -1188,7 +1356,7 @@ testthat::test_that("oversized raw callback query string is rejected", {
         "?code=ok&state=",
         enc,
         "&pad=",
-        strrep("x", 25000)
+        strrep("x", 50000)
       )
 
       called <- FALSE
@@ -1199,23 +1367,24 @@ testthat::test_that("oversized raw callback query string is rejected", {
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(big_query)
-          session$flushReact()
+          values[[".process_query"]](big_query)
+          session[["flushReact"]]()
         }
       )
 
       testthat::expect_false(called)
-      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
       testthat::expect_match(
-        values$error_description %||% "",
+        values[["error_description"]] %||% "",
         "query string"
       )
-      testthat::expect_null(values$token)
+      testthat::expect_null(values[["token"]])
     }
   )
 })
 
 testthat::test_that("callback_max_query_bytes option is enforced", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -1229,7 +1398,7 @@ testthat::test_that("callback_max_query_bytes option is enforced", {
       indefinite_session = TRUE
     ),
     expr = {
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
 
       query <- paste0("?code=ok&state=", enc)
@@ -1239,17 +1408,20 @@ testthat::test_that("callback_max_query_bytes option is enforced", {
       withr::with_options(
         list(shinyOAuth.callback_max_query_bytes = query_bytes - 1),
         {
-          values$.process_query(query)
-          session$flushReact()
+          values[[".process_query"]](query)
+          session[["flushReact"]]()
         }
       )
-      testthat::expect_identical(values$error, "invalid_callback_query")
-      testthat::expect_match(values$error_description %||% "", "query string")
-      testthat::expect_null(values$token)
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
+      testthat::expect_match(
+        values[["error_description"]] %||% "",
+        "query string"
+      )
+      testthat::expect_null(values[["token"]])
 
       # Large enough cap allows the normal flow to proceed
-      values$error <- NULL
-      values$error_description <- NULL
+      values[["error"]] <- NULL
+      values[["error_description"]] <- NULL
       called <- FALSE
       withr::with_options(
         list(shinyOAuth.callback_max_query_bytes = query_bytes + 1),
@@ -1261,15 +1433,15 @@ testthat::test_that("callback_max_query_bytes option is enforced", {
             },
             .package = "shinyOAuth",
             {
-              values$.process_query(query)
-              session$flushReact()
+              values[[".process_query"]](query)
+              session[["flushReact"]]()
             }
           )
         }
       )
       testthat::expect_true(called)
-      testthat::expect_false(is.null(values$token))
-      testthat::expect_null(values$error)
+      testthat::expect_false(is.null(values[["token"]]))
+      testthat::expect_null(values[["error"]])
     }
   )
 })
@@ -1280,9 +1452,9 @@ testthat::test_that("callback code/state clears query even when token exchange f
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
 
   seen <- character(0)
-  sess <- shiny::MockShinySession$new()
-  orig <- sess$sendCustomMessage
-  sess$sendCustomMessage <- function(type, message) {
+  sess <- shiny::MockShinySession[["new"]]()
+  orig <- sess[["sendCustomMessage"]]
+  sess[["sendCustomMessage"]] <- function(type, message) {
     seen <<- c(seen, type)
     orig(type, message)
   }
@@ -1299,16 +1471,16 @@ testthat::test_that("callback code/state clears query even when token exchange f
     expr = {
       # Flush any pending reactive events from module initialization
       # (e.g., the url_search observer with MockShinySession's default ?mocksearch=1)
-      session$flushReact()
+      session[["flushReact"]]()
 
       # Ensure browser token is properly initialized before building auth URL.
       # If this fails, the option didn't propagate correctly to the module.
       testthat::expect_true(
-        values$has_browser_token(),
+        values[["has_browser_token"]](),
         info = "Browser token should be available in test mode"
       )
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       testthat::expect_true(
         is.character(url) && nchar(url) > 0 && !is.na(url),
         info = "build_auth_url() should return a valid URL"
@@ -1325,20 +1497,20 @@ testthat::test_that("callback code/state clears query even when token exchange f
         },
         .package = "shinyOAuth",
         {
-          values$.process_query(paste0("?code=bad&state=", enc))
-          session$flushReact()
+          values[[".process_query"]](paste0("?code=bad&state=", enc))
+          session[["flushReact"]]()
         }
       )
 
       testthat::expect_identical(
-        values$error,
+        values[["error"]],
         "token_exchange_error",
         info = paste0(
           "error=",
-          values$error,
+          values[["error"]],
           "; ",
           "desc=",
-          values$error_description %||% "(none)"
+          values[["error_description"]] %||% "(none)"
         )
       )
       testthat::expect_true(
@@ -1355,9 +1527,9 @@ testthat::test_that("callback params are cleared when token already exists", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
 
   seen <- character(0)
-  sess <- shiny::MockShinySession$new()
-  orig <- sess$sendCustomMessage
-  sess$sendCustomMessage <- function(type, message) {
+  sess <- shiny::MockShinySession[["new"]]()
+  orig <- sess[["sendCustomMessage"]]
+  sess[["sendCustomMessage"]] <- function(type, message) {
     seen <<- c(seen, type)
     orig(type, message)
   }
@@ -1372,14 +1544,14 @@ testthat::test_that("callback params are cleared when token already exists", {
     session = sess,
     expr = {
       # Drain startup events and isolate this test's message capture.
-      session$flushReact()
+      session[["flushReact"]]()
       seen <<- character(0)
 
-      url <- values$build_auth_url()
+      url <- values[["build_auth_url"]]()
       enc <- parse_query_param(url, "state")
       payload <- shinyOAuth:::state_payload_decrypt_validate(cli, enc)
-      key <- shinyOAuth:::state_cache_key(payload$state)
-      before <- cli@state_store$get(key, missing = NULL)
+      key <- shinyOAuth:::state_cache_key(payload[["state"]])
+      before <- cli@state_store[["get"]](key, missing = NULL)
       testthat::expect_false(is.null(before))
 
       t <- OAuthToken(
@@ -1388,18 +1560,18 @@ testthat::test_that("callback params are cleared when token already exists", {
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
+      values[["token"]] <- t
 
-      values$.process_query(paste0("?code=abc&state=", enc, "&foo=1"))
-      session$flushReact()
+      values[[".process_query"]](paste0("?code=abc&state=", enc, "&foo=1"))
+      session[["flushReact"]]()
 
-      after <- cli@state_store$get(key, missing = NULL)
+      after <- cli@state_store[["get"]](key, missing = NULL)
 
       testthat::expect_true(
         any(seen == "shinyOAuth:clearQueryAndFixTitle"),
         info = "Expected clearQueryAndFixTitle when callback params appear with existing token"
       )
-      testthat::expect_identical(values$token@access_token, "existing")
+      testthat::expect_identical(values[["token"]]@access_token, "existing")
       testthat::expect_identical(after, before)
     }
   )
@@ -1424,24 +1596,24 @@ testthat::test_that("request_login is ignored while already authenticated", {
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
-      session$flushReact()
+      values[["token"]] <- t
+      session[["flushReact"]]()
 
-      keys_before <- sort(cli@state_store$keys())
+      keys_before <- sort(cli@state_store[["keys"]]())
       result <- NULL
       testthat::expect_warning(
         {
-          result <- values$request_login()
+          result <- values[["request_login"]]()
         },
         "already authenticated"
       )
-      session$flushReact()
-      keys_after <- sort(cli@state_store$keys())
+      session[["flushReact"]]()
+      keys_after <- sort(cli@state_store[["keys"]]())
 
       testthat::expect_identical(result, FALSE)
       testthat::expect_identical(keys_after, keys_before)
-      testthat::expect_false(isTRUE(values$auto_redirected))
-      testthat::expect_false(isTRUE(values$pending_login))
+      testthat::expect_false(isTRUE(values[["auto_redirected"]]))
+      testthat::expect_false(isTRUE(values[["pending_login"]]))
     }
   )
 })
@@ -1466,26 +1638,27 @@ testthat::test_that("request_login can start reauth before authenticated observe
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
+      values[["token"]] <- t
       # Successful logins clear the browser token; mimic that state so
       # reauth has to issue a fresh token and mark pending_login.
-      values$browser_token <- NULL
-      session$flushReact()
+      values[["browser_token"]] <- NULL
+      session[["flushReact"]]()
 
-      values$token <- NULL
-      result <- values$request_login()
+      values[["token"]] <- NULL
+      result <- values[["request_login"]]()
 
       testthat::expect_identical(result, TRUE)
-      testthat::expect_true(isTRUE(values$pending_login))
-      testthat::expect_false(isTRUE(values$auto_redirected))
+      testthat::expect_true(isTRUE(values[["pending_login"]]))
+      testthat::expect_false(isTRUE(values[["auto_redirected"]]))
 
-      session$flushReact()
-      testthat::expect_false(isTRUE(values$authenticated))
+      session[["flushReact"]]()
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
     }
   )
 })
 
 testthat::test_that("query size cap enforced even when token already exists", {
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
   withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
 
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
@@ -1506,7 +1679,7 @@ testthat::test_that("query size cap enforced even when token already exists", {
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
+      values[["token"]] <- t
 
       # Build an oversized query that contains OAuth callback keys.
       # The default derived cap is ~20480 bytes; use 30 000 to exceed it.
@@ -1515,17 +1688,150 @@ testthat::test_that("query size cap enforced even when token already exists", {
         strrep("x", 30000)
       )
 
-      values$.process_query(big_query)
-      session$flushReact()
+      values[[".process_query"]](big_query)
+      session[["flushReact"]]()
 
       # The oversized query should be rejected before parsing.
-      testthat::expect_identical(values$error, "invalid_callback_query")
+      testthat::expect_identical(values[["error"]], "invalid_callback_query")
       testthat::expect_match(
-        values$error_description %||% "",
+        values[["error_description"]] %||% "",
         "query string"
       )
       # Token must remain untouched.
-      testthat::expect_identical(values$token@access_token, "existing")
+      testthat::expect_identical(values[["token"]]@access_token, "existing")
+    }
+  )
+})
+
+testthat::test_that("callback query helpers only treat response as callback for query JARM", {
+  expect_false(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=ok&foo=1"
+  ))
+  expect_false(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=header.payload.signature&foo=1"
+  ))
+  expect_false(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=ok&response=header.payload.signature&foo=1"
+  ))
+  expect_false(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=header.payload.signature&response=ok&foo=1"
+  ))
+  expect_true(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=header.payload.signature&foo=1",
+    query_jarm_client = TRUE
+  ))
+  expect_true(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=ok&response=header.payload.signature&foo=1",
+    query_jarm_client = TRUE
+  ))
+  expect_true(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=header.payload.signature&response=ok&foo=1",
+    query_jarm_client = TRUE
+  ))
+  expect_true(shinyOAuth:::oauth_module_query_has_callback_keys(
+    "?response=ok&foo=1",
+    query_jarm_client = TRUE,
+    response_is_callback = TRUE
+  ))
+
+  expect_silent(shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+    "?response=ok&response=still-ok"
+  ))
+  expect_silent(shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+    "?response=ok&response=one.two.three"
+  ))
+  expect_silent(shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+    "?response=one.two.three&response=ok"
+  ))
+  expect_silent(shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+    "?response=header.payload.signature&response=one.two.three"
+  ))
+  expect_error(
+    shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+      "?response=ok&response=one.two.three",
+      query_jarm_client = TRUE
+    ),
+    class = "shinyOAuth_state_error",
+    regexp = "duplicate OAuth parameter: response"
+  )
+  expect_error(
+    shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+      "?response=one.two.three&response=ok",
+      query_jarm_client = TRUE
+    ),
+    class = "shinyOAuth_state_error",
+    regexp = "duplicate OAuth parameter: response"
+  )
+  expect_error(
+    shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+      "?response=header.payload.signature&response=one.two.three",
+      query_jarm_client = TRUE
+    ),
+    class = "shinyOAuth_state_error",
+    regexp = "duplicate OAuth parameter: response"
+  )
+  expect_error(
+    shinyOAuth:::reject_duplicate_oauth_module_callback_query(
+      "?response=ok&response=still-ok",
+      query_jarm_client = TRUE,
+      response_is_callback = TRUE
+    ),
+    class = "shinyOAuth_state_error",
+    regexp = "duplicate OAuth parameter: response"
+  )
+
+  expect_identical(
+    shinyOAuth:::strip_oauth_module_callback_query("?response=ok&foo=1"),
+    "?response=ok&foo=1"
+  )
+  expect_identical(
+    shinyOAuth:::strip_oauth_module_callback_query(
+      "?response=header.payload.signature&foo=1"
+    ),
+    "?response=header.payload.signature&foo=1"
+  )
+  expect_identical(
+    shinyOAuth:::strip_oauth_module_callback_query(
+      "?response=ok&response=header.payload.signature&foo=1"
+    ),
+    "?response=ok&foo=1"
+  )
+  expect_identical(
+    shinyOAuth:::strip_oauth_module_callback_query(
+      "?response=header.payload.signature&foo=1",
+      query_jarm_client = TRUE
+    ),
+    "?foo=1"
+  )
+  expect_identical(
+    shinyOAuth:::strip_oauth_module_callback_query(
+      "?response=ok&response=header.payload.signature&foo=1",
+      query_jarm_client = TRUE
+    ),
+    "?foo=1"
+  )
+})
+
+testthat::test_that("non-JARM clients ignore compact-looking response app params", {
+  withr::local_options(list(shinyOAuth.skip_browser_token = TRUE))
+
+  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
+
+  shiny::testServer(
+    app = oauth_module_server,
+    args = list(
+      id = "auth",
+      client = cli,
+      auto_redirect = FALSE,
+      indefinite_session = TRUE
+    ),
+    expr = {
+      values[[".process_query"]]("?response=header.payload.signature")
+      session[["flushReact"]]()
+
+      testthat::expect_null(values[["error"]])
+      testthat::expect_null(values[["error_description"]])
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
     }
   )
 })
@@ -1544,15 +1850,15 @@ testthat::test_that("strip_oauth_query removes only OAuth params", {
     ),
     expr = {
       q <- "?code=abc&state=s1&foo=1&bar=2"
-      out <- values$.strip_oauth_query(q)
+      out <- values[[".strip_oauth_query"]](q)
       testthat::expect_true(identical(out, "?foo=1&bar=2"))
 
       q2 <- "?foo=1&bar=2"
-      out2 <- values$.strip_oauth_query(q2)
+      out2 <- values[[".strip_oauth_query"]](q2)
       testthat::expect_identical(out2, "?foo=1&bar=2")
 
       q3 <- "?code=abc&state=s1"
-      out3 <- values$.strip_oauth_query(q3)
+      out3 <- values[[".strip_oauth_query"]](q3)
       testthat::expect_identical(out3, "")
     }
   )
@@ -1593,12 +1899,12 @@ testthat::test_that("oauth_module_server clears token and sets error when proact
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
-      values$auth_started_at <- as.numeric(Sys.time())
+      values[["token"]] <- t
+      values[["auth_started_at"]] <- as.numeric(Sys.time())
       # Ensure we start from a clean error state
-      values$error <- NULL
-      values$error_description <- NULL
-      session$flushReact()
+      values[["error"]] <- NULL
+      values[["error_description"]] <- NULL
+      session[["flushReact"]]()
 
       # Force refresh_token() to error as if ID token validation failed.
       testthat::with_mocked_bindings(
@@ -1615,19 +1921,19 @@ testthat::test_that("oauth_module_server clears token and sets error when proact
         {
           # Pump the event loop until the observer runs or timeout
           deadline <- Sys.time() + 2
-          while (is.null(values$error) && Sys.time() < deadline) {
+          while (is.null(values[["error"]]) && Sys.time() < deadline) {
             later::run_now(0.05)
-            session$flushReact()
+            session[["flushReact"]]()
             Sys.sleep(0.01)
           }
         }
       )
 
-      testthat::expect_identical(values$error, "token_refresh_error")
-      testthat::expect_false(is.null(values$error_description))
-      testthat::expect_true(is.null(values$token))
-      testthat::expect_false(values$authenticated)
-      testthat::expect_false(isTRUE(values$refresh_in_progress))
+      testthat::expect_identical(values[["error"]], "token_refresh_error")
+      testthat::expect_false(is.null(values[["error_description"]]))
+      testthat::expect_true(is.null(values[["token"]]))
+      testthat::expect_false(values[["authenticated"]])
+      testthat::expect_false(isTRUE(values[["refresh_in_progress"]]))
     }
   )
 })
@@ -1661,14 +1967,14 @@ testthat::test_that("oauth_module_server refresh failure with auto_redirect queu
         expires_at = as.numeric(Sys.time()) + 3600,
         id_token = NA_character_
       )
-      values$token <- t
-      values$auth_started_at <- as.numeric(Sys.time())
-      values$error <- NULL
-      values$error_description <- NULL
+      values[["token"]] <- t
+      values[["auth_started_at"]] <- as.numeric(Sys.time())
+      values[["error"]] <- NULL
+      values[["error_description"]] <- NULL
       # Successful login clears the browser token, so refresh-failure reauth
       # must first queue a replacement token before redirecting.
-      values$browser_token <- NULL
-      session$flushReact()
+      values[["browser_token"]] <- NULL
+      session[["flushReact"]]()
 
       testthat::with_mocked_bindings(
         refresh_token = function(
@@ -1683,33 +1989,33 @@ testthat::test_that("oauth_module_server refresh failure with auto_redirect queu
         .package = "shinyOAuth",
         {
           deadline <- Sys.time() + 2
-          while (!isTRUE(values$pending_login) && Sys.time() < deadline) {
+          while (!isTRUE(values[["pending_login"]]) && Sys.time() < deadline) {
             later::run_now(0.05)
-            session$flushReact()
+            session[["flushReact"]]()
             Sys.sleep(0.01)
           }
         }
       )
 
-      testthat::expect_identical(values$error, "token_refresh_error")
-      testthat::expect_false(isTRUE(values$authenticated))
-      testthat::expect_true(is.null(values$token))
-      testthat::expect_true(isTRUE(values$reauth_triggered))
-      testthat::expect_true(isTRUE(values$pending_login))
-      testthat::expect_false(isTRUE(values$auto_redirected))
-      testthat::expect_false(isTRUE(values$refresh_in_progress))
+      testthat::expect_identical(values[["error"]], "token_refresh_error")
+      testthat::expect_false(isTRUE(values[["authenticated"]]))
+      testthat::expect_true(is.null(values[["token"]]))
+      testthat::expect_true(isTRUE(values[["reauth_triggered"]]))
+      testthat::expect_true(isTRUE(values[["pending_login"]]))
+      testthat::expect_false(isTRUE(values[["auto_redirected"]]))
+      testthat::expect_false(isTRUE(values[["refresh_in_progress"]]))
 
-      values$browser_token <- valid_browser_token()
+      values[["browser_token"]] <- valid_browser_token()
 
       deadline <- Sys.time() + 2
-      while (!isTRUE(values$auto_redirected) && Sys.time() < deadline) {
+      while (!isTRUE(values[["auto_redirected"]]) && Sys.time() < deadline) {
         later::run_now(0.05)
-        session$flushReact()
+        session[["flushReact"]]()
         Sys.sleep(0.01)
       }
 
-      testthat::expect_false(isTRUE(values$pending_login))
-      testthat::expect_true(isTRUE(values$auto_redirected))
+      testthat::expect_false(isTRUE(values[["pending_login"]]))
+      testthat::expect_true(isTRUE(values[["auto_redirected"]]))
     }
   )
 })
@@ -1729,7 +2035,7 @@ testthat::test_that("oauth_module_server proactive refresh forwards introspectio
     redirect_uri = "http://localhost:8100",
     scopes = character(0),
     introspect = TRUE,
-    introspect_elements = c("sub", "client_id"),
+    introspection_checks = c("sub", "client_id"),
     state_store = cachem::cache_mem(max_age = 600),
     state_key = paste0(
       "0123456789abcdefghijklmnopqrstuvwxyz",
@@ -1738,8 +2044,8 @@ testthat::test_that("oauth_module_server proactive refresh forwards introspectio
   )
 
   calls <- new.env(parent = emptyenv())
-  calls$token <- 0L
-  calls$introspection <- 0L
+  calls[["token"]] <- 0L
+  calls[["introspection"]] <- 0L
 
   shiny::testServer(
     app = oauth_module_server,
@@ -1756,9 +2062,9 @@ testthat::test_that("oauth_module_server proactive refresh forwards introspectio
     expr = {
       testthat::with_mocked_bindings(
         req_with_retry = function(req, ...) {
-          url <- as.character(req$url)
+          url <- as.character(req[["url"]])
           if (grepl("/token", url, fixed = TRUE)) {
-            calls$token <- calls$token + 1L
+            calls[["token"]] <- calls[["token"]] + 1L
             return(httr2::response(
               url = url,
               status = 200,
@@ -1770,7 +2076,7 @@ testthat::test_that("oauth_module_server proactive refresh forwards introspectio
           }
 
           if (grepl("/introspect", url, fixed = TRUE)) {
-            calls$introspection <- calls$introspection + 1L
+            calls[["introspection"]] <- calls[["introspection"]] + 1L
             return(httr2::response(
               url = url,
               status = 200,
@@ -1792,25 +2098,25 @@ testthat::test_that("oauth_module_server proactive refresh forwards introspectio
             id_token = NA_character_
           )
           t@userinfo <- list(sub = "user-1")
-          values$token <- t
-          values$auth_started_at <- as.numeric(Sys.time())
-          values$error <- NULL
-          values$error_description <- NULL
-          session$flushReact()
+          values[["token"]] <- t
+          values[["auth_started_at"]] <- as.numeric(Sys.time())
+          values[["error"]] <- NULL
+          values[["error_description"]] <- NULL
+          session[["flushReact"]]()
 
           deadline <- Sys.time() + 2
-          while (calls$introspection < 1L && Sys.time() < deadline) {
+          while (calls[["introspection"]] < 1L && Sys.time() < deadline) {
             later::run_now(0.05)
-            session$flushReact()
+            session[["flushReact"]]()
             Sys.sleep(0.01)
           }
         }
       )
 
-      testthat::expect_gte(calls$token, 1L)
-      testthat::expect_gte(calls$introspection, 1L)
-      testthat::expect_identical(values$token@access_token, "new_at")
-      testthat::expect_false(isTRUE(values$refresh_in_progress))
+      testthat::expect_gte(calls[["token"]], 1L)
+      testthat::expect_gte(calls[["introspection"]], 1L)
+      testthat::expect_identical(values[["token"]]@access_token, "new_at")
+      testthat::expect_false(isTRUE(values[["refresh_in_progress"]]))
     }
   )
 })

@@ -280,6 +280,43 @@ test_that("validate_essential_claims: 'strict' mode passes when all essential cl
   )
 })
 
+test_that("essential claims reject null and empty decoded values", {
+  cli <- make_test_client(
+    claims = list(
+      userinfo = list(
+        auth_time = list(essential = TRUE),
+        nickname = list(essential = TRUE),
+        roles = list(essential = TRUE),
+        email_verified = list(essential = TRUE)
+      )
+    ),
+    claims_validation = "strict"
+  )
+  invalid <- jsonlite::fromJSON(
+    paste0(
+      '{"auth_time":null,"nickname":"",',
+      '"roles":[],"email_verified":false}'
+    ),
+    simplifyVector = FALSE
+  )
+  valid <- jsonlite::fromJSON(
+    paste0(
+      '{"auth_time":0,"nickname":"neo",',
+      '"roles":["reader"],"email_verified":false}'
+    ),
+    simplifyVector = FALSE
+  )
+
+  expect_error(
+    shinyOAuth:::validate_essential_claims(cli, invalid, "userinfo"),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "auth_time, nickname, roles"
+  )
+  expect_no_error(
+    shinyOAuth:::validate_essential_claims(cli, valid, "userinfo")
+  )
+})
+
 test_that("validate_essential_claims: 'warn' mode warns on missing essential claims", {
   cli <- make_test_client(
     use_nonce = TRUE,
@@ -426,6 +463,127 @@ test_that("validate_essential_claims: 'strict' mode errors on mismatched request
   )
 })
 
+test_that("exact claim values compare objects independently of member order", {
+  requested <- list(
+    address = list(country = "NL", locality = "Amsterdam"),
+    entries = list(list(id = 1, active = TRUE), list(id = 2))
+  )
+  equivalent <- list(
+    entries = list(list(active = TRUE, id = 1), list(id = 2)),
+    address = list(locality = "Amsterdam", country = "NL")
+  )
+  for (target in c("id_token", "userinfo")) {
+    for (mode in c("strict", "warn")) {
+      client <- make_test_client(
+        use_nonce = TRUE,
+        claims = setNames(list(list(custom = list(value = requested))), target),
+        claims_validation = mode
+      )
+      expect_no_warning(validate_essential_claims(
+        client,
+        list(custom = equivalent),
+        target
+      ))
+      client@claims_validation <- "strict"
+      different <- equivalent
+      different[["entries"]] <- rev(different[["entries"]])
+      expect_error(
+        validate_essential_claims(client, list(custom = different), target),
+        "Requested claim values not satisfied"
+      )
+    }
+  }
+  for (different in list("1", TRUE, list(1), list(value = 1), NULL)) {
+    expect_false(claim_matches_requested_values(different, list(1)))
+  }
+  expect_true(claim_matches_requested_values(
+    list(list(b = 2, a = 1)),
+    list(list(list(a = 1, b = 2)))
+  ))
+})
+
+test_that("claim mismatch diagnostics redact ID token and UserInfo values", {
+  digest_key <- charToRaw(strrep("d", 32))
+  expected <- list(
+    id_token = "expected-id-person@example.test",
+    userinfo = "expected-info-person@example.test"
+  )
+  actual <- list(
+    id_token = "returned-id-person@example.test",
+    userinfo = "returned-info-person@example.test"
+  )
+  events <- list()
+  withr::local_options(list(
+    shinyOAuth.audit_digest_key = digest_key,
+    shinyOAuth.expose_error_body = FALSE,
+    shinyOAuth.audit_hook = function(event) {
+      events[[length(events) + 1L]] <<- event
+    }
+  ))
+  cli <- make_test_client(
+    use_nonce = TRUE,
+    claims = list(
+      id_token = list(email = list(value = expected[["id_token"]])),
+      userinfo = list(email = list(value = expected[["userinfo"]]))
+    ),
+    claims_validation = "strict"
+  )
+
+  for (target in names(expected)) {
+    error <- tryCatch(
+      shinyOAuth:::validate_essential_claims(
+        cli,
+        list(email = actual[[target]]),
+        target
+      ),
+      error = identity
+    )
+    diagnostic <- conditionMessage(error)
+    event_message <- paste(
+      unlist(events[[length(events)]][["message"]]),
+      collapse = " "
+    )
+    expected_digest <- shinyOAuth:::string_digest(
+      shinyOAuth:::canonicalize_claim_value(expected[[target]])
+    )
+    actual_digest <- shinyOAuth:::string_digest(
+      shinyOAuth:::canonicalize_claim_value(actual[[target]])
+    )
+
+    expect_s3_class(error, paste0("shinyOAuth_", target, "_error"))
+    target_label <- if (identical(target, "id_token")) "ID token" else target
+    expect_match(diagnostic, target_label, fixed = TRUE)
+    expect_match(diagnostic, paste0("digest=", expected_digest), fixed = TRUE)
+    expect_match(diagnostic, paste0("digest=", actual_digest), fixed = TRUE)
+    expect_false(grepl(expected[[target]], diagnostic, fixed = TRUE))
+    expect_false(grepl(actual[[target]], diagnostic, fixed = TRUE))
+    expect_false(grepl(expected[[target]], event_message, fixed = TRUE))
+    expect_false(grepl(actual[[target]], event_message, fixed = TRUE))
+  }
+})
+
+test_that("explicit sensitive diagnostics may include claim mismatch values", {
+  expected <- "expected-person@example.test"
+  actual <- "returned-person@example.test"
+  withr::local_options(list(shinyOAuth.expose_error_body = TRUE))
+  cli <- make_test_client(
+    claims = list(userinfo = list(email = list(value = expected))),
+    claims_validation = "strict"
+  )
+
+  error <- tryCatch(
+    shinyOAuth:::validate_essential_claims(
+      cli,
+      list(email = actual),
+      "userinfo"
+    ),
+    error = identity
+  )
+
+  expect_match(conditionMessage(error), expected, fixed = TRUE)
+  expect_match(conditionMessage(error), actual, fixed = TRUE)
+})
+
 test_that("validate_essential_claims: 'strict' mode errors when value-constrained claim is missing", {
   cli <- make_test_client(
     claims = list(
@@ -557,7 +715,7 @@ test_that("claims_validation = 'strict' errors during handle_callback for missin
       shinyOAuth:::handle_callback(
         cli,
         code = "ok",
-        payload = enc,
+        state = enc,
         browser_token = tok
       )
     ),
@@ -623,7 +781,7 @@ test_that("claims_validation = 'strict' errors during handle_callback for mismat
       shinyOAuth:::handle_callback(
         cli,
         code = "ok",
-        payload = enc,
+        state = enc,
         browser_token = tok
       )
     ),
@@ -683,7 +841,7 @@ test_that("claims_validation = 'none' does not error for missing ID token essent
     shinyOAuth:::handle_callback(
       cli,
       code = "ok",
-      payload = enc,
+      state = enc,
       browser_token = tok
     )
   )

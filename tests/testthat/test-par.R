@@ -1,13 +1,13 @@
 request_body_text <- function(req) {
-  body <- req$body %||% NULL
+  body <- req[["body"]] %||% NULL
   if (is.null(body)) {
     return(NA_character_)
   }
-  if (identical(body$type, "raw")) {
-    return(rawToChar(body$data))
+  if (identical(body[["type"]], "raw")) {
+    return(rawToChar(body[["data"]]))
   }
-  if (identical(body$type, "form")) {
-    data <- body$data %||% list()
+  if (identical(body[["type"]], "form")) {
+    data <- body[["data"]] %||% list()
     if (!length(data)) {
       return("")
     }
@@ -92,7 +92,7 @@ test_that("prepare_call pushes authorization params and redirects with request_u
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -111,18 +111,20 @@ test_that("prepare_call pushes authorization params and redirects with request_u
   )
   expect_match(auth_url, "client_id=abc")
   expect_identical(
-    attr(auth_url, "shinyOAuth.par_request_uri"),
+    attr(auth_url, "shinyOAuth.par_request_uri", exact = TRUE),
     "urn:ietf:params:oauth:request_uri:test"
   )
   expect_identical(
-    attr(auth_url, "shinyOAuth.par_expires_in"),
-    90L
+    attr(auth_url, "shinyOAuth.par_expires_in", exact = TRUE),
+    90
   )
   expect_s3_class(
-    attr(auth_url, "shinyOAuth.par_expires_at"),
+    attr(auth_url, "shinyOAuth.par_expires_at", exact = TRUE),
     "POSIXct"
   )
-  expect_true(attr(auth_url, "shinyOAuth.par_expires_at") > Sys.time())
+  expect_true(
+    attr(auth_url, "shinyOAuth.par_expires_at", exact = TRUE) > Sys.time()
+  )
   expect_false(grepl("[?&]state=", auth_url))
   expect_false(grepl("[?&]redirect_uri=", auth_url))
   expect_false(grepl("[?&]code_challenge=", auth_url))
@@ -143,7 +145,7 @@ test_that("PAR pushes form_post response_mode in authorization request body", {
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -173,7 +175,7 @@ test_that("PAR minimal front-channel mode omits duplicated OIDC params", {
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -200,16 +202,16 @@ test_that("PAR minimal front-channel mode omits duplicated OIDC params", {
   expect_match(body_text, "redirect_uri=http%3A%2F%2Flocalhost%3A8100")
 })
 
-test_that("PAR requests keep nonce-challenge retries enabled", {
+test_that("PAR requests disable generic retries", {
   cli <- make_par_test_client()
   retry_idempotent <- NULL
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       retry_args <- list(...)
-      retry_idempotent <<- retry_args$idempotent %||% NULL
+      retry_idempotent <<- retry_args[["idempotent"]] %||% NULL
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -226,7 +228,7 @@ test_that("PAR requests keep nonce-challenge retries enabled", {
     auth_url,
     "request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Atest"
   )
-  expect_identical(retry_idempotent, TRUE)
+  expect_identical(retry_idempotent, FALSE)
 })
 
 test_that("PAR attaches DPoP proof and retries once on nonce challenge", {
@@ -242,11 +244,11 @@ test_that("PAR attaches DPoP proof and retries once on nonce challenge", {
         quiet = TRUE,
         redact_headers = FALSE
       )
-      proofs <<- c(proofs, dry$headers$dpop %||% NA_character_)
+      proofs <<- c(proofs, dry[["headers"]][["dpop"]] %||% NA_character_)
 
       if (retry_count == 1L) {
         return(httr2::response(
-          url = as.character(req$url),
+          url = as.character(req[["url"]]),
           status = 400,
           headers = list(
             "content-type" = "application/json",
@@ -257,7 +259,7 @@ test_that("PAR attaches DPoP proof and retries once on nonce challenge", {
       }
 
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -286,7 +288,7 @@ test_that("PAR attaches DPoP proof and retries once on nonce challenge", {
   )
 
   expect_false("nonce" %in% names(first_payload))
-  expect_identical(second_payload$nonce, "par-nonce-1")
+  expect_identical(second_payload[["nonce"]], "par-nonce-1")
 })
 
 test_that("PAR HTTP failures surface as PAR-specific errors", {
@@ -295,7 +297,7 @@ test_that("PAR HTTP failures surface as PAR-specific errors", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 400,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -310,7 +312,7 @@ test_that("PAR HTTP failures surface as PAR-specific errors", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "Pushed authorization request failed|PAR rejected|invalid_request"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 })
 
 test_that("PAR rejects redirect responses", {
@@ -319,7 +321,7 @@ test_that("PAR rejects redirect responses", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 302,
         headers = list(location = "https://evil.example.com/par"),
         body = charToRaw("")
@@ -332,7 +334,7 @@ test_that("PAR rejects redirect responses", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "Unexpected redirect response during pushed_authorization_request"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 })
 
 test_that("prepare_call preserves repeated resource indicators in PAR body", {
@@ -348,7 +350,7 @@ test_that("prepare_call preserves repeated resource indicators in PAR body", {
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -381,7 +383,7 @@ test_that("prepare_call forwards extra auth params into the PAR body", {
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -412,7 +414,7 @@ test_that("PAR response requires request_uri and expires_in", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw('{"expires_in":90}')
@@ -425,12 +427,12 @@ test_that("PAR response requires request_uri and expires_in", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "request_uri"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -445,7 +447,7 @@ test_that("PAR response requires request_uri and expires_in", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "expires_in"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 })
 
 test_that("PAR response requires 201 JSON with integer expires_in", {
@@ -454,7 +456,7 @@ test_that("PAR response requires 201 JSON with integer expires_in", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -469,13 +471,13 @@ test_that("PAR response requires 201 JSON with integer expires_in", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "HTTP 201 Created|Status 200"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 
   cli <- make_par_test_client()
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "text/plain"),
         body = charToRaw(
@@ -490,13 +492,13 @@ test_that("PAR response requires 201 JSON with integer expires_in", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "not JSON|Content-Type"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 
   cli <- make_par_test_client()
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -511,13 +513,13 @@ test_that("PAR response requires 201 JSON with integer expires_in", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "expires_in"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 
   cli <- make_par_test_client()
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -532,13 +534,13 @@ test_that("PAR response requires 201 JSON with integer expires_in", {
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
     regexp = "positive integer"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 
   cli <- make_par_test_client()
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -555,9 +557,9 @@ test_that("PAR response requires 201 JSON with integer expires_in", {
 
   expect_error(
     shinyOAuth:::prepare_call(cli, valid_browser_token()),
-    regexp = "duplicate member name: request_uri"
+    regexp = "duplicate member name"
   )
-  expect_length(cli@state_store$keys(), 0L)
+  expect_length(cli@state_store[["keys"]](), 0L)
 })
 
 test_that("provider reserves request_uri and request object parameters", {
@@ -652,7 +654,7 @@ test_that("OIDC discovery rejects inconsistent required PAR metadata", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(disc_body)
@@ -667,7 +669,7 @@ test_that("OIDC discovery rejects inconsistent required PAR metadata", {
   )
 })
 
-test_that("OIDC discovery applies the regular non-https host policy to PAR", {
+test_that("OIDC discovery requires HTTPS for PAR despite the host allowlist", {
   disc_body <- jsonlite::toJSON(
     list(
       issuer = "https://issuer.example.com",
@@ -689,7 +691,7 @@ test_that("OIDC discovery applies the regular non-https host policy to PAR", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(disc_body)
@@ -703,16 +705,13 @@ test_that("OIDC discovery applies the regular non-https host policy to PAR", {
     shinyOAuth.allowed_non_https_hosts = "issuer.example.com"
   ))
 
-  prov <- oauth_provider_oidc_discover(
-    "https://issuer.example.com"
-  )
-  expect_identical(
-    prov@par_url,
-    "http://issuer.example.com/par"
+  expect_error(
+    oauth_provider_oidc_discover("https://issuer.example.com"),
+    regexp = "must use HTTPS"
   )
 })
 
-test_that("OIDC discovery rejects PAR when the regular non-https host policy forbids it", {
+test_that("OIDC discovery rejects non-HTTPS PAR before regular host policy", {
   disc_body <- jsonlite::toJSON(
     list(
       issuer = "https://issuer.example.com",
@@ -734,7 +733,7 @@ test_that("OIDC discovery rejects PAR when the regular non-https host policy for
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(disc_body)
@@ -750,7 +749,7 @@ test_that("OIDC discovery rejects PAR when the regular non-https host policy for
 
   expect_error(
     oauth_provider_oidc_discover("https://issuer.example.com"),
-    regexp = "Endpoint host or scheme not allowed"
+    regexp = "must use HTTPS"
   )
 })
 
@@ -771,7 +770,7 @@ test_that("client_secret_jwt PAR request sends client assertion and omits secret
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -786,30 +785,26 @@ test_that("client_secret_jwt PAR request sends client assertion and omits secret
 
   expect_match(auth_url, "request_uri=")
   expect_identical(
-    captured$client_assertion_type,
+    captured[["client_assertion_type"]],
     "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
   )
   expect_true(
-    is.character(captured$client_assertion) && nzchar(captured$client_assertion)
+    is.character(captured[["client_assertion"]]) &&
+      nzchar(captured[["client_assertion"]])
   )
   expect_false("client_secret" %in% names(captured))
 })
 
-test_that("client_secret_jwt PAR retries rebuild client assertions", {
+test_that("client_secret_jwt PAR nonce replay rebuilds client assertions", {
   cli <- make_par_test_client(
     token_auth_style = "client_secret_jwt",
-    client_secret = paste(rep("s", 32), collapse = "")
+    client_secret = paste(rep("s", 32), collapse = ""),
+    dpop_private_key = openssl::rsa_keygen()
   )
   seen_jtis <- character(0)
 
-  withr::local_options(list(
-    shinyOAuth.retry_max_tries = 2L,
-    shinyOAuth.retry_backoff_base = 0.01,
-    shinyOAuth.retry_backoff_cap = 0.01
-  ))
-
   testthat::local_mocked_bindings(
-    req_perform = function(req) {
+    req_perform = function(req, ...) {
       body_text <- request_body_text(req)
       assertion <- parse_query_param(
         paste0("https://example.com/?", body_text),
@@ -817,19 +812,22 @@ test_that("client_secret_jwt PAR retries rebuild client assertions", {
         decode = TRUE
       )
       payload <- shinyOAuth:::parse_jwt_payload(assertion)
-      seen_jtis <<- c(seen_jtis, payload$jti %||% NA_character_)
+      seen_jtis <<- c(seen_jtis, payload[["jti"]] %||% NA_character_)
 
       if (length(seen_jtis) == 1L) {
         return(httr2::response(
-          url = as.character(req$url),
-          status = 500,
-          headers = list("content-type" = "application/json"),
-          body = charToRaw("{}")
+          url = as.character(req[["url"]]),
+          status = 400,
+          headers = list(
+            "content-type" = "application/json",
+            "dpop-nonce" = "par-nonce-1"
+          ),
+          body = charToRaw('{"error":"use_dpop_nonce"}')
         ))
       }
 
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -838,10 +836,6 @@ test_that("client_secret_jwt PAR retries rebuild client assertions", {
       )
     },
     .package = "httr2"
-  )
-  testthat::local_mocked_bindings(
-    Sys.sleep = function(time) invisible(NULL),
-    .package = "base"
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
@@ -857,15 +851,16 @@ test_that("PAR body auth omits client_secret for public clients and keeps extra 
     client_secret = "",
     extra_token_headers = c(`X-Test-Par` = "ok")
   )
+  cli@endpoint_auth <- list(par = list(extra_headers = c(`X-Test-Par` = "ok")))
   body_text <- NULL
   seen_header <- NULL
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
-      seen_header <<- req$headers$`X-Test-Par` %||% NULL
+      seen_header <<- req[["headers"]][["X-Test-Par"]] %||% NULL
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -897,7 +892,7 @@ test_that("PAR header auth uses Basic auth and keeps client_secret out of body",
       body_text <<- request_body_text(req)
       auth_header_names <<- names(as.list(req[["headers"]]))
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -932,7 +927,7 @@ test_that("PAR JWT client assertions target par_url by default and allow audienc
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -945,9 +940,9 @@ test_that("PAR JWT client assertions target par_url by default and allow audienc
 
   shinyOAuth:::prepare_call(cli_default, valid_browser_token())
   payload_default <- shinyOAuth:::parse_jwt_payload(
-    captured_default$client_assertion
+    captured_default[["client_assertion"]]
   )
-  expect_identical(payload_default$aud, cli_default@provider@par_url)
+  expect_identical(payload_default[["aud"]], cli_default@provider@par_url)
 
   cli_override <- make_par_test_client(
     token_auth_style = "client_secret_jwt",
@@ -966,7 +961,7 @@ test_that("PAR JWT client assertions target par_url by default and allow audienc
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -979,9 +974,12 @@ test_that("PAR JWT client assertions target par_url by default and allow audienc
 
   shinyOAuth:::prepare_call(cli_override, valid_browser_token())
   payload_override <- shinyOAuth:::parse_jwt_payload(
-    captured_override$client_assertion
+    captured_override[["client_assertion"]]
   )
-  expect_identical(payload_override$aud, "https://example.com/custom-par-aud")
+  expect_identical(
+    payload_override[["aud"]],
+    "https://example.com/custom-par-aud"
+  )
 })
 
 test_that("PAR JWT client assertions prefer issuer when available", {
@@ -1003,7 +1001,7 @@ test_that("PAR JWT client assertions prefer issuer when available", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -1017,7 +1015,7 @@ test_that("PAR JWT client assertions prefer issuer when available", {
   shinyOAuth:::prepare_call(cli, valid_browser_token())
 
   expect_identical(
-    shinyOAuth:::parse_jwt_payload(captured$client_assertion)$aud,
+    shinyOAuth:::parse_jwt_payload(captured[["client_assertion"]])[["aud"]],
     cli@provider@issuer
   )
 })
@@ -1044,7 +1042,7 @@ test_that("OIDC discovery wires PAR metadata into provider", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(disc_body)
@@ -1056,4 +1054,20 @@ test_that("OIDC discovery wires PAR metadata into provider", {
   prov <- oauth_provider_oidc_discover("https://issuer.example.com")
 
   expect_identical(prov@par_url, "https://issuer.example.com/par")
+})
+test_that("PAR expiry metadata preserves lifetimes beyond integer range", {
+  lifetime <- .Machine[["integer.max"]] + 1
+  url <- attach_par_auth_url_metadata(
+    "https://example.com/auth",
+    list(request_uri = "urn:example:par", expires_in = lifetime),
+    issued_at = 1000
+  )
+  expect_identical(
+    attr(url, "shinyOAuth.par_expires_in", exact = TRUE),
+    lifetime
+  )
+  expect_equal(
+    as.numeric(attr(url, "shinyOAuth.par_expires_at", exact = TRUE)),
+    1000 + lifetime
+  )
 })

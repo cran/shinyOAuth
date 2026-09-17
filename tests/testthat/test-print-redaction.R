@@ -5,6 +5,68 @@ collect_rendered_output <- function(x) {
   )
 }
 
+test_that("UserInfo member names cannot inject or flood token displays", {
+  member_names <- c(
+    "name\nforged-event\033[31m",
+    "prefix\u202ehidden",
+    paste(rep("\u00e9", 5000), collapse = ""),
+    'https://user:synthetic-name-secret@example.com/path?token=synthetic-query-secret'
+  )
+  token <- OAuthToken(
+    access_token = "access-secret",
+    token_type = "Bearer",
+    userinfo = stats::setNames(as.list(rep("private-value", 4)), member_names)
+  )
+  reference <- collect_rendered_output(OAuthToken(
+    access_token = "access-secret",
+    token_type = "Bearer"
+  ))
+  for (kind in names(reference)) {
+    output <- collect_rendered_output(token)[[kind]]
+    expect_false(grepl("\u001b|\u202e|\nforged-event", output))
+    expect_false(grepl(
+      "synthetic-name-secret|synthetic-query-secret|private-value",
+      output
+    ))
+    expect_match(output, '"name forged-event', fixed = TRUE)
+    expect_match(output, '"prefix hidden"', fixed = TRUE)
+    expect_lt(
+      nchar(output, type = "bytes") - nchar(reference[[kind]], type = "bytes"),
+      700L
+    )
+    expect_true(validUTF8(enc2utf8(output)))
+  }
+})
+
+test_that("multi-redirect clients redact every displayed redirect URI", {
+  local_options(shinyOAuth.telemetry_path_scrubber = NULL)
+  redirects <- c(
+    "https://app.example.test/private-one?tenant=synthetic-first-secret",
+    "https://app.example.test/private-two?tenant=synthetic-second-secret"
+  )
+  client <- oauth_client(
+    provider = oauth_provider(
+      name = "example",
+      auth_url = "https://example.test/auth",
+      token_url = "https://example.test/token",
+      issuer = "https://example.test"
+    ),
+    client_id = "example",
+    client_secret = "secret",
+    redirect_uri = redirects[[1]],
+    authorization_server_mode = "multi_redirect_uri",
+    authorization_server_redirect_uris = redirects
+  )
+  for (output in collect_rendered_output(client)) {
+    expect_match(output, "authorization_server_redirect_uris", fixed = TRUE)
+    expect_match(output, "https://app.example.test/", fixed = TRUE)
+    expect_false(grepl(
+      "private-one|private-two|synthetic-first|synthetic-second",
+      output
+    ))
+  }
+})
+
 expect_no_secret_material <- function(output, secrets) {
   for (secret in secrets) {
     testthat::expect_false(
@@ -13,6 +75,55 @@ expect_no_secret_material <- function(output, secrets) {
     )
   }
 }
+
+test_that("all public objects hide custom credentials and URL components", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth?hint=synthetic-query-secret",
+    token_url = "https://example.com/token?key=synthetic-query-secret",
+    extra_auth_params = list(hint = "synthetic-param-secret"),
+    extra_token_params = list(nested = list(key = "synthetic-nested-secret")),
+    extra_token_headers = c(`X-API-Key` = "synthetic-header-secret"),
+    use_nonce = FALSE,
+    id_token_required = FALSE,
+    id_token_validation = FALSE
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "example",
+    client_secret = "synthetic-client-secret",
+    redirect_uri = "http://localhost:8100/?hint=synthetic-redirect-secret"
+  )
+  tok <- OAuthToken(
+    access_token = "synthetic-token-secret",
+    token_type = "Bearer",
+    userinfo = list(nested = prov)
+  )
+  outputs <- c(
+    unlist(lapply(list(prov, cli, tok), collect_rendered_output)),
+    paste(capture.output(print(list(prov, cli, tok))), collapse = "\n")
+  )
+  for (output in unname(outputs)) {
+    expect_no_secret_material(
+      output,
+      paste0(
+        "synthetic-",
+        c(
+          "query",
+          "param",
+          "nested",
+          "header",
+          "client",
+          "redirect",
+          "token"
+        ),
+        "-secret"
+      )
+    )
+  }
+  expect_match(paste(format(prov), collapse = "\n"), "X-API-Key", fixed = TRUE)
+  expect_match(paste(format(prov), collapse = "\n"), "list [1]", fixed = TRUE)
+})
 
 test_that("OAuthToken printing redacts token material", {
   access_token <- "access-secret-1234567890"
@@ -31,9 +142,7 @@ test_that("OAuthToken printing redacts token material", {
 
   for (output in unname(rendered)) {
     expect_match(output, "<redacted", fixed = TRUE)
-    expect_match(output, "acce...7890", fixed = TRUE)
-    expect_match(output, "refr...GHIJ", fixed = TRUE)
-    expect_match(output, "idto...3210", fixed = TRUE)
+    expect_no_secret_material(output, c("7890", "GHIJ", "3210"))
     expect_no_secret_material(
       output,
       c(access_token, refresh_token, id_token, "user@example.com")
@@ -47,7 +156,7 @@ test_that("OAuthClient printing redacts secrets and private keys", {
     "state-key-secret-",
     "abcdefghijklmnopqrstuvwxyz0123456789"
   )
-  client_private_key <- openssl::write_pem(openssl::rsa_keygen())
+  client_assertion_private_key <- openssl::write_pem(openssl::rsa_keygen())
   dpop_private_key <- openssl::write_pem(openssl::rsa_keygen())
 
   prov <- oauth_provider(
@@ -65,8 +174,8 @@ test_that("OAuthClient printing redacts secrets and private keys", {
     provider = prov,
     client_id = "abc",
     client_secret = client_secret,
-    client_private_key = client_private_key,
-    client_private_key_kid = "kid-123",
+    client_assertion_private_key = client_assertion_private_key,
+    client_assertion_private_key_kid = "kid-123",
     redirect_uri = "http://localhost:8100",
     scopes = c("openid", "profile"),
     state_store = cachem::cache_mem(max_age = 600),
@@ -79,18 +188,44 @@ test_that("OAuthClient printing redacts secrets and private keys", {
 
   for (output in unname(rendered)) {
     expect_match(output, "<redacted", fixed = TRUE)
-    expect_match(output, "clie...0XYZ", fixed = TRUE)
-    expect_match(output, "stat...6789", fixed = TRUE)
+    expect_no_secret_material(output, c("0XYZ", "6789"))
     expect_match(output, "<redacted PRIVATE KEY>", fixed = TRUE)
     expect_no_secret_material(
       output,
       c(
         client_secret,
         state_key,
-        client_private_key,
+        client_assertion_private_key,
         dpop_private_key
       )
     )
+  }
+})
+
+test_that("OAuthClient printing handles secretless public clients", {
+  prov <- oauth_provider(
+    name = "example",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    issuer = NA_character_,
+    use_nonce = FALSE,
+    use_pkce = TRUE,
+    token_auth_style = "body",
+    id_token_required = FALSE,
+    id_token_validation = FALSE
+  )
+  cli <- oauth_client(
+    provider = prov,
+    client_id = "abc",
+    client_secret = "",
+    redirect_uri = "http://127.0.0.1:8100"
+  )
+
+  rendered <- collect_rendered_output(cli)
+
+  for (output in unname(rendered)) {
+    expect_match(output, "client_secret\\s*: <redacted>")
+    expect_match(output, "client_id\\s*: chr \\\"abc\\\"")
   }
 })
 

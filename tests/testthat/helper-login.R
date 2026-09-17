@@ -69,7 +69,7 @@ poll_for_async <- function(
   while (!isTRUE(condition_fn()) && Sys.time() < deadline) {
     later::run_now(interval)
     if (!is.null(session)) {
-      session$flushReact()
+      session[["flushReact"]]()
     }
     Sys.sleep(interval / 5)
   }
@@ -116,7 +116,7 @@ make_test_provider <- function(
     jwks_cache = cachem::cache_mem(max_age = 60),
     jwks_pins = character(),
     jwks_pin_mode = "any",
-    allowed_algs = c("RS256", "ES256"),
+    id_token_allowed_algs = c("RS256", "ES256"),
     # Disable token_type enforcement in test helper; tested separately in test-token-type-policy.R
     allowed_token_types = character(),
     leeway = 60
@@ -133,7 +133,7 @@ make_test_client <- function(
   resource = character(0),
   claims = NULL,
   claims_validation = "none",
-  userinfo_jwt_required_temporal_claims = character(0),
+  userinfo_jwt_required_time_claims = character(0),
   required_acr_values = character(0),
   response_mode = NULL,
   introspect = FALSE,
@@ -144,10 +144,14 @@ make_test_client <- function(
     use_nonce = use_nonce,
     userinfo_signed_jwt_required = userinfo_signed_jwt_required
   )
-  # When provider has an issuer (OIDC), default to "openid" scope to silence
-  # the auto-prepend warning in ensure_openid_scope().
+  # For an effective OIDC provider, default to "openid" scope to silence the
+  # auto-prepend warning in ensure_openid_scope().
   if (is.null(scopes)) {
-    scopes <- if (!is.na(prov@issuer)) "openid" else character(0)
+    scopes <- if (shinyOAuth:::provider_uses_oidc(prov)) {
+      "openid"
+    } else {
+      character(0)
+    }
   }
   oauth_client(
     provider = prov,
@@ -159,7 +163,7 @@ make_test_client <- function(
     claims = claims,
     response_mode = response_mode,
     claims_validation = claims_validation,
-    userinfo_jwt_required_temporal_claims = userinfo_jwt_required_temporal_claims,
+    userinfo_jwt_required_time_claims = userinfo_jwt_required_time_claims,
     required_acr_values = required_acr_values,
     state_store = cachem::cache_mem(max_age = state_max_age),
     state_payload_max_age = state_payload_max_age,
@@ -169,6 +173,6 @@ make_test_client <- function(
       "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     ),
     introspect = introspect,
-    introspect_elements = introspect_elements
+    introspection_checks = introspect_elements
   )
 }

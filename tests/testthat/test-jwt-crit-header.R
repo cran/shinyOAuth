@@ -24,7 +24,7 @@ mk_client <- function() {
     issuer = "https://issuer.example.com",
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("RS256", "ES256")
+    id_token_allowed_algs = c("RS256", "ES256")
   )
   shinyOAuth::oauth_client(
     prov,
@@ -132,4 +132,66 @@ test_that("JWT without crit header still passes validation", {
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
     expect_silent(shinyOAuth:::validate_id_token(client, jwt))
   })
+})
+
+test_that("signed ID tokens reject b64=false with or without crit", {
+  withr::local_options(shinyOAuth.allow_hs = TRUE)
+  secret <- "id-token-b64-test-secret-32-bytes!"
+  client <- mk_client()
+  client@client_secret <- secret
+  client@provider@allowed_algs <- "HS256"
+  now <- floor(as.numeric(Sys.time()))
+  claims <- list(
+    iss = client@provider@issuer,
+    aud = client@client_id,
+    sub = "user-1",
+    iat = now - 1,
+    exp = now + 120
+  )
+
+  crit_cases <- list(without_crit = NULL, with_crit = list("b64"))
+  for (crit in crit_cases) {
+    header <- list(alg = "HS256", typ = "JWT", b64 = FALSE)
+    if (!is.null(crit)) {
+      header[["crit"]] <- crit
+    }
+    jwt <- shinyOAuth:::encode_hmac_jwt_with_header(
+      claims = claims,
+      secret = secret,
+      header = header,
+      size = 256,
+      alg = "HS256"
+    )
+
+    withr::with_options(list(shinyOAuth.allow_hs = TRUE), {
+      expect_error(
+        shinyOAuth:::validate_id_token(client, jwt),
+        regexp = "b64=false header is not allowed",
+        class = "shinyOAuth_id_token_error"
+      )
+    })
+  }
+})
+
+test_that("ID tokens reject malformed b64 headers", {
+  client <- mk_client()
+  now <- floor(as.numeric(Sys.time()))
+  claims <- list(
+    iss = client@provider@issuer,
+    aud = client@client_id,
+    sub = "user-1",
+    iat = now - 1,
+    exp = now + 120
+  )
+
+  for (b64_value in list("false", 0, list(FALSE))) {
+    jwt <- build_jwt(list(alg = "none", b64 = b64_value), claims)
+    withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
+      expect_error(
+        shinyOAuth:::validate_id_token(client, jwt),
+        regexp = "b64 header must be a single non-missing boolean",
+        class = "shinyOAuth_id_token_error"
+      )
+    })
+  }
 })

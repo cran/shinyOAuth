@@ -10,14 +10,25 @@
 #' OAuthToken S7 class
 #'
 #' @description
-#' S7 class representing OAuth tokens and (optionally) user information.
+#' An `OAuthToken` holds credentials and user information returned after login.
+#' The Shiny module supplies it as `auth[["token"]]`, and [handle_callback()] returns
+#' it for custom integrations. Pass it to [perform_resource_req()] to call an
+#' API, or to the token helpers for refresh, introspection, and revocation.
+#'
+#' Read properties with `@`, for example `auth[["token"]]@userinfo`. Profile fields
+#' depend on the provider. Keep access and refresh tokens out of the UI and logs.
 #'
 #' @param access_token Access token
 #' @param token_type OAuth access token type (for example `Bearer` or `DPoP`)
 #' @param refresh_token Refresh token (if provided by the provider)
 #' @param id_token ID token (if provided by the provider; OpenID Connect)
+#' @param original_id_token Initial login ID token retained as the refresh
+#'   continuity baseline. Refresh never replaces it with a newer ID token.
+#'   For manually constructed tokens, the first refresh initializes this from
+#'   `id_token` if omitted. Treat this property as credential material.
 #' @param expires_at Numeric timestamp (seconds since epoch) when the access
-#'  token expires. `Inf` for non-expiring tokens
+#'  token expires, `NA_real_` when the expiry is unknown, or `Inf` for a
+#'  non-expiring token
 #' @param userinfo List containing user information fetched from the provider's
 #'  userinfo endpoint (if fetched)
 #' @param cnf Optional confirmation claim set returned alongside a
@@ -35,10 +46,25 @@
 #' @param granted_scopes_verified Logical flag indicating whether the current
 #'   token response explicitly proved `granted_scopes`. `FALSE` means the scope
 #'   set was assumed or carried forward because the provider omitted `scope`.
-#'   For stronger proof, configure `introspect_elements = "scope"`.
+#'   For stronger proof, configure `introspection_checks = "scope"`.
 #' @param id_token_validated Logical flag indicating whether the ID token was
 #'  cryptographically validated (signature verified and standard claims checked)
 #'  during the OAuth flow. Defaults to `FALSE`.
+#' @param extra_fields List of additional parameters from the latest successful
+#'   token endpoint response. Excludes `access_token`, `token_type`, `refresh_token`,
+#'   `id_token`, `expires_in`, `scope`, and `cnf`, which have dedicated token
+#'   properties. Defaults to an empty list. Successful refresh replaces this
+#'   list, including when the response contains no extra fields.
+#' @param initial_extra_fields List of additional parameters from the initial
+#'   successful authorization-code exchange. Preserved across refreshes and
+#'   replaced on a new login. Defaults to an empty list for manually constructed
+#'   tokens; refresh does not infer an initial response from `extra_fields`.
+#' @param smart_context Internal interpreted SMART context. Empty for ordinary
+#'   tokens; populated only by SMART token processing. Use [smart_context()] on
+#'   a connection to read it. Includes sensitive patient and identity references.
+#' @param original_granted_scopes Initial accepted SMART grant, preserved across
+#'   refreshes to distinguish unchanged grants from strict scope reductions.
+#'   Empty for ordinary OAuth tokens. Set by SMART token processing.
 #'
 #' @details
 #' The `id_token_claims` property is a read-only computed property that returns
@@ -52,8 +78,28 @@
 #' of whether the ID token's signature was verified.
 #' Check the `id_token_validated` property to determine whether the claims
 #' were cryptographically validated.
+#' For validated Apple ID tokens, exact `"true"`/`"false"` strings in
+#' `email_verified` are returned as logical values, as during validation.
+#' The original signed `id_token` is retained unchanged.
 #'
-#' @example inst/examples/token_methods.R
+#' Additional response parameters retain their parsed names and values,
+#' including nested lists and explicit JSON `null` values (R `NULL`). Use
+#' `"custom_field" %in% names(token@extra_fields)` to distinguish an absent field
+#' from a field explicitly returned as `null`. These parameters are not ID
+#' token claims and are not covered by `id_token_validated`. The initial
+#' snapshot records the initial response data, not current access permissions.
+#' No automatic merging, resource fetching, or interpretation is performed.
+#' Both lists can contain sensitive data; keep them out of the UI and logs.
+#'
+#' @return Calling the constructor creates an `OAuthToken` object.
+#' @examples
+#' # Inside reactive server code, after a successful login:
+#' # auth[["token"]]@userinfo
+#' # auth[["token"]]@expires_at
+#' # auth[["token"]]@id_token_validated
+#' # auth[["token"]]@id_token_claims[["sub"]]
+#' # auth[["token"]]@extra_fields[["custom_field"]]
+#' # auth[["token"]]@initial_extra_fields[["custom_field"]]
 #'
 #' @export
 OAuthToken <- S7::new_class(
@@ -98,6 +144,11 @@ OAuthToken <- S7::new_class(
       default = FALSE
     ),
 
+    original_id_token = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+
     id_token_claims = S7::new_property(
       class = S7::class_list,
       getter = function(self) {
@@ -107,11 +158,34 @@ OAuthToken <- S7::new_class(
         ) {
           return(list())
         }
-        tryCatch(
+        payload <- tryCatch(
           parse_jwt_payload(raw),
           error = function(e) list()
         )
+        normalize_authenticated_id_token_claims(
+          payload,
+          issuer = payload[["iss"]],
+          signature_verified = self@id_token_validated
+        )
       }
+    ),
+
+    extra_fields = S7::new_property(
+      S7::class_list,
+      default = list()
+    ),
+
+    initial_extra_fields = S7::new_property(
+      S7::class_list,
+      default = list()
+    ),
+    smart_context = S7::new_property(
+      S7::class_list,
+      default = list()
+    ),
+    original_granted_scopes = S7::new_property(
+      S7::class_character,
+      default = character()
     )
   ),
   validator = function(self) oauth_token_validate(self)
@@ -138,8 +212,16 @@ oauth_token_validate <- function(self) {
   if (is.na(self@access_token) || !nzchar(trimws(self@access_token))) {
     return("OAuthToken: access_token must be a non-empty string")
   }
+  if (!is_valid_access_token(self@access_token)) {
+    return("OAuthToken: access_token contains invalid characters")
+  }
 
-  for (field in c("token_type", "refresh_token", "id_token")) {
+  for (field in c(
+    "token_type",
+    "refresh_token",
+    "id_token",
+    "original_id_token"
+  )) {
     value <- S7::prop(self, field)
     if (!is.character(value) || length(value) != 1L) {
       return(sprintf(
@@ -180,6 +262,19 @@ oauth_token_validate <- function(self) {
     )
   }
 
+  original_scope_error <- tryCatch(
+    {
+      validate_scopes(self@original_granted_scopes)
+      NULL
+    },
+    error = function(e) conditionMessage(e)
+  )
+  if (!is.null(original_scope_error)) {
+    return(paste0(
+      "OAuthToken: invalid original_granted_scopes: ",
+      original_scope_error
+    ))
+  }
   granted_scopes <- self@granted_scopes
   if (!is.character(granted_scopes)) {
     return("OAuthToken: granted_scopes must be a character vector")
@@ -207,6 +302,14 @@ oauth_token_validate <- function(self) {
     return(
       "OAuthToken: granted_scopes_verified must be a single non-NA logical"
     )
+  }
+
+  if (
+    !is.logical(self@id_token_validated) ||
+      length(self@id_token_validated) != 1L ||
+      is.na(self@id_token_validated)
+  ) {
+    return("OAuthToken: id_token_validated must be a single non-NA logical")
   }
 
   if (isTRUE(self@id_token_validated)) {

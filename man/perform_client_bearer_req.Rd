@@ -12,10 +12,12 @@ perform_client_bearer_req(
   query = NULL,
   follow_redirect = FALSE,
   check_url = TRUE,
-  oauth_client = NULL,
+  client = NULL,
   token_type = NULL,
   dpop_nonce = NULL,
-  idempotent = NULL
+  idempotent = NULL,
+  resource_hosts = NULL,
+  oauth_client = NULL
 )
 }
 \arguments{
@@ -25,11 +27,21 @@ perform_client_bearer_req(
 to authorize and perform. When you pass a request object, shinyOAuth uses
 it as the base request, still applies token authentication and request
 defaults, and then layers any explicit \code{method}, \code{headers}, \code{query}, and
-\code{follow_redirect} overrides on top.}
+\code{follow_redirect} overrides on top.
+Inherited httr2 authentication, caching, and retry policies, and curl
+authentication or method-changing options are rejected. Use
+\code{\link[httr2:req_method]{httr2::req_method()}} and httr2 body helpers to configure the request.
+HEAD requests with bodies are rejected because httr2 can transmit them
+as POST despite the explicit method.
+Authenticated response caching is
+unsupported. shinyOAuth owns retries; configure them with \code{idempotent}
+and the \verb{shinyOAuth.retry_*} options.}
 
 \item{method}{Optional HTTP method (character). Defaults to "GET". When
 the effective token type is \code{DPoP}, this must be the final request method
-because the proof is signed against it.}
+because the proof is signed against it. \code{TRACE} and the nonstandard
+\code{TRACK} method are rejected because authenticated requests could be
+reflected by the server and disclose credentials.}
 
 \item{headers}{Optional named list or named character vector of extra
 headers to set on the request. Header names are case-insensitive.
@@ -38,8 +50,9 @@ the token authentication set by this function is not overridden.}
 
 \item{query}{Optional named list of query parameters to append to the URL.}
 
-\item{follow_redirect}{Logical. If \code{FALSE} (the default), HTTP redirects
-are disabled to prevent leaking the access token to unexpected hosts.
+\item{follow_redirect}{Logical or \code{NULL}. \code{FALSE} (the default) disables
+HTTP redirects even when \code{shinyOAuth.allow_redirect} is enabled.
+\code{NULL} inherits that global option (disabled by default).
 Set to \code{TRUE} only if you trust all possible redirect targets and
 understand the security implications.}
 
@@ -47,10 +60,12 @@ understand the security implications.}
 \code{\link[=is_ok_host]{is_ok_host()}} before attaching the access token. This rejects relative
 URLs, plain HTTP to non-loopback hosts, and when
 \code{options(shinyOAuth.allowed_hosts)} is set, hosts outside the allowlist.
+Without an allowlist this performs HTTPS and URL-syntax validation only
+(with the configured non-HTTPS exceptions); any HTTPS host is accepted.
 Set to \code{FALSE} only if you have already validated the URL and understand
 the security implications.}
 
-\item{oauth_client}{Optional \link{OAuthClient}. Required when the effective
+\item{client}{Optional \link{OAuthClient}. Required when the effective
 token type is \code{DPoP}, because the client carries the configured DPoP proof
 key, and also when using sender-constrained mTLS / certificate-bound
 tokens so shinyOAuth can attach the configured client certificate and
@@ -61,19 +76,27 @@ thumbprint carried on a raw JWT access-token string.}
 is supplied as a raw string. Supported values are \code{Bearer} and \code{DPoP}.
 Invalid or multi-valued inputs are rejected. When omitted, shinyOAuth
 preserves \code{OAuthToken@token_type}, and may infer \code{DPoP} from explicit
-\code{OAuthToken@cnf$jkt} metadata. Raw access-token strings default to
+\code{OAuthToken@cnf[["jkt"]]} metadata. Raw access-token strings default to
 \code{Bearer} unless you pass \code{token_type = "DPoP"} explicitly.}
 
 \item{dpop_nonce}{Optional DPoP nonce to embed in the proof for this
 request. This is primarily useful after a resource server challenges with
 \code{DPoP-Nonce}.}
 
-\item{idempotent}{Optional logical controlling generic transport and
-transient-HTTP retries in \code{req_with_retry()}. When \code{NULL} (the default),
-shinyOAuth infers this from the final request method using standard HTTP
-idempotency semantics (\code{GET}, \code{HEAD}, \code{OPTIONS}, \code{TRACE}, \code{PUT},
-\code{DELETE}). DPoP nonce challenges are replayed once regardless, as required
-by RFC 9449.}
+\item{idempotent}{Whether ordinary network/HTTP failures may be
+retried safely. \code{NULL} (default) infers this from the final HTTP method:
+GET, HEAD, OPTIONS, PUT, and DELETE permit retries. Set it explicitly if
+your API has different guarantees. One DPoP nonce challenge retry is
+allowed independently of this setting.}
+
+\item{resource_hosts}{Optional non-empty character vector of trusted resource
+host patterns, using \code{\link[=is_ok_host]{is_ok_host()}} matching rules. This call-scoped
+allowlist adds to the global policy and is enforced even if \code{check_url}
+is \code{FALSE}. Use exact hostnames for URLs derived from lower-trust input.
+It constrains the initial URL, not redirect destinations or resolved IPs;
+retain \code{follow_redirect = FALSE}. \code{NULL} adds no resource-specific policy.}
+
+\item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 }
 \value{
 Same value as \code{\link[=perform_resource_req]{perform_resource_req()}}.
@@ -81,6 +104,6 @@ Same value as \code{\link[=perform_resource_req]{perform_resource_req()}}.
 \description{
 \ifelse{html}{\href{https://lifecycle.r-lib.org/articles/stages.html#deprecated}{\figure{lifecycle-deprecated.svg}{options: alt='[Deprecated]'}}}{\strong{[Deprecated]}}
 
-Deprecated alias for \code{perform_resource_req()} to avoid a breaking change in the public API.
+Deprecated alias for \code{perform_resource_req()}.
 Use \code{perform_resource_req()} for Bearer, DPoP, and mTLS-protected resource requests instead.
 }

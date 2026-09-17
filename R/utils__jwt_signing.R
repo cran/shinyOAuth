@@ -8,6 +8,34 @@
 
 ## 1.1 Client assertions -------------------------------------------------------
 
+# jose's StringOrURI validator only accepts HTTP-style URLs containing a colon.
+# Validate URI schemes without rewriting identifiers, while retaining jose's
+# NumericDate validation and claim representation for the signing functions.
+outbound_jwt_claim <- function(claims) {
+  identifiers <- intersect(c("iss", "sub", "aud"), names(claims))
+  for (field in identifiers) {
+    value <- claims[[field]]
+    if (!is.character(value) || !length(value) || anyNA(value)) {
+      err_config(paste0("Invalid StringOrURI claim: ", field))
+    }
+    uri <- value[grepl(":", value, fixed = TRUE)]
+    if (
+      !all(grepl("^[A-Za-z][A-Za-z0-9+.-]*:[^[:space:]]+$", uri)) ||
+        any(grepl('[<>"{}|\\\\^`]|%(?![0-9A-Fa-f]{2})', uri, perl = TRUE))
+    ) {
+      err_config(paste0("Invalid URI claim: ", field))
+    }
+  }
+  result <- do.call(
+    jose::jwt_claim,
+    claims[setdiff(names(claims), identifiers)]
+  )
+  for (field in identifiers) {
+    result[[field]] <- claims[[field]]
+  }
+  result
+}
+
 #' Build and sign OAuth client assertion (RFC 7523)
 #'
 #' Constructs a JWT with claims suitable for `client_secret_jwt` or
@@ -51,15 +79,16 @@ build_client_assertion <- function(client, aud) {
       alg <- "HS256"
     } else if (identical(style, "private_key_jwt")) {
       # Pick a sensible default based on the private key type/curve.
-      key0 <- normalize_private_key_input(client@client_private_key)
+      key0 <- normalize_private_key_input(client@client_assertion_private_key)
       alg <- choose_default_alg_for_private_key(key0)
     }
   }
   # TTL (seconds) for client assertion; default 2 minutes
-  ttl <- suppressWarnings(as.integer(getOption(
+  ttl <- numeric_option_or_default(
     "shinyOAuth.client_assertion_ttl",
-    120L
-  )))
+    120L,
+    integer = TRUE
+  )
   if (!is.finite(ttl) || is.na(ttl)) {
     ttl <- 120L
   } else if (ttl < 60L) {
@@ -89,13 +118,13 @@ build_client_assertion <- function(client, aud) {
   # Header base; jose helpers set alg automatically for HS* (via size) but we
   # include explicit alg to be clear. Include kid if configured for private keys.
   header <- list(
-    typ = "JWT",
+    typ = client@client_assertion_typ,
     alg = alg
   )
   if (identical(style, "private_key_jwt")) {
-    kid <- client@client_private_key_kid %||% NA_character_
+    kid <- client@client_assertion_private_key_kid %||% NA_character_
     if (is.character(kid) && length(kid) == 1L && !is.na(kid) && nzchar(kid)) {
-      header$kid <- kid
+      header[["kid"]] <- kid
     }
   }
 
@@ -115,24 +144,28 @@ build_client_assertion <- function(client, aud) {
         )
       )
     }
-    # Build a proper jwt_claim from named list via do.call
-    clm <- do.call(jose::jwt_claim, claims)
-    # jose will set alg based on size, but we also pass header to include typ
-    jwt <- jose::jwt_encode_hmac(
-      clm,
+    # Retain claim validation, then use the existing explicit-header encoder.
+    # jose::jwt_encode_hmac prepends typ=JWT and can create duplicate typ/alg
+    # members when an explicit header is supplied.
+    clm <- outbound_jwt_claim(claims)
+    jwt <- encode_hmac_jwt_with_header(
+      claims = unclass(clm),
       secret = secret,
       header = header,
-      size = size
+      size = size,
+      alg = alg
     )
     return(jwt)
   }
 
   if (identical(style, "private_key_jwt")) {
-    key <- normalize_private_key_input(client@client_private_key)
-    clm <- do.call(jose::jwt_claim, claims)
+    key <- normalize_private_key_input(client@client_assertion_private_key)
+    clm <- outbound_jwt_claim(claims)
     # Hard-fail impossible alg/key pairs before signing. jose::jwt_encode_sig()
     # can otherwise emit mismatched JOSE alg headers instead of rejecting them.
-    if (!private_key_can_sign_jws_alg(key, alg, typ = "JWT")) {
+    if (
+      !private_key_can_sign_jws_alg(key, alg, typ = client@client_assertion_typ)
+    ) {
       err_config(
         c(
           "x" = paste0(
@@ -148,18 +181,14 @@ build_client_assertion <- function(client, aud) {
       )
     }
     jwt <- try(
-      jose::jwt_encode_sig(clm, key = key, header = header),
+      encode_asymmetric_jwt_with_header(clm, key = key, header = header),
       silent = TRUE
     )
     if (inherits(jwt, "try-error")) {
       err_config(
         c(
           "x" = "Failed to sign client assertion",
-          "i" = paste0(
-            "Tried alg '",
-            alg,
-            "' with the configured private key"
-          )
+          "i" = paste0("Tried alg '", alg, "' with the configured private key")
         ),
         context = list(
           phase = "build_client_assertion",
@@ -179,8 +208,7 @@ build_client_assertion <- function(client, aud) {
 #' Resolve the audience (`aud`) value for a JWT client assertion.
 #'
 #' Uses an explicit client override when present. For PAR requests, this then
-#' prefers the provider issuer when known, matching RFC 9126 guidance for
-#' resolving the audience ambiguity at the pushed authorization request
+#' resolves the audience ambiguity at the pushed authorization request
 #' endpoint, even when the request itself is sent to an RFC 8705 mTLS alias.
 #' Without an issuer, PAR requests fall back to the provider's canonical
 #' `par_url` so the audience stays stable across conventional and mTLS alias
@@ -197,57 +225,45 @@ build_client_assertion <- function(client, aud) {
 #' @noRd
 resolve_client_assertion_audience <- function(client, req) {
   S7::check_is_S7(client, class = OAuthClient)
+  url <- if (inherits(req, "httr2_request")) req[["url"]] else NULL
+  resolve_client_assertion_audience_url(
+    client@provider,
+    url,
+    client@client_assertion_audience
+  )
+}
 
-  override <- client@client_assertion_audience %||% NA_character_
-  # Defense-in-depth: ensure scalar before indexing.
-  if (!is.character(override) || length(override) != 1L) {
-    override <- NA_character_ # nolint
+# Pure settings resolver shared with the optional configuration assessment.
+resolve_client_assertion_audience_url <- function(
+  provider,
+  url,
+  override = NULL
+) {
+  if (is_valid_string(override)) {
+    return(override)
   }
-  override_chr <- as.character(override)
-  if (!is.na(override_chr) && nzchar(override_chr)) {
-    return(override_chr)
+  if (!is_valid_string(url)) {
+    return(provider@token_url)
   }
-
-  if (inherits(req, "httr2_request")) {
-    url0 <- req$url %||% NA_character_
-    url_chr <- as.character(url0[[1]])
-    if (!is.na(url_chr) && nzchar(url_chr)) {
-      provider_issuer <- client@provider@issuer %||% NA_character_
-      par_urls <- c(
-        client@provider@par_url %||% NA_character_,
-        client@provider@mtls_endpoint_aliases[["par_endpoint"]] %||%
-          NA_character_,
-        client@provider@mtls_endpoint_aliases[[
-          "pushed_authorization_request_endpoint"
-        ]] %||%
-          NA_character_
-      )
-      par_urls <- unique(par_urls[vapply(
-        par_urls,
-        is_valid_string,
-        logical(1)
-      )])
-
-      if (url_chr %in% par_urls) {
-        if (is_valid_string(provider_issuer)) {
-          return(provider_issuer)
-        }
-
-        return(client@provider@par_url)
-      }
-
-      if (
-        identical(url_chr, client@provider@par_url %||% NA_character_) &&
-          is_valid_string(provider_issuer)
-      ) {
-        return(provider_issuer)
-      }
-
-      return(url_chr)
+  par_urls <- c(
+    provider@par_url,
+    provider@mtls_endpoint_aliases[["par_endpoint"]],
+    provider@mtls_endpoint_aliases[["pushed_authorization_request_endpoint"]]
+  )
+  par_urls <- par_urls[vapply(par_urls, is_valid_string, logical(1))]
+  if (url %in% par_urls) {
+    if (is_valid_string(provider@issuer)) {
+      return(provider@issuer)
     }
+    return(provider@par_url)
   }
+  url
+}
 
-  client@provider@token_url
+valid_client_assertion_typ <- function(value) {
+  is_valid_string(value) &&
+    nchar(value, type = "bytes") <= 256L &&
+    grepl("^[A-Za-z0-9][A-Za-z0-9!#$&^_.+/-]*$", value)
 }
 
 ## 1.2 Signed authorization requests -------------------------------------------
@@ -260,10 +276,10 @@ resolve_client_assertion_audience <- function(client, req) {
 #' @return JOSE signing algorithm string.
 #' @keywords internal
 #' @noRd
-resolve_authorization_request_signing_alg <- function(client) {
+resolve_request_object_signing_alg <- function(client) {
   S7::check_is_S7(client, class = OAuthClient)
 
-  alg_cfg <- client@authorization_request_signing_alg %||% NA_character_
+  alg_cfg <- client@request_object_signing_alg %||% NA_character_
   if (!is.character(alg_cfg) || length(alg_cfg) != 1L) {
     alg_cfg <- NA_character_
   }
@@ -272,29 +288,32 @@ resolve_authorization_request_signing_alg <- function(client) {
   allowed_hmac <- c("HS256", "HS384", "HS512")
   allowed_asym <- c(
     "RS256",
+    "RS384",
     "ES256",
     "ES384",
-    "ES512"
+    "ES512",
+    "Ed25519",
+    "EdDSA"
   )
 
   if (!nzchar(alg)) {
-    if (!is.null(client@client_private_key)) {
-      key0 <- normalize_private_key_input(client@client_private_key)
+    if (!is.null(client@client_assertion_private_key)) {
+      key0 <- normalize_private_key_input(client@client_assertion_private_key)
       return(choose_default_alg_for_private_key(key0))
     }
     if (!is_valid_string(client@client_secret)) {
       err_config(
         paste(
-          "authorization_request_mode = 'request' or 'request_uri' requires",
-          "client_private_key or client_secret"
+          "request_object_mode = 'request' or 'request_uri' requires",
+          "client_assertion_private_key or client_secret"
         )
       )
     }
     if (nchar(client@client_secret, type = "bytes") < 32) {
       err_config(
         paste(
-          "authorization_request_mode = 'request' or 'request_uri' requires",
-          "client_secret >= 32 bytes when no client_private_key is",
+          "request_object_mode = 'request' or 'request_uri' requires",
+          "client_secret >= 32 bytes when no client_assertion_private_key is",
           "configured"
         )
       )
@@ -303,32 +322,32 @@ resolve_authorization_request_signing_alg <- function(client) {
   }
 
   if (identical(toupper(alg), "NONE")) {
-    err_config("authorization_request_signing_alg = 'none' is not supported")
+    err_config("request_object_signing_alg = 'none' is not supported")
   }
 
   if (alg %in% allowed_hmac) {
     if (!is_valid_string(client@client_secret)) {
-      err_config("HS* authorization_request_signing_alg requires client_secret")
+      err_config("HS* request_object_signing_alg requires client_secret")
     }
     if (nchar(client@client_secret, type = "bytes") < 32) {
       err_config(
-        "HS* authorization_request_signing_alg requires client_secret >= 32 bytes"
+        "HS* request_object_signing_alg requires client_secret >= 32 bytes"
       )
     }
     return(alg)
   }
 
   if (alg %in% allowed_asym) {
-    if (is.null(client@client_private_key)) {
+    if (is.null(client@client_assertion_private_key)) {
       err_config(
-        "asymmetric authorization_request_signing_alg requires client_private_key"
+        "asymmetric request_object_signing_alg requires client_assertion_private_key"
       )
     }
     return(alg)
   }
 
   err_config(paste0(
-    "Unsupported authorization_request_signing_alg: ",
+    "Unsupported request_object_signing_alg: ",
     as.character(alg)
   ))
 }
@@ -345,10 +364,10 @@ resolve_authorization_request_signing_alg <- function(client) {
 #'   issuer.
 #' @keywords internal
 #' @noRd
-resolve_authorization_request_audience <- function(client) {
+resolve_request_object_audience <- function(client) {
   S7::check_is_S7(client, class = OAuthClient)
 
-  override <- client@authorization_request_audience %||% NA_character_
+  override <- client@request_object_audience %||% NA_character_
   if (!is.character(override) || length(override) != 1L) {
     override <- NA_character_
   }
@@ -386,6 +405,9 @@ canonicalize_jws_alg <- function(alg) {
   }
 
   alg_upper <- toupper(alg_chr)
+  if (identical(alg_upper, "ED25519")) {
+    return("Ed25519")
+  }
   if (identical(alg_upper, "EDDSA")) {
     return("EdDSA")
   }
@@ -422,10 +444,34 @@ min_hmac_key_bytes <- function(alg) {
 #' @keywords internal
 #' @noRd
 private_key_can_sign_jws_alg <- function(key, alg, typ = "JWT") {
+  compatible <- private_key_jws_alg_compatibility(key, alg)
+  if (!is.na(compatible)) {
+    return(compatible)
+  }
+  # Preserve runtime fallbacks; read-only assessment never invokes them.
+  if (inherits(key, "rsa")) {
+    return(FALSE)
+  }
+  if (inherits(key, "ecdsa")) {
+    return(canonicalize_jws_alg(alg) %in% c("ES256", "ES384", "ES512"))
+  }
+  clm <- jose::jwt_claim(jti = "compatibility-check", iat = 1L)
+  hdr <- list(typ = typ, alg = canonicalize_jws_alg(alg))
+  sig_try <- try(
+    jose::jwt_encode_sig(clm, key = key, header = hdr),
+    silent = TRUE
+  )
+  !inherits(sig_try, "try-error")
+}
+
+# Inspect known key capabilities without signing, parsing key input, or errors.
+# NA means that runtime would need a fallback or a signing probe.
+private_key_jws_alg_compatibility <- function(key, alg) {
   alg <- canonicalize_jws_alg(alg)
 
   if (inherits(key, "rsa")) {
-    return(identical(alg, "RS256"))
+    bits <- jwe_rsa_key_size_bits(key)
+    return(bits >= 2048L && alg %in% c("RS256", "RS384"))
   }
 
   if (inherits(key, "ecdsa")) {
@@ -434,7 +480,7 @@ private_key_can_sign_jws_alg <- function(key, alg, typ = "JWT") {
       silent = TRUE
     )
     if (!inherits(jwk, "try-error") && is.list(jwk)) {
-      crv <- jwk$crv %||% NA_character_
+      crv <- jwk[["crv"]] %||% NA_character_
       if (identical(crv, "P-256")) {
         return(identical(alg, "ES256"))
       }
@@ -446,21 +492,48 @@ private_key_can_sign_jws_alg <- function(key, alg, typ = "JWT") {
       }
     }
 
-    return(alg %in% c("ES256", "ES384", "ES512"))
+    return(if (alg %in% c("ES256", "ES384", "ES512")) NA else FALSE)
   }
 
-  if (inherits(key, "ed25519") || inherits(key, "ed448")) {
+  if (inherits(key, "ed25519")) {
+    return(alg %in% c("Ed25519", "EdDSA"))
+  }
+  if (inherits(key, "ed448")) {
     return(FALSE)
   }
 
-  clm <- jose::jwt_claim(jti = "compatibility-check", iat = 1L)
-  hdr <- list(typ = typ, alg = alg)
-  sig_try <- try(
-    jose::jwt_encode_sig(clm, key = key, header = hdr),
-    silent = TRUE
-  )
+  NA
+}
 
-  !inherits(sig_try, "try-error")
+# jose's RSA digest size defaults to 256 independently of the supplied header.
+# Select SHA-384 explicitly for RS384 (RFC 7518 section 3.3). For OKP keys,
+# retain our explicit-header encoder and delegate Ed25519 to OpenSSL.
+encode_asymmetric_jwt_with_header <- function(claims, key, header) {
+  alg <- canonicalize_jws_alg(header[["alg"]])
+  if (!private_key_can_sign_jws_alg(key, alg)) {
+    err_config("JWT signing algorithm is incompatible with the private key")
+  }
+  if (identical(alg, "RS384")) {
+    return(jose::jwt_encode_sig(claims, key = key, size = 384, header = header))
+  }
+  if (!(alg %in% c("Ed25519", "EdDSA"))) {
+    return(jose::jwt_encode_sig(claims, key = key, header = header))
+  }
+  encode <- function(value) {
+    base64url_encode(charToRaw(enc2utf8(jsonlite::toJSON(
+      unclass(value),
+      auto_unbox = TRUE,
+      null = "null",
+      digits = NA
+    ))))
+  }
+  header[["alg"]] <- alg
+  signing_input <- paste(encode(header), encode(claims), sep = ".")
+  signature <- openssl::ed25519_sign(charToRaw(signing_input), key)
+  if (length(signature) != 64L) {
+    err_config("Ed25519 produced an invalid signature length")
+  }
+  paste(signing_input, base64url_encode(signature), sep = ".")
 }
 
 #' Encode a compact HMAC JWS while preserving a custom JOSE header.
@@ -575,8 +648,8 @@ build_authorization_request_object <- function(client, params) {
   # RFC 9101 Section 10.8 recommends avoiding client_id as Request Object sub
   # so the JWT cannot be repurposed as a client authentication assertion.
   if (
-    is_valid_string(params$sub %||% NULL) &&
-      identical(params$sub, client@client_id)
+    is_valid_string(params[["sub"]] %||% NULL) &&
+      identical(params[["sub"]], client@client_id)
   ) {
     err_config(
       paste(
@@ -586,21 +659,21 @@ build_authorization_request_object <- function(client, params) {
     )
   }
 
-  alg <- resolve_authorization_request_signing_alg(client)
-  aud <- resolve_authorization_request_audience(client)
+  alg <- resolve_request_object_signing_alg(client)
+  aud <- resolve_request_object_audience(client)
   if (!is_valid_string(aud)) {
     err_config(
       paste(
-        "authorization_request_mode = 'request' or 'request_uri' requires either",
-        "provider issuer or authorization_request_audience so Request Objects stay audience-bound"
+        "request_object_mode = 'request' or 'request_uri' requires either",
+        "provider issuer or request_object_audience so Request Objects stay audience-bound"
       )
     )
   }
   now <- floor(as.numeric(Sys.time()))
-  ttl <- as.numeric(client@authorization_request_ttl %||% 45)
-  nbf_skew <- as.numeric(client@authorization_request_nbf_skew %||% NA_real_)
+  ttl <- as.numeric(client@request_object_ttl %||% 45)
+  nbf_skew <- as.numeric(client@request_object_nbf_skew %||% NA_real_)
 
-  claims_param <- params$claims %||% NULL
+  claims_param <- params[["claims"]] %||% NULL
   if (
     is.character(claims_param) &&
       length(claims_param) == 1L &&
@@ -611,7 +684,7 @@ build_authorization_request_object <- function(client, params) {
       error = function(...) NULL
     )
     if (is.list(parsed_claims)) {
-      params$claims <- parsed_claims
+      params[["claims"]] <- parsed_claims
     }
   }
 
@@ -640,13 +713,13 @@ build_authorization_request_object <- function(client, params) {
   )
 
   if (!(alg %in% c("HS256", "HS384", "HS512"))) {
-    kid <- client@client_private_key_kid %||% NA_character_
+    kid <- client@client_assertion_private_key_kid %||% NA_character_
     if (is.character(kid) && length(kid) == 1L && !is.na(kid) && nzchar(kid)) {
-      header$kid <- kid
+      header[["kid"]] <- kid
     }
   }
 
-  clm <- do.call(jose::jwt_claim, claims)
+  clm <- outbound_jwt_claim(claims)
 
   signed_request_object <- if (alg %in% c("HS256", "HS384", "HS512")) {
     size <- min_hmac_key_bytes(alg) * 8L
@@ -659,12 +732,12 @@ build_authorization_request_object <- function(client, params) {
       alg = alg
     )
   } else {
-    key <- normalize_private_key_input(client@client_private_key)
+    key <- normalize_private_key_input(client@client_assertion_private_key)
     if (!private_key_can_sign_jws_alg(key, alg, typ = "oauth-authz-req+jwt")) {
       err_config(
         c(
           "x" = paste0(
-            "authorization_request_signing_alg '",
+            "request_object_signing_alg '",
             alg,
             "' is incompatible with the provided private key"
           )
@@ -673,7 +746,7 @@ build_authorization_request_object <- function(client, params) {
       )
     }
     jwt <- try(
-      jose::jwt_encode_sig(clm, key = key, header = header),
+      encode_asymmetric_jwt_with_header(clm, key = key, header = header),
       silent = TRUE
     )
     if (inherits(jwt, "try-error")) {
@@ -696,16 +769,16 @@ build_authorization_request_object <- function(client, params) {
 
   encryption_key <- resolve_authorization_request_encryption_public_key(
     client = client,
-    alg = encryption_config$alg,
-    kid = encryption_config$kid
+    alg = encryption_config[["alg"]],
+    kid = encryption_config[["kid"]]
   )
 
   jwe_compact_encrypt(
     plaintext = signed_request_object,
-    public_key = encryption_key$public_key,
-    alg = encryption_config$alg,
-    enc = encryption_config$enc,
-    kid = encryption_key$kid,
+    public_key = encryption_key[["public_key"]],
+    alg = encryption_config[["alg"]],
+    enc = encryption_config[["enc"]],
+    kid = encryption_key[["kid"]],
     typ = "oauth-authz-req+jwt",
     cty = "JWT"
   )
@@ -723,7 +796,10 @@ build_authorization_request_object <- function(client, params) {
 #' @return Normalized OpenSSL private-key object.
 #' @keywords internal
 #' @noRd
-normalize_private_key_input <- function(key, arg_name = "client_private_key") {
+normalize_private_key_input <- function(
+  key,
+  arg_name = "client_assertion_private_key"
+) {
   if (inherits(key, "key") || inherits(key, "rsa") || inherits(key, "ecdsa")) {
     return(key)
   }
@@ -741,6 +817,7 @@ normalize_private_key_input <- function(key, arg_name = "client_private_key") {
 #' Choose a default JWT alg compatible with a given private key
 #'
 #' For RSA keys, prefer RS256. For EC keys, try ES256/384/512 to match P-256/384/521.
+#' Ed25519 keys use EdDSA.
 #' Other key types are not currently supported for outbound JWT signing and
 #' fall back to a configuration error.
 #' @param key Private key object.
@@ -748,6 +825,9 @@ normalize_private_key_input <- function(key, arg_name = "client_private_key") {
 #' @keywords internal
 #' @noRd
 choose_default_alg_for_private_key <- function(key) {
+  if (inherits(key, "ed25519")) {
+    return("EdDSA")
+  }
   if (inherits(key, "rsa")) {
     return("RS256")
   }
@@ -771,10 +851,10 @@ choose_default_alg_for_private_key <- function(key) {
     c(
       "x" = "Could not determine a compatible default outbound JWT signing algorithm for the provided private key",
       "i" = paste(
-        "shinyOAuth currently supports RSA and ECDSA private keys for",
+        "shinyOAuth currently supports RSA, ECDSA, and Ed25519 private keys for",
         "outbound client assertions, request objects, and DPoP proofs"
       ),
-      "i" = "EdDSA remains supported for inbound ID token verification"
+      "i" = "Ed448 is not supported by the current backend"
     )
   )
 }

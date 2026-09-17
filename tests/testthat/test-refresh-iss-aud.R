@@ -54,7 +54,7 @@ mock_refresh_response <- function(new_jwt, action) {
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -74,7 +74,210 @@ make_existing_refresh_token <- function(original_jwt) {
   )
 }
 
+test_that("successive refreshes retain login continuity after omitted claims", {
+  local_options(shinyOAuth.skip_id_sig = TRUE)
+  skip_if_not_installed("mirai")
+  skip_if_not_installed("promises")
+  mirai::daemons(sync = TRUE)
+  withr::defer(mirai::daemons(0))
+  resolve <- function(value) {
+    if (!promises::is.promise(value)) {
+      return(value)
+    }
+    done <- FALSE
+    result <- error <- NULL
+    promises::then(
+      value,
+      function(x) {
+        result <<- x
+        done <<- TRUE
+      },
+      function(e) {
+        error <<- e
+        done <<- TRUE
+      }
+    )
+    deadline <- Sys.time() + 5
+    while (!done && Sys.time() < deadline) {
+      later::run_now(0.05)
+    }
+    expect_true(done)
+    if (!is.null(error)) {
+      stop(error)
+    }
+    result
+  }
+  now <- as.numeric(Sys.time())
+  original <- list(
+    iss = "https://issuer.example.com",
+    sub = "user-1",
+    aud = "abc",
+    iat = now - 60,
+    exp = now + 3600,
+    nonce = "login-nonce",
+    auth_time = now - 120
+  )
+  original_jwt <- make_fake_jwt(original)
+  for (async in c(FALSE, TRUE)) {
+    cli <- make_refresh_client()
+    token <- make_existing_refresh_token(original_jwt)
+    refresh_with <- function(claims, token, use_async = async) {
+      claims[["iat"]] <- as.numeric(Sys.time())
+      mock_refresh_response(make_fake_jwt(claims), function() {
+        resolve(refresh_token(
+          cli,
+          token,
+          async = use_async,
+          introspect = FALSE
+        ))
+      })
+    }
+    omitted <- original
+    omitted[["nonce"]] <- omitted[["auth_time"]] <- NULL
+    first <- refresh_with(omitted, token)
+    expect_null(first@id_token_claims[["nonce"]])
+    expect_null(first@id_token_claims[["auth_time"]])
+    expect_identical(first@original_id_token, original_jwt)
+    # A worker/process round trip must retain the original baseline.
+    first <- unserialize(serialize(first, NULL))
+    second <- refresh_with(original, first)
+    expect_identical(second@original_id_token, original_jwt)
+    expect_identical(second@id_token_claims[["nonce"]], "login-nonce")
+    for (claim in c("nonce", "auth_time")) {
+      changed <- original
+      changed[[claim]] <- if (claim == "nonce") "different-nonce" else now - 10
+      # Validate the baseline returned by either execution mode with typed
+      # synchronous errors, independent of the worker's error serialization.
+      expect_error(
+        refresh_with(changed, first, use_async = FALSE),
+        class = "shinyOAuth_id_token_error",
+        regexp = paste0(claim, ".*does not match the original")
+      )
+    }
+    expect_identical(first@original_id_token, original_jwt)
+  }
+})
+
+test_that("signed refresh nonce distinguishes omission from null and malformed values", {
+  client <- make_refresh_client()
+  key <- openssl::rsa_keygen()
+  jwk <- jsonlite::fromJSON(
+    write_test_jwk(key[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  local_mocked_bindings(fetch_jwks = function(...) list(keys = list(jwk)))
+  now <- floor(as.numeric(Sys.time()))
+  sign <- function(nonce, include = TRUE) {
+    claims <- list(
+      iss = client@provider@issuer,
+      aud = client@client_id,
+      sub = "user-1",
+      iat = now,
+      exp = now + 300
+    )
+    if (include) {
+      claims["nonce"] <- list(nonce)
+    }
+    input <- paste(
+      base64url_encode(charToRaw('{"alg":"RS256"}')),
+      base64url_encode(charToRaw(jsonlite::toJSON(
+        claims,
+        auto_unbox = TRUE,
+        null = "null"
+      ))),
+      sep = "."
+    )
+    paste(
+      input,
+      base64url_encode(openssl::signature_create(
+        charToRaw(input),
+        openssl::sha256,
+        key
+      )),
+      sep = "."
+    )
+  }
+  original <- sign("login-nonce")
+  verify <- function(jwt, refresh = TRUE) {
+    verify_token_set(
+      client,
+      list(
+        access_token = "access",
+        token_type = "Bearer",
+        id_token = jwt,
+        scope = "openid"
+      ),
+      nonce = if (refresh) NULL else "login-nonce",
+      is_refresh = refresh,
+      original_id_token = if (refresh) original else NULL
+    )
+  }
+  expect_true(verify(original, FALSE)[[".id_token_validated"]])
+  expect_true(verify(sign(NULL, include = FALSE))[[".id_token_validated"]])
+  expect_true(verify(sign("login-nonce"))[[".id_token_validated"]])
+  for (nonce in list(
+    NULL,
+    "",
+    "other",
+    1,
+    TRUE,
+    list("login-nonce"),
+    list(value = "login-nonce")
+  )) {
+    jwt <- sign(nonce)
+    expect_true("nonce" %in% names(parse_jwt_payload(jwt)))
+    expect_error(verify(jwt), "nonce", class = "shinyOAuth_id_token_error")
+  }
+})
+
 # --- iss validation (validated path: id_token_validation = TRUE) ----------
+
+test_that("refresh requires a newly issued ID token with clock tolerance", {
+  withr::local_options(shinyOAuth.skip_id_sig = TRUE)
+  now <- floor(as.numeric(Sys.time()))
+  original <- list(
+    iss = "https://issuer.example.com",
+    sub = "user-1",
+    aud = "abc",
+    iat = now - 600,
+    exp = now + 3600
+  )
+  for (validate in c(TRUE, FALSE)) {
+    cli <- make_refresh_client(id_token_validation = validate)
+    token <- make_existing_refresh_token(make_fake_jwt(original))
+    mock_refresh_response(make_fake_jwt(original), function() {
+      expect_error(
+        refresh_token(cli, token),
+        "issued before the refresh request"
+      )
+    })
+    fresh <- original
+    fresh[["iat"]] <- now
+    mock_refresh_response(make_fake_jwt(fresh), function() {
+      expect_no_error(refresh_token(cli, token))
+    })
+  }
+  for (skew in c(0, 30)) {
+    fresh <- original
+    fresh[["iat"]] <- now - skew
+    expect_no_error(shinyOAuth:::compare_refresh_id_token_continuity(
+      fresh,
+      original,
+      request_started_at = now + 0.9,
+      leeway = skew
+    ))
+    fresh[["iat"]] <- now - skew - 1
+    expect_error(
+      shinyOAuth:::compare_refresh_id_token_continuity(
+        fresh,
+        original,
+        request_started_at = now + 0.9,
+        leeway = skew
+      ),
+      "issued before the refresh request"
+    )
+  }
+})
 
 test_that("refresh rejects new id_token with mismatched iss (validated path)", {
   withr::local_options(shinyOAuth.skip_id_sig = TRUE)
@@ -104,7 +307,7 @@ test_that("refresh rejects new id_token with mismatched iss (validated path)", {
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -157,7 +360,7 @@ test_that("refresh rejects new id_token with mismatched iss (non-validated path)
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -212,7 +415,7 @@ test_that("refresh rejects new id_token with mismatched aud (validated path)", {
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -262,7 +465,7 @@ test_that("refresh rejects new id_token with mismatched aud (non-validated path)
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -314,7 +517,7 @@ test_that("refresh accepts new id_token with matching iss and aud (validated pat
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -336,7 +539,7 @@ test_that("refresh accepts new id_token with matching iss and aud (validated pat
   expect_identical(t2@id_token, new_jwt)
 })
 
-test_that("refresh accepts matching iss/aud with multi-audience (validated path)", {
+test_that("refresh rejects untrusted extra audiences on validated path", {
   withr::local_options(shinyOAuth.skip_id_sig = TRUE)
   cli <- make_refresh_client(id_token_validation = TRUE)
 
@@ -366,7 +569,7 @@ test_that("refresh accepts matching iss/aud with multi-audience (validated path)
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -382,9 +585,11 @@ test_that("refresh accepts matching iss/aud with multi-audience (validated path)
     id_token = original
   )
 
-  t2 <- refresh_token(cli, t, async = FALSE, introspect = FALSE)
-  expect_true(S7::S7_inherits(t2, OAuthToken))
-  expect_identical(t2@access_token, "new_at")
+  expect_error(
+    refresh_token(cli, t, async = FALSE, introspect = FALSE),
+    regexp = "untrusted additional audiences",
+    class = "shinyOAuth_id_token_error"
+  )
 })
 
 test_that("refresh accepts matching iss/aud (non-validated path)", {
@@ -413,7 +618,7 @@ test_that("refresh accepts matching iss/aud (non-validated path)", {
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -464,7 +669,7 @@ test_that("refresh iss comparison rejects trailing slash difference", {
         new_jwt
       )
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(body)
@@ -488,7 +693,7 @@ test_that("refresh iss comparison rejects trailing slash difference", {
   )
 })
 
-# --- auth_time / nonce / azp continuity ------------------------------------
+# --- auth_time and nonce continuity ----------------------------------------
 
 test_that("refresh rejects new id_token with mismatched auth_time", {
   withr::local_options(shinyOAuth.skip_id_sig = TRUE)
@@ -524,6 +729,38 @@ test_that("refresh rejects new id_token with mismatched auth_time", {
     regexp = "auth_time.*does not match the original",
     class = "shinyOAuth_id_token_error"
   )
+})
+
+test_that("refreshed ID token may omit the original auth_time", {
+  withr::local_options(shinyOAuth.skip_id_sig = TRUE)
+  cli <- make_refresh_client(id_token_validation = TRUE)
+
+  original <- make_fake_jwt(list(
+    iss = "https://issuer.example.com",
+    sub = "user-1",
+    aud = "abc",
+    auth_time = 1700000000,
+    exp = as.numeric(Sys.time()) + 3600,
+    iat = as.numeric(Sys.time()) - 60
+  ))
+  new_jwt <- make_fake_jwt(list(
+    iss = "https://issuer.example.com",
+    sub = "user-1",
+    aud = "abc",
+    exp = as.numeric(Sys.time()) + 3600,
+    iat = as.numeric(Sys.time())
+  ))
+
+  refreshed <- mock_refresh_response(new_jwt, function() {
+    refresh_token(
+      cli,
+      make_existing_refresh_token(original),
+      async = FALSE,
+      introspect = FALSE
+    )
+  })
+
+  expect_identical(refreshed@id_token, new_jwt)
 })
 
 test_that("refresh rejects refreshed nonce that does not match original", {
@@ -562,7 +799,7 @@ test_that("refresh rejects refreshed nonce that does not match original", {
   )
 })
 
-test_that("refresh rejects new id_token with mismatched azp", {
+test_that("base OIDC refresh does not impose azp continuity", {
   cli <- make_refresh_client(id_token_validation = FALSE)
 
   original <- make_fake_jwt(list(
@@ -583,29 +820,26 @@ test_that("refresh rejects new id_token with mismatched azp", {
     iat = as.numeric(Sys.time())
   ))
 
-  expect_error(
-    mock_refresh_response(new_jwt, function() {
-      refresh_token(
-        cli,
-        make_existing_refresh_token(original),
-        async = FALSE,
-        introspect = FALSE
-      )
-    }),
-    regexp = "azp.*does not match the original",
-    class = "shinyOAuth_id_token_error"
-  )
+  refreshed <- mock_refresh_response(new_jwt, function() {
+    refresh_token(
+      cli,
+      make_existing_refresh_token(original),
+      async = FALSE,
+      introspect = FALSE
+    )
+  })
+
+  expect_identical(refreshed@id_token, new_jwt)
 })
 
-test_that("refresh accepts matching auth_time and azp when nonce is omitted", {
+test_that("refresh accepts matching auth_time when nonce is omitted", {
   withr::local_options(shinyOAuth.skip_id_sig = TRUE)
   cli <- make_refresh_client(id_token_validation = TRUE)
 
   original <- make_fake_jwt(list(
     iss = "https://issuer.example.com",
     sub = "user-1",
-    aud = c("abc", "resource-api"),
-    azp = "abc",
+    aud = "abc",
     auth_time = 1700000000,
     nonce = "original-nonce",
     exp = as.numeric(Sys.time()) + 3600,
@@ -615,8 +849,7 @@ test_that("refresh accepts matching auth_time and azp when nonce is omitted", {
   new_jwt <- make_fake_jwt(list(
     iss = "https://issuer.example.com",
     sub = "user-1",
-    aud = c("resource-api", "abc"),
-    azp = "abc",
+    aud = "abc",
     auth_time = 1700000000,
     exp = as.numeric(Sys.time()) + 3600,
     iat = as.numeric(Sys.time())
@@ -750,5 +983,5 @@ test_that("verify_token_set accepts matching iss/aud on refresh (direct call)", 
     is_refresh = TRUE,
     original_id_token = original
   )
-  expect_identical(result$access_token, "new_at")
+  expect_identical(result[["access_token"]], "new_at")
 })

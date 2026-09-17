@@ -22,7 +22,7 @@ test_that("mTLS token auth styles accept certificate-backed clients", {
         token_endpoint = "https://example.com/mtls/token",
         userinfo_endpoint = "https://example.com/mtls/userinfo"
       ),
-      tls_client_certificate_bound_access_tokens = TRUE
+      mtls_client_certificate_bound_access_tokens = TRUE
     )
 
     cli <- oauth_client(
@@ -31,59 +31,67 @@ test_that("mTLS token auth styles accept certificate-backed clients", {
       client_secret = "",
       redirect_uri = "http://localhost:8100/callback",
       scopes = character(0),
-      tls_client_cert_file = cert_file,
-      tls_client_key_file = key_file,
-      tls_client_ca_file = ca_file
+      mtls_client_cert_file = cert_file,
+      mtls_client_key_file = key_file,
+      mtls_client_ca_file = ca_file
     )
 
     expect_true(S7::S7_inherits(cli, OAuthClient))
     expect_identical(prov@token_auth_style, style)
-    expect_true(isTRUE(prov@tls_client_certificate_bound_access_tokens))
+    expect_true(isTRUE(prov@mtls_client_certificate_bound_access_tokens))
     expect_identical(
-      prov@mtls_endpoint_aliases$token_endpoint,
+      prov@mtls_endpoint_aliases[["token_endpoint"]],
       "https://example.com/mtls/token"
     )
-    expect_identical(cli@tls_client_cert_file, cert_file)
-    expect_identical(cli@tls_client_key_file, key_file)
-    expect_identical(cli@tls_client_ca_file, ca_file)
+    expect_identical(cli@mtls_client_cert_file, cert_file)
+    expect_identical(cli@mtls_client_key_file, key_file)
+    expect_identical(cli@mtls_client_ca_file, ca_file)
   }
 
   tok <- OAuthToken(
     access_token = "at",
     userinfo = list(),
-    cnf = list(`x5t#S256` = "thumbprint")
+    cnf = list(`x5t#S256` = "iPIdjkTUJxFJKXQE35HK8gcTC_oRZYJAir0E7ebbf1E")
   )
-  expect_identical(tok@cnf$`x5t#S256`, "thumbprint")
+  expect_identical(
+    tok@cnf[["x5t#S256"]],
+    "iPIdjkTUJxFJKXQE35HK8gcTC_oRZYJAir0E7ebbf1E"
+  )
 
   dpop_tok <- OAuthToken(
     access_token = "at",
     userinfo = list(),
-    cnf = list(jkt = "jkt-thumbprint")
+    cnf = list(jkt = "Zr6bZXk615zAaxVV7AuuawTrZjkIOYeOKpcixBzUnrg")
   )
-  expect_identical(dpop_tok@cnf$jkt, "jkt-thumbprint")
+  expect_identical(
+    dpop_tok@cnf[["jkt"]],
+    "Zr6bZXk615zAaxVV7AuuawTrZjkIOYeOKpcixBzUnrg"
+  )
 
   expect_identical(
-    shinyOAuth:::resolve_token_cnf(cnf = list(jkt = "jkt-thumbprint")),
-    list(jkt = "jkt-thumbprint")
+    shinyOAuth:::resolve_token_cnf(
+      cnf = list(jkt = "Zr6bZXk615zAaxVV7AuuawTrZjkIOYeOKpcixBzUnrg")
+    ),
+    list(jkt = "Zr6bZXk615zAaxVV7AuuawTrZjkIOYeOKpcixBzUnrg")
   )
 
   mixed_access_token <- build_dummy_jwt(list(
     sub = "user-1",
-    cnf = list(jkt = "jwt-jkt")
+    cnf = list(jkt = "XyMLnWRv_7dbwy1uaOJ1V3VARH4YFe6oFPBEYje74Gk")
   ))
   expect_identical(
     shinyOAuth:::resolve_token_cnf(
-      cnf = list(`x5t#S256` = "explicit-thumbprint"),
+      cnf = list(`x5t#S256` = "_tO-l-k61Qj5glimNo8c3KpAWqIlH4V49GNY2SBdgg0"),
       access_token = mixed_access_token,
       introspection_result = list(
         raw = list(
-          cnf = list(jkt = "intro-jkt")
+          cnf = list(jkt = "x9Suf3vXLkAS69yWbUFhYTyXHrTH7jxjLnGGltJU5Vc")
         )
       )
     ),
     list(
-      `x5t#S256` = "explicit-thumbprint",
-      jkt = "intro-jkt"
+      `x5t#S256` = "_tO-l-k61Qj5glimNo8c3KpAWqIlH4V49GNY2SBdgg0",
+      jkt = "x9Suf3vXLkAS69yWbUFhYTyXHrTH7jxjLnGGltJU5Vc"
     )
   )
 
@@ -91,10 +99,12 @@ test_that("mTLS token auth styles accept certificate-backed clients", {
     shinyOAuth:::validate_token_cnf_consistency(
       access_token = build_dummy_jwt(list(
         sub = "user-1",
-        cnf = list(jkt = "jwt-jkt")
+        cnf = list(jkt = "XyMLnWRv_7dbwy1uaOJ1V3VARH4YFe6oFPBEYje74Gk")
       )),
       introspection_result = list(
-        raw = list(cnf = list(jkt = "intro-jkt"))
+        raw = list(
+          cnf = list(jkt = "x9Suf3vXLkAS69yWbUFhYTyXHrTH7jxjLnGGltJU5Vc")
+        )
       )
     ),
     class = "shinyOAuth_input_error",
@@ -139,7 +149,7 @@ test_that("certificate-bound sender constraint requires token binding or explici
     id_token_required = FALSE,
     id_token_validation = FALSE,
     token_auth_style = "body",
-    tls_client_certificate_bound_access_tokens = TRUE
+    mtls_client_certificate_bound_access_tokens = TRUE
   )
 
   public_client <- oauth_client(
@@ -155,9 +165,9 @@ test_that("certificate-bound sender constraint requires token binding or explici
     client_secret = "",
     redirect_uri = "http://localhost:8100/callback",
     scopes = character(0),
-    tls_client_cert_file = cert_file,
-    tls_client_key_file = key_file,
-    tls_client_ca_file = ca_file
+    mtls_client_cert_file = cert_file,
+    mtls_client_key_file = key_file,
+    mtls_client_ca_file = ca_file
   )
   requested_client <- oauth_client(
     provider = prov,
@@ -165,10 +175,10 @@ test_that("certificate-bound sender constraint requires token binding or explici
     client_secret = "",
     redirect_uri = "http://localhost:8100/callback",
     scopes = character(0),
-    tls_client_cert_file = cert_file,
-    tls_client_key_file = key_file,
-    tls_client_ca_file = ca_file,
-    mtls_request_certificate_bound_access_tokens = TRUE
+    mtls_client_cert_file = cert_file,
+    mtls_client_key_file = key_file,
+    mtls_client_ca_file = ca_file,
+    mtls_certificate_bound_access_tokens = TRUE
   )
   plain_token <- OAuthToken(
     access_token = "at",
@@ -179,7 +189,7 @@ test_that("certificate-bound sender constraint requires token binding or explici
     access_token = "at",
     token_type = "Bearer",
     userinfo = list(),
-    cnf = list(`x5t#S256` = "thumbprint")
+    cnf = list(`x5t#S256` = "iPIdjkTUJxFJKXQE35HK8gcTC_oRZYJAir0E7ebbf1E")
   )
 
   expect_false(
@@ -216,9 +226,11 @@ test_that("refresh cnf resolution only trusts fresh token surfaces", {
 
   expect_identical(
     shinyOAuth:::resolve_refresh_token_cnf(
-      access_token = build_dummy_jwt(list(cnf = list(jkt = "fresh-jkt")))
+      access_token = build_dummy_jwt(list(
+        cnf = list(jkt = "izoi5g-Ko8qYHhMq8lAey5Y0gojXEeTPvhozOJusl4Y")
+      ))
     ),
-    list(jkt = "fresh-jkt")
+    list(jkt = "izoi5g-Ko8qYHhMq8lAey5Y0gojXEeTPvhozOJusl4Y")
   )
 
   expect_length(
@@ -248,7 +260,7 @@ test_that("certificate-bound clients reject tokens missing cnf thumbprints", {
     id_token_required = FALSE,
     id_token_validation = FALSE,
     token_auth_style = "body",
-    tls_client_certificate_bound_access_tokens = TRUE
+    mtls_client_certificate_bound_access_tokens = TRUE
   )
   cli <- oauth_client(
     provider = prov,
@@ -256,10 +268,10 @@ test_that("certificate-bound clients reject tokens missing cnf thumbprints", {
     client_secret = "",
     redirect_uri = "http://localhost:8100/callback",
     scopes = character(0),
-    tls_client_cert_file = cert_file,
-    tls_client_key_file = key_file,
-    tls_client_ca_file = ca_file,
-    mtls_request_certificate_bound_access_tokens = TRUE
+    mtls_client_cert_file = cert_file,
+    mtls_client_key_file = key_file,
+    mtls_client_ca_file = ca_file,
+    mtls_certificate_bound_access_tokens = TRUE
   )
 
   expect_error(
@@ -301,12 +313,12 @@ test_that("requesting certificate-bound tokens requires provider support and cer
       client_secret = "",
       redirect_uri = "http://localhost:8100/callback",
       scopes = character(0),
-      tls_client_cert_file = cert_file,
-      tls_client_key_file = key_file,
-      tls_client_ca_file = ca_file,
-      mtls_request_certificate_bound_access_tokens = TRUE
+      mtls_client_cert_file = cert_file,
+      mtls_client_key_file = key_file,
+      mtls_client_ca_file = ca_file,
+      mtls_certificate_bound_access_tokens = TRUE
     ),
-    regexp = "requires provider@tls_client_certificate_bound_access_tokens = TRUE"
+    regexp = "requires provider@mtls_client_certificate_bound_access_tokens = TRUE"
   )
 
   prov_with_capability <- oauth_provider(
@@ -318,7 +330,7 @@ test_that("requesting certificate-bound tokens requires provider support and cer
     id_token_required = FALSE,
     id_token_validation = FALSE,
     token_auth_style = "body",
-    tls_client_certificate_bound_access_tokens = TRUE
+    mtls_client_certificate_bound_access_tokens = TRUE
   )
 
   expect_error(
@@ -328,9 +340,9 @@ test_that("requesting certificate-bound tokens requires provider support and cer
       client_secret = "",
       redirect_uri = "http://localhost:8100/callback",
       scopes = character(0),
-      mtls_request_certificate_bound_access_tokens = TRUE
+      mtls_certificate_bound_access_tokens = TRUE
     ),
-    regexp = "requires tls_client_cert_file and tls_client_key_file"
+    regexp = "requires mtls_client_cert_file and mtls_client_key_file"
   )
 })
 
@@ -348,7 +360,7 @@ test_that("verify_token_set rejects certificate thumbprint mismatches during exc
     id_token_required = FALSE,
     id_token_validation = FALSE,
     token_auth_style = "body",
-    tls_client_certificate_bound_access_tokens = TRUE,
+    mtls_client_certificate_bound_access_tokens = TRUE,
     allowed_token_types = character(0)
   )
   cli <- oauth_client(
@@ -357,10 +369,10 @@ test_that("verify_token_set rejects certificate thumbprint mismatches during exc
     client_secret = "",
     redirect_uri = "http://localhost:8100/callback",
     scopes = character(0),
-    tls_client_cert_file = cert_file,
-    tls_client_key_file = key_file,
-    tls_client_key_password = "password",
-    tls_client_ca_file = ca_file
+    mtls_client_cert_file = cert_file,
+    mtls_client_key_file = key_file,
+    mtls_client_key_password = "password",
+    mtls_client_ca_file = ca_file
   )
 
   expect_mismatch <- function(is_refresh) {
@@ -371,7 +383,7 @@ test_that("verify_token_set rejects certificate thumbprint mismatches during exc
           access_token = "at-1",
           token_type = "Bearer",
           expires_in = 60,
-          cnf = list(`x5t#S256` = "wrong-thumbprint")
+          cnf = list(`x5t#S256` = "DaDnyOgS1VVpHshFDZy6OzNepqk5GFTboyokkTd-j5s")
         ),
         nonce = NULL,
         is_refresh = is_refresh,
@@ -413,9 +425,9 @@ test_that("mTLS token auth styles require certificate and key files", {
       client_secret = "",
       redirect_uri = "http://localhost:8100/callback",
       scopes = character(0),
-      tls_client_cert_file = cert_file
+      mtls_client_cert_file = cert_file
     ),
-    regexp = "tls_client_cert_file and tls_client_key_file are required"
+    regexp = "mtls_client_cert_file and mtls_client_key_file are required"
   )
 
   missing_key_file <- tempfile(fileext = ".pem")
@@ -426,10 +438,10 @@ test_that("mTLS token auth styles require certificate and key files", {
       client_secret = "",
       redirect_uri = "http://localhost:8100/callback",
       scopes = character(0),
-      tls_client_cert_file = cert_file,
-      tls_client_key_file = missing_key_file
+      mtls_client_cert_file = cert_file,
+      mtls_client_key_file = missing_key_file
     ),
-    regexp = "tls_client_key_file must point to an existing file"
+    regexp = "mtls_client_key_file must point to an existing file"
   )
 
   missing_cert_file <- tempfile(fileext = ".pem")
@@ -440,9 +452,9 @@ test_that("mTLS token auth styles require certificate and key files", {
       client_secret = "",
       redirect_uri = "http://localhost:8100/callback",
       scopes = character(0),
-      tls_client_cert_file = missing_cert_file,
-      tls_client_key_file = key_file
+      mtls_client_cert_file = missing_cert_file,
+      mtls_client_key_file = key_file
     ),
-    regexp = "tls_client_cert_file must point to an existing file"
+    regexp = "mtls_client_cert_file must point to an existing file"
   )
 })

@@ -8,12 +8,14 @@ oauth_provider_keycloak(
   base_url,
   realm,
   name = paste0("keycloak-", realm),
-  token_auth_style = "body"
+  token_auth_style = "body",
+  jarm_tolerate_duplicate_top_level_iss = TRUE
 )
 }
 \arguments{
 \item{base_url}{Base URL of the Keycloak server, e.g.,
-"http://localhost:8080"}
+"http://localhost:8080". Local HTTP development also requires
+\code{options(shinyOAuth.allow_insecure_oidc_loopback = TRUE)}.}
 
 \item{realm}{Keycloak realm name, e.g., "myrealm"}
 
@@ -27,72 +29,24 @@ to "body" for Keycloak, which works for many common setups. Use \code{"public"}
 if you need to suppress \code{client_secret} even when it is set in the
 environment. If you pass \code{NULL}, discovery will infer the method from the
 provider's \code{token_endpoint_auth_methods_supported} metadata.}
+
+\item{jarm_tolerate_duplicate_top_level_iss}{Logical. Defaults to \code{TRUE}
+for Keycloak because current Keycloak JARM responses may repeat an
+identical top-level \code{iss} claim. Set \code{FALSE} to fail closed on duplicate
+top-level \code{iss} members instead of applying this interoperability
+workaround.}
 }
 \value{
 \link{OAuthProvider} object configured for the specified Keycloak realm
 }
 \description{
-Create a Keycloak \link{OAuthProvider} (via OIDC discovery)
+Look up login settings for a Keycloak realm. Supply your server URL
+and realm name, then pass the result to \code{\link[=oauth_client]{oauth_client()}}. This helper
+contacts the Keycloak server during setup.
 }
 \examples{
-# Configure generic OAuth 2.0 provider (no OIDC)
-generic_provider <- oauth_provider(
-  name = "example",
-  auth_url = "https://example.com/oauth/authorize",
-  token_url = "https://example.com/oauth/token",
-  # Optional URL for fetching user info:
-  userinfo_url = "https://example.com/oauth/userinfo"
-)
-
-# Configure generic OIDC provider manually
-# (This defaults to using nonce & ID token validation)
-generic_oidc_provider <- oauth_provider_oidc(
-  name = "My OIDC",
-  base_url = "https://my-issuer.example.com"
-)
-
-# Configure a OIDC provider via OIDC discovery
-# (requires network access)
-if (interactive()) {
-  # Using Auth0 sample issuer as an example
-  oidc_discovery_provider <- oauth_provider_oidc_discover(
-    issuer = "https://samples.auth0.com"
-  )
+\dontrun{
+oauth_provider_keycloak("https://login.example.com", realm = "myrealm")
 }
 
-# GitHub preconfigured provider
-github_provider <- oauth_provider_github()
-
-# Google preconfigured provider
-google_provider <- oauth_provider_google()
-
-# Microsoft preconfigured provider
-# See `?oauth_provider_microsoft` for example using a custom tenant ID
-
-# Spotify preconfigured provider
-spotify_provider <- oauth_provider_spotify()
-
-# Slack via OIDC discovery
-# (requires network access)
-if (interactive()) {
-  slack_provider <- oauth_provider_slack()
-}
-
-# Keycloak
-# (requires configured Keycloak realm; example below is therefore not run)
-if (interactive()) {
-  oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
-}
-
-# Auth0
-# (requires configured Auth0 domain; example below is therefore not run)
-if (interactive()) {
-  oauth_provider_auth0(domain = "your-tenant.auth0.com")
-}
-
-# Okta
-# (requires configured Okta domain; example below is therefore not run)
-if (interactive()) {
-  oauth_provider_okta(domain = "dev-123456.okta.com")
-}
 }

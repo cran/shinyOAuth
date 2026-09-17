@@ -4,23 +4,23 @@ test_that("fetch_jwks does not cache on invalid JSON", {
 
   app <- webfakes::new_app()
   base <- NULL
-  app$get("/.well-known/openid-configuration", function(req, res) {
-    res$send_json(
+  app[["get"]]("/.well-known/openid-configuration", function(req, res) {
+    res[["send_json"]](
       object = list(jwks_uri = paste0(base, "/jwks")),
       auto_unbox = TRUE
     )
   })
-  app$get("/jwks", function(req, res) {
-    res$status <- 200
-    res$set_type("text/plain")
-    res$send("not json")
+  app[["get"]]("/jwks", function(req, res) {
+    res[["status"]] <- 200
+    res[["set_type"]]("text/plain")
+    res[["send"]]("not json")
   })
   srv <- webfakes::local_app_process(app)
-  base <- srv$url()
+  base <- srv[["url"]]()
 
   cache <- cachem::cache_mem(max_age = 3600)
   cache_key <- shinyOAuth:::jwks_cache_key(base, pins = NULL, pin_mode = "any")
-  expect_null(cache$get(cache_key, missing = NULL))
+  expect_null(cache[["get"]](cache_key, missing = NULL))
 
   expect_error(
     shinyOAuth:::fetch_jwks(
@@ -32,7 +32,72 @@ test_that("fetch_jwks does not cache on invalid JSON", {
   )
 
   # Ensure cache wasn't populated on parse failure
-  expect_null(cache$get(cache_key, missing = NULL))
+  expect_null(cache[["get"]](cache_key, missing = NULL))
+})
+
+test_that("fetched key_ops arrays restrict signature and encryption selection", {
+  testthat::skip_if_not_installed("webfakes")
+  testthat::skip_on_cran()
+
+  rsa <- openssl::rsa_keygen(bits = 2048)
+  public_jwk <- jsonlite::fromJSON(
+    write_test_jwk(rsa[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  make_key <- function(kid, use, operations) {
+    key <- public_jwk
+    key[["kid"]] <- kid
+    key[["use"]] <- use
+    key[["key_ops"]] <- operations
+    key
+  }
+  jwks_json <- jsonlite::toJSON(
+    list(
+      keys = list(
+        make_key("sig-verify", "sig", list("verify")),
+        make_key("sig-both", "sig", list("sign", "verify")),
+        make_key("enc-wrap", "enc", list("encrypt", "wrapKey")),
+        make_key("empty", "sig", list()),
+        make_key("wrong", "sig", list("sign"))
+      )
+    ),
+    auto_unbox = TRUE
+  )
+
+  app <- webfakes::new_app()
+  app[["get"]]("/.well-known/openid-configuration", function(req, res) {
+    host <- req[["headers"]][["Host"]] %||% req[["headers"]][["host"]]
+    base <- paste0("http://", host)
+    res[["send_json"]](
+      object = list(issuer = base, jwks_uri = paste0(base, "/jwks")),
+      auto_unbox = TRUE
+    )
+  })
+  app[["get"]]("/jwks", function(req, res) {
+    res[["set_status"]](200)[["set_type"]]("application/json")[["send"]](
+      jwks_json
+    )
+  })
+  server <- webfakes::local_app_process(app)
+  issuer <- sub("/$", "", server[["url"]]())
+
+  fetched <- shinyOAuth:::fetch_jwks(
+    issuer = issuer,
+    jwks_cache = cachem::cache_mem(max_age = 3600),
+    pins = NULL,
+    pin_mode = "any"
+  )
+
+  signature_keys <- shinyOAuth:::select_candidate_jwks(fetched)
+  signature_kids <- vapply(signature_keys, `[[`, character(1), "kid")
+  expect_setequal(signature_kids, c("sig-verify", "sig-both"))
+
+  encryption_keys <- shinyOAuth:::select_candidate_jwks_for_encryption(
+    fetched,
+    "RSA-OAEP"
+  )
+  encryption_kids <- vapply(encryption_keys, `[[`, character(1), "kid")
+  expect_identical(encryption_kids, "enc-wrap")
 })
 
 test_that("fetch_jwks rejects duplicate discovery jwks_uri members", {
@@ -40,10 +105,10 @@ test_that("fetch_jwks rejects duplicate discovery jwks_uri members", {
   testthat::skip_on_cran()
 
   app <- webfakes::new_app()
-  app$get("/.well-known/openid-configuration", function(req, res) {
-    host <- req$headers$Host %||% req$headers$host
+  app[["get"]]("/.well-known/openid-configuration", function(req, res) {
+    host <- req[["headers"]][["Host"]] %||% req[["headers"]][["host"]]
     base <- paste0("http://", host)
-    res$set_status(200)$set_type("application/json")$send(
+    res[["set_status"]](200)[["set_type"]]("application/json")[["send"]](
       paste0(
         '{"issuer":"',
         base,
@@ -57,7 +122,7 @@ test_that("fetch_jwks rejects duplicate discovery jwks_uri members", {
     )
   })
   srv <- webfakes::local_app_process(app)
-  base <- srv$url()
+  base <- srv[["url"]]()
 
   expect_error(
     shinyOAuth:::fetch_jwks(
@@ -67,7 +132,96 @@ test_that("fetch_jwks rejects duplicate discovery jwks_uri members", {
       pin_mode = "any"
     ),
     class = "shinyOAuth_parse_error",
-    regexp = "duplicate member name: jwks_uri"
+    regexp = "duplicate member name"
+  )
+})
+
+test_that("fetch_jwks does not fall through after malformed metadata", {
+  testthat::skip_if_not_installed("webfakes")
+  testthat::skip_on_cran()
+
+  app <- webfakes::new_app()
+  app[["get"]]("/.well-known/openid-configuration/issuer1", function(req, res) {
+    host <- req[["headers"]][["Host"]] %||% req[["headers"]][["host"]]
+    base <- paste0("http://", host, "/issuer1")
+    res[["set_status"]](200)[["set_type"]]("application/json")[["send"]](
+      paste0(
+        '{"issuer":"',
+        base,
+        '","jwks_uri":"',
+        base,
+        '/jwks"',
+        ',"jwks_uri":"',
+        base,
+        '/alt-jwks"}'
+      )
+    )
+  })
+  app[["get"]]("/issuer1/.well-known/openid-configuration", function(req, res) {
+    host <- req[["headers"]][["Host"]] %||% req[["headers"]][["host"]]
+    base <- paste0("http://", host, "/issuer1")
+    res[["send_json"]](
+      object = list(
+        issuer = base,
+        jwks_uri = paste0(base, "/jwks")
+      ),
+      auto_unbox = TRUE
+    )
+  })
+  app[["get"]]("/issuer1/jwks", function(req, res) {
+    res[["send_json"]](
+      object = list(keys = list()),
+      auto_unbox = TRUE
+    )
+  })
+  srv <- webfakes::local_app_process(app)
+  issuer <- paste0(srv[["url"]](), "/issuer1")
+
+  expect_error(
+    shinyOAuth:::fetch_jwks(
+      issuer = issuer,
+      jwks_cache = cachem::cache_mem(max_age = 3600),
+      pins = NULL,
+      pin_mode = "any"
+    ),
+    class = "shinyOAuth_parse_error",
+    regexp = "duplicate member name"
+  )
+})
+
+test_that("generic JWKS discovery continues when OAuth metadata omits jwks_uri", {
+  testthat::skip_if_not_installed("webfakes")
+  testthat::skip_on_cran()
+
+  app <- webfakes::new_app()
+  app[["get"]](
+    "/.well-known/oauth-authorization-server/issuer1",
+    function(req, res) {
+      host <- req[["headers"]][["Host"]] %||% req[["headers"]][["host"]]
+      res[["send_json"]](
+        object = list(issuer = paste0("http://", host, "/issuer1")),
+        auto_unbox = TRUE
+      )
+    }
+  )
+  app[["get"]]("/.well-known/openid-configuration/issuer1", function(req, res) {
+    host <- req[["headers"]][["Host"]] %||% req[["headers"]][["host"]]
+    issuer <- paste0("http://", host, "/issuer1")
+    res[["send_json"]](
+      object = list(issuer = issuer, jwks_uri = paste0(issuer, "/jwks")),
+      auto_unbox = TRUE
+    )
+  })
+  srv <- webfakes::local_app_process(app)
+
+  metadata <- shinyOAuth:::fetch_authorization_server_metadata(
+    paste0(srv[["url"]](), "/issuer1")
+  )
+
+  expect_identical(metadata[["metadata_source"]], "openid_configuration")
+  expect_identical(
+    metadata[["document"]][["jwks_uri"]],
+    paste0(shinyOAuth:::rtrim_slash(srv[["url"]]()), "/issuer1/jwks")
   )
 })
 
@@ -76,10 +230,10 @@ test_that("fetch_jwks rejects duplicate JWKS top-level members", {
   testthat::skip_on_cran()
 
   app <- webfakes::new_app()
-  app$get("/.well-known/openid-configuration", function(req, res) {
-    host <- req$headers$Host %||% req$headers$host
+  app[["get"]]("/.well-known/openid-configuration", function(req, res) {
+    host <- req[["headers"]][["Host"]] %||% req[["headers"]][["host"]]
     base <- paste0("http://", host)
-    res$send_json(
+    res[["send_json"]](
       object = list(
         issuer = base,
         jwks_uri = paste0(base, "/jwks")
@@ -87,13 +241,13 @@ test_that("fetch_jwks rejects duplicate JWKS top-level members", {
       auto_unbox = TRUE
     )
   })
-  app$get("/jwks", function(req, res) {
-    res$set_status(200)$set_type("application/json")$send(
+  app[["get"]]("/jwks", function(req, res) {
+    res[["set_status"]](200)[["set_type"]]("application/json")[["send"]](
       '{"keys":[],"keys":[]}'
     )
   })
   srv <- webfakes::local_app_process(app)
-  base <- srv$url()
+  base <- shinyOAuth:::rtrim_slash(srv[["url"]]())
 
   expect_error(
     shinyOAuth:::fetch_jwks(
@@ -103,7 +257,7 @@ test_that("fetch_jwks rejects duplicate JWKS top-level members", {
       pin_mode = "any"
     ),
     class = "shinyOAuth_parse_error",
-    regexp = "duplicate member name: keys"
+    regexp = "duplicate member name"
   )
 })
 
@@ -171,28 +325,37 @@ test_that("fetch_jwks evicts poisoned cache on pin mismatch even if refetch fail
   testthat::skip_on_cran() # webfakes subprocess can timeout on slow CRAN machines
 
   # Good JWKS the server will return
-  good_rsa <- list(kty = "RSA", n = "n-good", e = "AQAB", kid = "good")
+  good_rsa <- jsonlite::fromJSON(
+    write_test_jwk(openssl::rsa_keygen()[["pubkey"]]),
+    simplifyVector = FALSE
+  )
   good_jwks <- list(keys = list(good_rsa))
   good_pin <- shinyOAuth:::compute_jwk_thumbprint(good_rsa)
 
   app <- webfakes::new_app()
   # Make discovery fail fast with 500 to simulate network/refetch failure
-  app$get("/.well-known/openid-configuration", function(req, res) {
-    res$status <- 500
-    res$set_type("application/json")
-    res$send(jsonlite::toJSON(list(error = "boom"), auto_unbox = TRUE))
+  app[["get"]]("/.well-known/openid-configuration", function(req, res) {
+    res[["status"]] <- 500
+    res[["set_type"]]("application/json")
+    res[["send"]](jsonlite::toJSON(list(error = "boom"), auto_unbox = TRUE))
   })
   srv <- webfakes::local_app_process(app)
-  base <- srv$url()
+  base <- srv[["url"]]()
 
   cache <- cachem::cache_mem(max_age = 3600)
   # Compute cache key for the current pins/pin_mode
   ckey <- shinyOAuth:::jwks_cache_key(base, pins = good_pin, pin_mode = "any")
 
   # Seed cache with a poisoned JWKS that won't match the pin
-  bad_rsa <- list(kty = "RSA", n = "n-bad", e = "AQAB", kid = "bad")
+  bad_rsa <- jsonlite::fromJSON(
+    write_test_jwk(openssl::rsa_keygen()[["pubkey"]]),
+    simplifyVector = FALSE
+  )
   bad_jwks <- list(keys = list(bad_rsa))
-  cache$set(ckey, list(jwks = bad_jwks, fetched_at = as.numeric(Sys.time())))
+  cache[["set"]](
+    ckey,
+    list(jwks = bad_jwks, fetched_at = as.numeric(Sys.time()))
+  )
 
   # Now call fetch_jwks: it should notice the pin mismatch and evict the cache entry
   expect_error(
@@ -205,5 +368,5 @@ test_that("fetch_jwks evicts poisoned cache on pin mismatch even if refetch fail
   )
 
   # Ensure entry was evicted despite refetch failure
-  expect_null(cache$get(ckey, missing = NULL))
+  expect_null(cache[["get"]](ckey, missing = NULL))
 })

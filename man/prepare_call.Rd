@@ -2,20 +2,28 @@
 % Please edit documentation in R/methods__login.R
 \name{prepare_call}
 \alias{prepare_call}
-\title{Prepare a OAuth 2.0 authorization call and build an authorization URL}
+\title{Prepare an OAuth 2.0 authorization request and build its URL}
 \usage{
-prepare_call(oauth_client, browser_token, request_uri_publisher = NULL)
+prepare_call(
+  client,
+  browser_token,
+  request_uri_publisher = NULL,
+  oauth_client = NULL
+)
 }
 \arguments{
-\item{oauth_client}{An \link{OAuthClient} object.}
+\item{client}{An \link{OAuthClient} object.}
 
 \item{browser_token}{Browser-bound token used to tie the login attempt to the
 current browser session.}
 
 \item{request_uri_publisher}{Optional function used when
-\code{authorization_request_mode = "request_uri"}. It must accept
+\code{request_object_mode = "request_uri"}. It must accept
 \code{request_object}, \code{request_handle_id}, \code{expires_at}, and \code{oauth_client}
-arguments and return an absolute request-object URL.}
+arguments and return an absolute HTTPS request-object URL that the
+provider can fetch.}
+
+\item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 }
 \value{
 A length-1 string containing the authorization URL to send the user
@@ -25,19 +33,26 @@ to. When PAR is used, the returned string also carries
 authorization request should be regenerated.
 }
 \description{
-Prepares an OAuth 2.0 authorization request and returns the browser redirect
-URL. It generates the needed state, PKCE, and nonce values, stores the
-one-time callback data, and builds the final authorization URL.
+Prepare a login request and return the URL to open in the user's browser.
+Use this when your application controls the browser redirect and callback
+handling itself but needs shinyOAuth to construct the OAuth 2.0 authorization
+request. Pair it with \code{\link[=handle_callback]{handle_callback()}} to complete the code flow.
+}
+\details{
+In a Shiny app using \code{\link[=oauth_module_server]{oauth_module_server()}}, call \code{auth[["request_login"]]()}
+to start login through the module, which manages both operations and the
+reactive session state.
+
+The helper records one-time state and creates any required PKCE and nonce
+values. Custom callers must preserve the browser binding and process the
+returning callback themselves.
+For an explicitly configured POST client, use \code{\link[=prepare_authorization_request]{prepare_authorization_request()}}
+instead. This URL-only helper rejects POST before storing a transaction.
 }
 \examples{
-# Please note: `prepare_call()` & `handle_callback()` are typically
-# not called by users of this package directly, but are called
-# internally by `oauth_module_server()`. These functions are exported
-# nonetheless for advanced use cases. Most users will not need to
-# call these functions directly
+# Advanced example: your code supplies browser redirects and callback handling.
+# For a Shiny app, oauth_module_server() manages these steps for you.
 
-# Below code shows generic usage of `prepare_call()` and `handle_callback()`
-# (code is not run because it would require user interaction)
 if (interactive()) {
   # Define client
   client <- oauth_client(
@@ -47,21 +62,23 @@ if (interactive()) {
     redirect_uri = "http://127.0.0.1:8100"
   )
 
-  # Get authorization URL and and store state in client's state store
-  # `<browser_token>` is a token that identifies the browser session
-  #  and would typically be stored in a browser cookie
-  #  (`oauth_module_server()` handles this typically)
+  # Get the login URL and store state in client's state store
+  # `<browser_token>` must be unpredictable and persisted for this transaction
+  # in storage bound to the application's exact origin (scheme, host, port).
+  # The module combines origin-scoped storage with an independent marker cookie
+  # and checks both on return. A cookie alone does not provide this boundary:
+  # cookies can be shared by applications on different ports of the same host.
+  # Shiny applications should use oauth_module_server() for the complete flow.
   authorization_url <- prepare_call(client, "<browser_token>")
 
-  # Redirect user to authorization URL; retrieve code & payload from query;
-  # read also `<browser_token>` from browser cookie
-  # (`oauth_module_server()` handles this typically)
+  # Redirect user to authorization URL; retrieve code & state from the query;
+  # recover this transaction's `<browser_token>` through the origin-bound flow
+  # and verify its independent marker before calling handle_callback().
   code <- "..."
-  payload <- "..."
+  state <- "..."
   browser_token <- "..."
 
   # Handle callback, exchanging code for token and validating state
-  # (`oauth_module_server()` handles this typically)
-  token <- handle_callback(client, code, payload, browser_token)
+  token <- handle_callback(client, code, state, browser_token)
 }
 }

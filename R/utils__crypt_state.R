@@ -115,16 +115,17 @@ get_option_env_positive_number <- function(opt_name, env_name, default) {
   as.numeric(val)
 }
 
-#' Internal: add a tiny randomized delay before state decryption failure
+#' Internal: apply an optional delay before state decryption failure
 #'
-#' Used by `state_decrypt_fail()` to reduce timing differences between state
-#' parsing and decryption failure paths.
+#' Used by `state_decrypt_fail()`. Defaults to no delay so malformed state
+#' does not intentionally block the Shiny event loop. Explicit positive delays
+#' add timing noise but sleep synchronously, including during async prevalidation.
 #'
 #' @return No return value; may sleep briefly before returning invisibly.
 #' @keywords internal
 #' @noRd
 state_decrypt_delay_before_fail <- function() {
-  bounds <- getOption("shinyOAuth.state_fail_delay_ms", c(10, 30))
+  bounds <- getOption("shinyOAuth.state_fail_delay_ms", 0)
   ms <- 0
   if (is.numeric(bounds) && length(bounds) >= 1) {
     b1 <- suppressWarnings(as.numeric(bounds[1]))
@@ -152,7 +153,7 @@ state_decrypt_delay_before_fail <- function() {
 #' Internal: raise a normalized invalid-state error during state decryption
 #'
 #' Used by `state_decrypt_gcm()` so all invalid-state failures pass through the
-#' same delay and `err_invalid_state()` path.
+#' same optional delay and `err_invalid_state()` path.
 #'
 #' @param msg Invalid-state message.
 #' @param context Structured error context.
@@ -200,10 +201,14 @@ state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
 
   enc <- openssl::aes_gcm_encrypt(charToRaw(json), key = key, iv = iv)
 
-  # Handle both return shapes (list with $data/$tag or raw(ct||tag))
-  if (is.list(enc) && !is.null(enc$data) && !is.null(enc$tag)) {
-    ct <- enc$data
-    tag <- enc$tag
+  # Handle both return shapes (list with [["data"]]/[["tag"]] or raw(ct||tag))
+  if (
+    is.list(enc) &&
+      !is.null(enc[["data"]]) &&
+      !is.null(enc[["tag"]])
+  ) {
+    ct <- enc[["data"]]
+    tag <- enc[["tag"]]
   } else if (is.raw(enc) && !is.null(attr(enc, "tag", exact = TRUE))) {
     # Some versions return ciphertext as raw with tag attribute
     ct <- enc
@@ -246,6 +251,27 @@ state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
   base64url_encode(charToRaw(jsonlite::toJSON(token_obj, auto_unbox = TRUE)))
 }
 
+#' Normalize a state-envelope version
+#'
+#' @param value Candidate version value.
+#' @return A non-negative integer or `NA_integer_` when invalid.
+#' @keywords internal
+#' @noRd
+normalize_state_envelope_version <- function(value) {
+  if (
+    !is.numeric(value) ||
+      length(value) != 1L ||
+      is.na(value) ||
+      !is.finite(value) ||
+      value < 0 ||
+      value > .Machine[["integer.max"]] ||
+      value != trunc(value)
+  ) {
+    return(NA_integer_)
+  }
+  as.integer(value)
+}
+
 #' Internal: decrypt and validate the compact state GCM envelope
 #'
 #' Decodes the outer base64url wrapper, validates the version and envelope
@@ -257,6 +283,8 @@ state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
 #' @param token Compact encrypted state token.
 #' @param key Character passphrase or raw key material.
 #' @param expected_version Expected envelope version.
+#' @param size_limits Optional internal envelope budgets; external state uses
+#'   the configured state limits by default.
 #' @param min_key_chars Minimum passphrase length for character keys.
 #' @return Parsed decrypted state payload list.
 #' @keywords internal
@@ -265,7 +293,8 @@ state_decrypt_gcm <- function(
   token,
   key,
   expected_version = 1L,
-  min_key_chars = 32L
+  min_key_chars = 32L,
+  size_limits = NULL
 ) {
   # Hard caps
   max_token_chars <- get_option_env_positive_number(
@@ -288,6 +317,26 @@ state_decrypt_gcm <- function(
     "shinyOAuth_STATE_MAX_CT_BYTES",
     8192
   )
+  if (!is.null(size_limits)) {
+    stopifnot(
+      is.list(size_limits),
+      length(size_limits) == 4L,
+      all(vapply(
+        size_limits,
+        function(x) {
+          is.numeric(x) &&
+            length(x) == 1L &&
+            is.finite(x) &&
+            x > 0
+        },
+        logical(1)
+      ))
+    )
+    max_token_chars <- size_limits[["token"]]
+    max_wrapper_bytes <- size_limits[["wrapper"]]
+    max_ct_b64_chars <- size_limits[["ct_b64"]]
+    max_ct_bytes <- size_limits[["ct"]]
+  }
 
   # Internal helper: emit an audit event for a parse or decrypt failure.
   # Used only by `state_decrypt_gcm()` so failure reasons are logged without
@@ -386,12 +435,18 @@ state_decrypt_gcm <- function(
       context = list(phase = "decrypt")
     )
   }
-  if (!identical(as.integer(obj$v), as.integer(expected_version))) {
+  found_version <- normalize_state_envelope_version(obj[["v"]])
+  expected_version <- normalize_state_envelope_version(expected_version)
+  if (
+    is.na(found_version) ||
+      is.na(expected_version) ||
+      !identical(found_version, expected_version)
+  ) {
     audit_fail(
       "token_version_mismatch",
       details = list(
-        found_version = as.integer(obj$v),
-        expected_version = as.integer(expected_version)
+        found_version = found_version,
+        expected_version = expected_version
       )
     )
     state_fail(
@@ -400,11 +455,11 @@ state_decrypt_gcm <- function(
     )
   }
 
-  if (!is_valid_string(obj$iv)) {
+  if (!is_valid_string(obj[["iv"]])) {
     audit_fail("iv_missing")
     state_fail("state token missing IV", context = list(phase = "decrypt"))
   }
-  iv <- try(base64url_decode_raw(obj$iv), silent = TRUE)
+  iv <- try(base64url_decode_raw(obj[["iv"]]), silent = TRUE)
   if (inherits(iv, "try-error")) {
     audit_fail("iv_b64_invalid")
     state_fail(
@@ -419,11 +474,11 @@ state_decrypt_gcm <- function(
       context = list(phase = "decrypt")
     )
   }
-  if (!is_valid_string(obj$tg)) {
+  if (!is_valid_string(obj[["tg"]])) {
     audit_fail("tag_missing")
     state_fail("state token missing tag", context = list(phase = "decrypt"))
   }
-  tg <- try(base64url_decode_raw(obj$tg), silent = TRUE)
+  tg <- try(base64url_decode_raw(obj[["tg"]]), silent = TRUE)
   if (inherits(tg, "try-error")) {
     audit_fail("tag_b64_invalid")
     state_fail(
@@ -438,7 +493,7 @@ state_decrypt_gcm <- function(
       context = list(phase = "decrypt")
     )
   }
-  if (!is_valid_string(obj$ct)) {
+  if (!is_valid_string(obj[["ct"]])) {
     audit_fail("ciphertext_missing")
     state_fail(
       "state token missing ciphertext",
@@ -446,7 +501,10 @@ state_decrypt_gcm <- function(
     )
   }
   # Cap ciphertext base64 length before attempting to decode
-  ct_b64_len <- try(nchar(obj$ct, type = "bytes"), silent = TRUE)
+  ct_b64_len <- try(
+    nchar(obj[["ct"]], type = "bytes"),
+    silent = TRUE
+  )
   if (
     !inherits(ct_b64_len, "try-error") &&
       is.numeric(ct_b64_len) &&
@@ -461,7 +519,7 @@ state_decrypt_gcm <- function(
       context = list(phase = "decrypt", where = "ct_b64")
     )
   }
-  ct <- try(base64url_decode_raw(obj$ct), silent = TRUE)
+  ct <- try(base64url_decode_raw(obj[["ct"]]), silent = TRUE)
   if (inherits(ct, "try-error")) {
     audit_fail("ciphertext_b64_invalid")
     state_fail(
@@ -538,8 +596,8 @@ state_decrypt_gcm <- function(
     )
   }
   # Scopes are expected downstream as a character vector; preserve empty as character(0)
-  if (!is.null(parsed$scopes)) {
-    sc <- parsed$scopes
+  if (!is.null(parsed[["scopes"]])) {
+    sc <- parsed[["scopes"]]
     # If parsed with simplifyVector = FALSE, JSON arrays become lists; convert list-of-length-one strings to character vector
     if (is.list(sc)) {
       ok <- vapply(
@@ -548,17 +606,21 @@ state_decrypt_gcm <- function(
         logical(1)
       )
       if (length(sc) == 0L) {
-        parsed$scopes <- character()
+        parsed[["scopes"]] <- character()
       } else if (all(ok)) {
-        parsed$scopes <- vapply(sc, function(el) as.character(el), character(1))
+        parsed[["scopes"]] <- vapply(
+          sc,
+          function(el) as.character(el),
+          character(1)
+        )
       } else if (is.character(sc)) {
         # no-op
       } else {
         # Leave as-is; downstream validation will reject incompatible types
-        parsed$scopes <- sc
+        parsed[["scopes"]] <- sc
       }
     } else if (is.null(sc)) {
-      parsed$scopes <- character()
+      parsed[["scopes"]] <- character()
     } else if (is.character(sc)) {
       # already character vector
     } else {

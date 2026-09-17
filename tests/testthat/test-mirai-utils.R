@@ -25,28 +25,10 @@ testthat::test_that("mirai_daemons_active returns FALSE when no daemons", {
   testthat::expect_false(shinyOAuth:::mirai_daemons_active())
 })
 
-testthat::test_that("mirai_daemons_active falls back when daemons_set() unavailable", {
-  testthat::skip_on_cran()
+testthat::test_that("mirai_daemons_active fails closed on backend errors", {
   testthat::skip_if_not_installed("mirai")
-
-  # Simulate older mirai without daemons_set() by mocking it to error,
-  # and mock info() to return non-NULL (indicating active daemons)
   testthat::local_mocked_bindings(
-    daemons_set = function(...) stop("not available"),
-    info = function(...) list(connections = 2L),
-    .package = "mirai"
-  )
-  # Should still return TRUE via the info() fallback
-  testthat::expect_true(shinyOAuth:::mirai_daemons_active())
-})
-
-testthat::test_that("mirai_daemons_active fallback returns FALSE when no daemons and no daemons_set()", {
-  testthat::skip_on_cran()
-  testthat::skip_if_not_installed("mirai")
-
-  testthat::local_mocked_bindings(
-    daemons_set = function(...) stop("not available"),
-    info = function(...) NULL,
+    daemons_set = function(...) stop("backend unavailable"),
     .package = "mirai"
   )
   testthat::expect_false(shinyOAuth:::mirai_daemons_active())
@@ -170,6 +152,27 @@ testthat::test_that("classify_mirai_error returns 'mirai_error_value' for other 
 
 # --- async_dispatch: .timeout / shinyOAuth.async_timeout --------------------
 
+testthat::test_that("resolve_async_timeout enforces mirai's integer range", {
+  testthat::expect_null(shinyOAuth:::resolve_async_timeout())
+  testthat::expect_identical(shinyOAuth:::resolve_async_timeout(0), 0L)
+  testthat::expect_identical(
+    shinyOAuth:::resolve_async_timeout(.Machine[["integer.max"]]),
+    .Machine[["integer.max"]]
+  )
+
+  withr::local_options(list(warn = 2))
+  testthat::expect_error(
+    shinyOAuth:::resolve_async_timeout(
+      as.double(.Machine[["integer.max"]]) + 1
+    ),
+    class = "shinyOAuth_config_error"
+  )
+  testthat::expect_error(
+    shinyOAuth:::resolve_async_timeout(1.5),
+    class = "shinyOAuth_config_error"
+  )
+})
+
 testthat::test_that("async_dispatch passes explicit .timeout to mirai", {
   testthat::skip_on_cran()
   testthat::skip_if_not_installed("mirai")
@@ -201,6 +204,26 @@ testthat::test_that("async_dispatch reads shinyOAuth.async_timeout option", {
     args = list()
   )
   testthat::expect_true(inherits(m, "mirai"))
+})
+
+testthat::test_that("async_dispatch rejects oversized mirai timeout options", {
+  testthat::skip_on_cran()
+  testthat::skip_if_not_installed("mirai")
+
+  mirai::daemons(sync = TRUE)
+  withr::defer(mirai::daemons(0))
+  withr::local_options(list(
+    shinyOAuth.async_timeout = as.double(.Machine[["integer.max"]]) + 1,
+    warn = 2
+  ))
+
+  testthat::expect_error(
+    shinyOAuth:::async_dispatch(
+      expr = quote(1 + 1),
+      args = list()
+    ),
+    class = "shinyOAuth_config_error"
+  )
 })
 
 testthat::test_that("async_dispatch explicit .timeout overrides option", {
@@ -238,6 +261,33 @@ testthat::test_that("async_dispatch works without timeout (NULL default)", {
     args = list()
   )
   testthat::expect_true(inherits(m, "mirai"))
+})
+
+testthat::test_that("async_dispatch declares parallel-safe RNG for futures", {
+  testthat::skip_if_not_installed("promises")
+  testthat::skip_if_not_installed("future")
+
+  captured_seed <- NULL
+  testthat::local_mocked_bindings(
+    mirai_daemons_active = function() FALSE,
+    .package = "shinyOAuth"
+  )
+  testthat::local_mocked_bindings(
+    nbrOfWorkers = function(...) 1L,
+    .package = "future"
+  )
+  testthat::local_mocked_bindings(
+    future_promise = function(..., seed = FALSE) {
+      captured_seed <<- seed
+      structure(list(), class = "mock_future_promise")
+    },
+    .package = "promises"
+  )
+
+  result <- shinyOAuth:::async_dispatch(quote(stats::runif(1)), list())
+
+  testthat::expect_s3_class(result, "mock_future_promise")
+  testthat::expect_true(isTRUE(captured_seed))
 })
 
 # --- async_backend_available uses daemons_set() ----------------------------
@@ -287,8 +337,9 @@ testthat::test_that("async_backend_available falls back to 'future' when mirai n
     tryCatch(mirai::daemons(0), error = function(...) NULL)
   }
 
+  old_plan <- future::plan()
   future::plan(future::multisession, workers = 1)
-  withr::defer(future::plan(future::sequential))
+  withr::defer(future::plan(old_plan))
 
   testthat::expect_equal(shinyOAuth:::async_backend_available(), "future")
 })

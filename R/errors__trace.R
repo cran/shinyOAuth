@@ -15,7 +15,7 @@
 #' @keywords internal
 #' @noRd
 get_current_trace_id <- function() {
-  trace_id <- .trace_context_env$current %||% NULL
+  trace_id <- .trace_context_env[["current"]] %||% NULL
   if (is_valid_string(trace_id)) {
     return(as.character(trace_id)[[1]])
   }
@@ -53,11 +53,11 @@ resolve_trace_id <- function(trace_id = NULL) {
 #' @noRd
 with_trace_id <- function(trace_id = NULL, code) {
   trace_id <- resolve_trace_id(trace_id)
-  old <- .trace_context_env$current %||% NULL
-  .trace_context_env$current <- trace_id
+  old <- .trace_context_env[["current"]] %||% NULL
+  .trace_context_env[["current"]] <- trace_id
   on.exit(
     {
-      .trace_context_env$current <- old
+      .trace_context_env[["current"]] <- old
     },
     add = TRUE
   )
@@ -79,11 +79,11 @@ with_trace_id <- function(trace_id = NULL, code) {
 #' @noRd
 rethrow_with_context <- function(e, class = NULL, ...) {
   extra <- list(...)
-  trace_id <- tryCatch(e[["trace_id", exact = TRUE]], error = function(...) {
+  trace_id <- tryCatch(e[["trace_id"]], error = function(...) {
     NULL
   })
-  message <- extra$message %||% conditionMessage(e)
-  extra$message <- NULL
+  message <- extra[["message"]] %||% conditionMessage(e)
+  extra[["message"]] <- NULL
 
   args <- c(
     list(
@@ -93,10 +93,10 @@ rethrow_with_context <- function(e, class = NULL, ...) {
     extra
   )
   if (!is.null(class)) {
-    args$class <- class
+    args[["class"]] <- class
   }
   if (is_valid_string(trace_id)) {
-    args$trace_id <- trace_id
+    args[["trace_id"]] <- trace_id
   }
 
   do.call(rlang::abort, args)

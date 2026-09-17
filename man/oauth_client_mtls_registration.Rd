@@ -2,17 +2,18 @@
 % Please edit documentation in R/mtls_registration.R
 \name{oauth_client_mtls_registration}
 \alias{oauth_client_mtls_registration}
-\title{Build RFC 8705 mTLS registration metadata}
+\title{Prepare client-certificate registration settings (mTLS)}
 \usage{
 oauth_client_mtls_registration(
-  oauth_client,
+  client,
   tls_client_auth_type = c("subject_dn", "san_dns", "san_uri", "san_ip", "san_email"),
   tls_client_auth_value = NULL,
-  jwks_uri = NULL
+  jwks_uri = NULL,
+  oauth_client = NULL
 )
 }
 \arguments{
-\item{oauth_client}{\link{OAuthClient} configured for RFC 8705 mutual TLS client
+\item{client}{\link{OAuthClient} configured for RFC 8705 mutual TLS client
 authentication or for certificate-bound access tokens.}
 
 \item{tls_client_auth_type}{For \code{tls_client_auth}, which RFC 8705
@@ -21,41 +22,59 @@ certificate identifier field to emit. One of \code{"subject_dn"}, \code{"san_dns
 
 \item{tls_client_auth_value}{Optional explicit value for the selected
 \code{tls_client_auth_type}. When omitted, shinyOAuth derives the subject DN
-or, when possible, a unique matching SAN value from the configured client
-certificate. Auto-derived IP SAN values are normalized to dotted-decimal
-IPv4 or RFC 5952 IPv6 text. If the certificate exposes no unambiguous SAN
-for the chosen type, pass the exact registration value explicitly.}
+from the configured client certificate. SAN registration requires an
+explicit value because the current certificate extractor does not preserve
+ASN.1 SAN types. Select the type and exact value from the certificate;
+a numeric-looking DNS name is still a DNS SAN, not an IP SAN.}
 
 \item{jwks_uri}{Optional absolute URL of a JWKS document to publish for
 \code{self_signed_tls_client_auth}. When omitted, the helper returns an inline
 \code{jwks} object with the configured client certificate chain in \code{x5c}.}
+
+\item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 }
 \value{
 A JSON-ready list of RFC 7591/RFC 8705 client metadata.
 }
 \description{
-Returns a JSON-ready list of client metadata for registering an
-\link{OAuthClient} that uses RFC 8705 mutual TLS or requests
-certificate-bound access tokens.
+Build a list of settings to register a certificate-based client with your
+provider using mutual TLS (mTLS). Use this when preparing metadata for dynamic
+client registration or when your provider asks for certificate identifiers,
+public keys, or certificate-bound token settings. It derives those settings
+from an \code{\link[=oauth_client]{oauth_client()}} already configured for mTLS.
 
-For \code{token_auth_style = "tls_client_auth"}, this helper returns
-\code{token_endpoint_auth_method = "tls_client_auth"} plus exactly one RFC 8705
-certificate identifier field:
-\code{tls_client_auth_subject_dn}, \code{tls_client_auth_san_dns},
-\code{tls_client_auth_san_uri}, \code{tls_client_auth_san_ip}, or
-\code{tls_client_auth_san_email}.
+The result is a metadata list, ready to include in a registration request.
+Submit it through your provider's registration process; this function does
+not register the client or upload the certificate.
+}
+\details{
+For \code{tls_client_auth}, the result identifies the client certificate using
+one selected subject or alternative-name field. For
+\code{self_signed_tls_client_auth}, it contains an inline \code{jwks} with the
+certificate chain (\code{x5c}), or the supplied \code{jwks_uri}.
 
-For \code{token_auth_style = "self_signed_tls_client_auth"}, this helper returns
-\code{token_endpoint_auth_method = "self_signed_tls_client_auth"} plus either an
-inline \code{jwks} document built from the configured client certificate and
-certificate chain (published via \code{x5c}), or a caller-supplied \code{jwks_uri}.
-
-For clients that request RFC 8705 certificate-bound access tokens without
-mTLS OAuth client authentication, this helper returns the runtime
-\code{token_auth_style} mapped back to the dynamic-registration metadata value
-(for example, \code{public} becomes \code{none}) and emits
-\code{tls_client_certificate_bound_access_tokens = TRUE}.
-
-This helper prepares metadata only. It does not make a registration HTTP
-call.
+For certificate-bound tokens without mTLS client authentication, the result
+uses the corresponding registration authentication method (for example,
+\code{public} becomes \code{none}) and sets
+\code{tls_client_certificate_bound_access_tokens = TRUE}. See
+the \href{https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html}{advanced security vignette} for when these configurations are useful.
+}
+\examples{
+\dontshow{if (file.exists(Sys.getenv("OAUTH_MTLS_CERT_FILE")) && file.exists(Sys.getenv("OAUTH_MTLS_KEY_FILE"))) withAutoprint(\{ # examplesIf}
+# Set these environment variables to your existing certificate and key files.
+provider <- oauth_provider(
+  name = "Example service",
+  auth_url = "https://example.com/authorize",
+  token_url = "https://example.com/token",
+  token_auth_style = "tls_client_auth"
+)
+client <- oauth_client(
+  provider = provider,
+  client_id = "example-client",
+  redirect_uri = "http://127.0.0.1:8100/callback",
+  mtls_client_cert_file = Sys.getenv("OAUTH_MTLS_CERT_FILE"),
+  mtls_client_key_file = Sys.getenv("OAUTH_MTLS_KEY_FILE")
+)
+oauth_client_mtls_registration(client)
+\dontshow{\}) # examplesIf}
 }

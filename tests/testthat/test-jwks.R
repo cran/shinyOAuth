@@ -1,13 +1,19 @@
 make_public_rsa_jwk <- function(bits = 2048, kid = "k1") {
   key <- openssl::rsa_keygen(bits = bits)
-  jwk <- jsonlite::fromJSON(jose::write_jwk(key), simplifyVector = TRUE)
-  list(kty = jwk$kty, n = jwk$n, e = jwk$e, kid = kid)
+  jwk <- jsonlite::fromJSON(write_test_jwk(key), simplifyVector = TRUE)
+  list(kty = jwk[["kty"]], n = jwk[["n"]], e = jwk[["e"]], kid = kid)
 }
 
 make_public_ec_jwk <- function(curve = "P-256", kid = "k2") {
   key <- openssl::ec_keygen(curve = curve)
-  jwk <- jsonlite::fromJSON(jose::write_jwk(key), simplifyVector = TRUE)
-  list(kty = jwk$kty, crv = jwk$crv, x = jwk$x, y = jwk$y, kid = kid)
+  jwk <- jsonlite::fromJSON(write_test_jwk(key), simplifyVector = TRUE)
+  list(
+    kty = jwk[["kty"]],
+    crv = jwk[["crv"]],
+    x = jwk[["x"]],
+    y = jwk[["y"]],
+    kid = kid
+  )
 }
 
 test_that("validate_jwks enforces structure and pins", {
@@ -19,6 +25,11 @@ test_that("validate_jwks enforces structure and pins", {
 
   # Should not error without pins
   expect_silent(shinyOAuth:::validate_jwks(jwks))
+  expect_error(
+    shinyOAuth:::validate_jwks(list(keys = rsa_jwk)),
+    class = "shinyOAuth_parse_error",
+    regexp = "JSON array"
+  )
 
   # Compute pins from our helper and enforce any/all
   tp_rsa <- shinyOAuth:::compute_jwk_thumbprint(rsa_jwk)
@@ -54,14 +65,14 @@ test_that("validate_jwks enforces structure and pins", {
 
   # Private parameters should be rejected
   bad_rsa <- rsa_jwk
-  bad_rsa$d <- "secret"
+  bad_rsa[["d"]] <- "secret"
   expect_error(
     shinyOAuth:::validate_jwks(list(keys = list(bad_rsa))),
     class = "shinyOAuth_parse_error"
   )
 
   bad_rsa_n <- rsa_jwk
-  bad_rsa_n$n <- "bad*modulus"
+  bad_rsa_n[["n"]] <- "bad*modulus"
   expect_error(
     shinyOAuth:::validate_jwks(list(keys = list(bad_rsa_n))),
     class = "shinyOAuth_parse_error",
@@ -69,7 +80,7 @@ test_that("validate_jwks enforces structure and pins", {
   )
 
   bad_rsa_e <- rsa_jwk
-  bad_rsa_e$e <- "AQAB="
+  bad_rsa_e[["e"]] <- "AQAB="
   expect_error(
     shinyOAuth:::validate_jwks(list(keys = list(bad_rsa_e))),
     class = "shinyOAuth_parse_error",
@@ -84,11 +95,83 @@ test_that("validate_jwks enforces structure and pins", {
   )
 
   bad_ec <- ec_jwk
-  bad_ec$x <- "AQAB"
+  bad_ec[["x"]] <- "AQAB"
   expect_error(
     shinyOAuth:::validate_jwks(list(keys = list(bad_ec))),
     class = "shinyOAuth_parse_error",
     regexp = "32 bytes"
+  )
+})
+
+test_that("all-key pinning fails when a supported thumbprint is unavailable", {
+  testthat::skip_if_not_installed("jose")
+
+  rsa_jwk <- make_public_rsa_jwk(kid = "computable")
+  ec_jwk <- make_public_ec_jwk(kid = "unavailable")
+  jwks <- list(keys = list(rsa_jwk, ec_jwk))
+  rsa_pin <- shinyOAuth:::compute_jwk_thumbprint(rsa_jwk)
+  original_thumbprint <- shinyOAuth:::compute_jwk_thumbprint
+
+  testthat::local_mocked_bindings(
+    compute_jwk_thumbprint = function(jwk) {
+      if (identical(jwk[["kid"]], "unavailable")) {
+        stop("thumbprint unavailable")
+      }
+      original_thumbprint(jwk)
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_silent(shinyOAuth:::validate_jwks(
+    jwks,
+    pins = rsa_pin,
+    pin_mode = "any"
+  ))
+  expect_error(
+    shinyOAuth:::validate_jwks(jwks, pins = rsa_pin, pin_mode = "all"),
+    class = "shinyOAuth_parse_error",
+    regexp = "could not compute every supported key thumbprint"
+  )
+})
+
+test_that("JWKS validation rejects vector-valued scalar metadata", {
+  testthat::skip_if_not_installed("jose")
+
+  rsa_jwk <- make_public_rsa_jwk()
+  for (field in c("kty", "kid", "use", "alg")) {
+    malformed <- rsa_jwk
+    malformed[[field]] <- c("RS256", "ES256")
+    expect_error(
+      shinyOAuth:::validate_jwks(list(keys = list(malformed))),
+      class = "shinyOAuth_parse_error",
+      regexp = paste0("JWK ", field)
+    )
+  }
+
+  malformed_ec <- make_public_ec_jwk()
+  malformed_ec[["crv"]] <- c("P-256", "P-384")
+  expect_error(
+    shinyOAuth:::validate_jwks(list(keys = list(malformed_ec))),
+    class = "shinyOAuth_parse_error",
+    regexp = "EC JWK missing crv/x/y"
+  )
+})
+
+test_that("algorithm filtering excludes malformed scalar JWK metadata", {
+  valid <- list(kty = "RSA", alg = "RS256")
+  malformed <- list(
+    list(kty = c("RSA", "EC"), alg = "RS256"),
+    list(kty = "RSA", alg = c("RS256", "ES256")),
+    list(kty = "EC", crv = c("P-256", "P-384"), alg = "ES256")
+  )
+
+  expect_identical(
+    shinyOAuth:::filter_jwks_for_alg(c(list(valid), malformed), "RS256"),
+    list(valid)
+  )
+  expect_identical(
+    shinyOAuth:::filter_jwks_for_alg(list(valid), c("RS256", "ES256")),
+    list()
   )
 })
 
@@ -103,23 +186,23 @@ test_that("select_candidate_jwks honors key_ops field", {
 
   # Key with key_ops = "verify" should be kept
   rsa_ops_verify <- rsa_verify
-  rsa_ops_verify$kid <- "ops-verify"
-  rsa_ops_verify$key_ops <- c("verify")
+  rsa_ops_verify[["kid"]] <- "ops-verify"
+  rsa_ops_verify[["key_ops"]] <- c("verify")
 
   # Key with key_ops = "encrypt" only should be excluded
   rsa_ops_encrypt <- rsa_verify
-  rsa_ops_encrypt$kid <- "ops-encrypt"
-  rsa_ops_encrypt$key_ops <- c("encrypt", "decrypt")
+  rsa_ops_encrypt[["kid"]] <- "ops-encrypt"
+  rsa_ops_encrypt[["key_ops"]] <- c("encrypt", "decrypt")
 
   # Key with key_ops missing should be kept
   rsa_no_ops <- rsa_verify
-  rsa_no_ops$kid <- "no-ops"
+  rsa_no_ops[["kid"]] <- "no-ops"
 
   jwks <- list(keys = list(rsa_ops_verify, rsa_ops_encrypt, rsa_no_ops))
 
   # Should filter out the encrypt-only key
   result <- shinyOAuth:::select_candidate_jwks(jwks)
-  kids <- vapply(result, function(k) k$kid, character(1))
+  kids <- vapply(result, function(k) k[["kid"]], character(1))
   expect_true("ops-verify" %in% kids)
   expect_true("no-ops" %in% kids)
   expect_false("ops-encrypt" %in% kids)
@@ -127,24 +210,94 @@ test_that("select_candidate_jwks honors key_ops field", {
 
   # Key with both sign and verify should be kept
   rsa_ops_both <- rsa_verify
-  rsa_ops_both$kid <- "ops-both"
-  rsa_ops_both$key_ops <- c("sign", "verify")
+  rsa_ops_both[["kid"]] <- "ops-both"
+  rsa_ops_both[["key_ops"]] <- c("sign", "verify")
 
   jwks2 <- list(keys = list(rsa_ops_both, rsa_ops_encrypt))
   result2 <- shinyOAuth:::select_candidate_jwks(jwks2)
-  kids2 <- vapply(result2, function(k) k$kid, character(1))
+  kids2 <- vapply(result2, function(k) k[["kid"]], character(1))
   expect_true("ops-both" %in% kids2)
   expect_false("ops-encrypt" %in% kids2)
   expect_length(result2, 1)
 
-  # Case insensitivity: "VERIFY" should work
+  # JWK operation identifiers are case-sensitive.
   rsa_ops_upper <- rsa_verify
-  rsa_ops_upper$kid <- "ops-upper"
-  rsa_ops_upper$key_ops <- c("VERIFY")
+  rsa_ops_upper[["kid"]] <- "ops-upper"
+  rsa_ops_upper[["key_ops"]] <- c("VERIFY")
 
   jwks3 <- list(keys = list(rsa_ops_upper))
   result3 <- shinyOAuth:::select_candidate_jwks(jwks3)
-  expect_length(result3, 1)
+  expect_length(result3, 0)
+})
+
+test_that("JWK identifiers are matched case-sensitively", {
+  expect_length(
+    shinyOAuth:::select_candidate_jwks(list(
+      keys = list(
+        list(kty = "RSA", use = "SIG")
+      )
+    )),
+    0L
+  )
+  expect_length(
+    shinyOAuth:::select_candidate_jwks(list(
+      keys = list(
+        list(kty = "RSA", key_ops = "Verify")
+      )
+    )),
+    0L
+  )
+
+  expect_length(
+    shinyOAuth:::filter_jwks_for_alg(
+      list(list(kty = "rsa")),
+      "RS256"
+    ),
+    0L
+  )
+  expect_length(
+    shinyOAuth:::filter_jwks_for_alg(
+      list(list(kty = "RSA", alg = "rs256")),
+      "RS256"
+    ),
+    0L
+  )
+  expect_length(
+    shinyOAuth:::filter_jwks_for_alg(
+      list(list(kty = "EC", crv = "p-256")),
+      "ES256"
+    ),
+    0L
+  )
+
+  expect_length(
+    shinyOAuth:::select_candidate_jwks_for_encryption(
+      list(keys = list(list(kty = "rsa", use = "enc"))),
+      "RSA-OAEP"
+    ),
+    0L
+  )
+  expect_length(
+    shinyOAuth:::select_candidate_jwks_for_encryption(
+      list(keys = list(list(kty = "RSA", use = "ENC"))),
+      "RSA-OAEP"
+    ),
+    0L
+  )
+  expect_length(
+    shinyOAuth:::select_candidate_jwks_for_encryption(
+      list(keys = list(list(kty = "RSA", key_ops = "wrapkey"))),
+      "RSA-OAEP"
+    ),
+    0L
+  )
+  expect_length(
+    shinyOAuth:::select_candidate_jwks_for_encryption(
+      list(keys = list(list(kty = "RSA", alg = "rsa-oaep"))),
+      "RSA-OAEP"
+    ),
+    0L
+  )
 })
 
 test_that("select_candidate_jwks filters by pins when provided", {
@@ -182,7 +335,7 @@ test_that("select_candidate_jwks filters by pins when provided", {
 
   # With pins = only rsa1, only rsa1 is returned
   result_pin_rsa1 <- shinyOAuth:::select_candidate_jwks(jwks, pins = tp_rsa1)
-  kids_pin_rsa1 <- vapply(result_pin_rsa1, function(k) k$kid, character(1))
+  kids_pin_rsa1 <- vapply(result_pin_rsa1, function(k) k[["kid"]], character(1))
   expect_length(result_pin_rsa1, 1)
   expect_equal(kids_pin_rsa1, "rsa1")
 
@@ -191,7 +344,7 @@ test_that("select_candidate_jwks filters by pins when provided", {
     jwks,
     pins = c(tp_rsa1, tp_ec1)
   )
-  kids_pin_two <- vapply(result_pin_two, function(k) k$kid, character(1))
+  kids_pin_two <- vapply(result_pin_two, function(k) k[["kid"]], character(1))
   expect_length(result_pin_two, 2)
   expect_true("rsa1" %in% kids_pin_two)
   expect_true("ec1" %in% kids_pin_two)
@@ -211,7 +364,7 @@ test_that("select_candidate_jwks filters by pins when provided", {
     pins = tp_rsa1
   )
   expect_length(result_kid_pinned, 1)
-  expect_equal(result_kid_pinned[[1]]$kid, "rsa1")
+  expect_equal(result_kid_pinned[[1]][["kid"]], "rsa1")
 
   # If kid matches but pin doesn't, no keys returned
   result_kid_unpinned <- shinyOAuth:::select_candidate_jwks(

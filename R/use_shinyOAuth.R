@@ -10,33 +10,38 @@
 #' Add JavaScript dependency to the UI of a Shiny app
 #'
 #' @description
-#' Adds shinyOAuth's client-side JavaScript dependency to your Shiny UI.
-#' This is required so the module can handle redirects and manage its
-#' browser-side session token.
-#'
-#' Without this call in the UI, [oauth_module_server()] will not work unless
-#' your app UI is wrapped with [oauth_form_post_ui()], which injects this
-#' dependency automatically for form_post flows.
+#' Add shinyOAuth's JavaScript to a page so [oauth_module_server()] can redirect
+#' the browser and manage its temporary login cookie. Use this inside an
+#' existing `fluidPage()` or `tagList()` when you integrate the browser
+#' dependency directly and configure response headers elsewhere, such as in
+#' your web server or another UI wrapper.
 #'
 #' @details
-#' Place this near the top-level of your UI (e.g., inside `fluidPage()` or
-#' `tagList()`), similar to how you would use `shinyjs::useShinyjs()`. If you
-#' wrap the app UI with [oauth_form_post_ui()], you usually do not need a
-#' separate call here because that wrapper injects this dependency for you.
+#' [oauth_ui()] combines this browser setup with the HTTP header
+#' `Referrer-Policy: no-referrer`, which prevents callback URLs from being
+#' sent as referrers when page resources load. When using [use_shinyOAuth()]
+#' directly, set that header in your HTTP response configuration for protection
+#' from the start of page loading; the optional meta tag takes effect later.
+#' [oauth_ui()] and [oauth_form_post_ui()] already include this dependency.
+#' The dependency alone does not provide a callback bridge. Do not load
+#' application or third-party scripts on raw OAuth callback pages; use
+#' `oauth_ui(ui, id, client)` or a dedicated equivalent endpoint to redirect to
+#' a clean URL before rendering the app. Callback responses must also send
+#' `Cache-Control: no-store` and `Pragma: no-cache`.
 #'
-#' @param inject_referrer_meta If TRUE (default), injects a
-#'   `<meta name="referrer" content="no-referrer">` tag into the document
-#'   head. This reduces the risk of leaking OAuth callback query parameters
-#'   (like `code` and `state`) via the `Referer` header to third-party
-#'   subresources during the initial callback page load.
+#' @param inject_referrer_meta If TRUE (default), adds a meta tag to the page:
+#'   an instruction asking the browser not to share the page's address when
+#'   loading images, scripts, or other files. Some files may start loading
+#'   before the browser reads this instruction. Use [oauth_ui()] to provide
+#'   this protection from the start of page loading.
 #'
-#' @return A `tagList` that loads the `inst/www/shinyOAuth.js` dependency once.
+#' @return A `tagList` that loads the browser code once.
 #'
 #' @export
 #'
 #' @examples
 #' ui <- shiny::fluidPage(
-#'   use_shinyOAuth(),
+#'   use_shinyOAuth()
 #'   # ...
 #' )
 #'
@@ -48,7 +53,7 @@ use_shinyOAuth <- function(inject_referrer_meta = TRUE) {
     !(isTRUE(inject_referrer_meta) || identical(inject_referrer_meta, FALSE))
   ) {
     err_input(
-      "{.arg inject_referrer_meta} must be {.val TRUE} or {.val FALSE}."
+      "`inject_referrer_meta` must be `TRUE` or `FALSE`."
     )
   }
 
@@ -73,8 +78,8 @@ use_shinyOAuth <- function(inject_referrer_meta = TRUE) {
 
   referrer_meta <- NULL
   if (isTRUE(inject_referrer_meta)) {
-    referrer_meta <- htmltools::tags$head(
-      htmltools::tags$meta(name = "referrer", content = "no-referrer")
+    referrer_meta <- htmltools::tags[["head"]](
+      htmltools::tags[["meta"]](name = "referrer", content = "no-referrer")
     )
   }
 
@@ -116,14 +121,129 @@ warn_about_missing_js_dependency <- function() {
   warn_pkg(
     "JavaScript dependency not called",
     c(
-      "!" = "{.code oauth_module_server()} was called, but no previous call to {.code use_shinyOAuth()} was detected",
+      "!" = "`oauth_module_server()` was called, but no previous call to `use_shinyOAuth()` was detected",
       "i" = paste0(
-        "You must add {.code use_shinyOAuth()} to your UI (e.g., inside {.code fluidPage()}) ",
+        "You must add `use_shinyOAuth()` to your UI (e.g., inside `fluidPage()`) ",
         "to ensure the module functions correctly"
       )
     ),
     .frequency = "once",
     .frequency_id = "js_dependency_warning"
+  )
+
+  invisible(TRUE)
+}
+
+#' Build a watchdog key for form_post UI reminders
+#'
+#' Produces a stable key so shinyOAuth can remember whether a specific module
+#' and client pair was wrapped with `oauth_form_post_ui()` before
+#' `oauth_module_server()` starts.
+#'
+#' @param id Shiny module id.
+#' @param client [OAuthClient] object.
+#'
+#' @return A single character string suitable for watchdog lookups.
+#' @keywords internal
+#' @noRd
+form_post_watchdog_key <- function(id, client) {
+  provider_identity <- client@provider@issuer %||%
+    client@provider@authorization_url %||%
+    client@provider@name %||%
+    ""
+
+  paste(
+    id,
+    client@client_id %||% "",
+    client@redirect_uri %||% "",
+    provider_identity,
+    sep = " :: "
+  )
+}
+
+#' Mark a form_post UI wrapper as configured
+#'
+#' Records that `oauth_form_post_ui()` was called for a given module/client
+#' pair so `oauth_module_server()` can avoid emitting a reminder later.
+#'
+#' @param id Shiny module id.
+#' @param client [OAuthClient] object.
+#'
+#' @return Invisibly returns `TRUE`.
+#' @keywords internal
+#' @noRd
+mark_form_post_ui_called <- function(id, client) {
+  assign(
+    paste0(".called_form_post_ui::", form_post_watchdog_key(id, client)),
+    TRUE,
+    envir = .watchdog_environment
+  )
+
+  invisible(TRUE)
+}
+
+#' Warn when the form_post UI wrapper is missing
+#'
+#' Emits a once-per-module reminder when `oauth_module_server()` is used with
+#' a client that resolves to `response_mode = "form_post"` but no prior call
+#' to `oauth_form_post_ui()` was detected for the same module/client pair.
+#'
+#' @param id Shiny module id.
+#' @param client [OAuthClient] object.
+#'
+#' @return Invisibly returns `TRUE` when a warning is emitted; otherwise
+#'   invisibly returns `NULL`.
+#' @keywords internal
+#' @noRd
+warn_about_missing_form_post_ui <- function(id, client) {
+  if (.is_test()) {
+    return(invisible(NULL))
+  }
+
+  response_mode_info <- resolve_oauth_client_response_mode(client)
+  response_mode <- response_mode_info[["mode"]] %||% NULL
+  if (
+    !is.null(response_mode_info[["error"]]) ||
+      !response_mode %in% c("form_post", "form_post.jwt")
+  ) {
+    return(invisible(NULL))
+  }
+
+  watchdog_key <- form_post_watchdog_key(id, client)
+  if (
+    get0(
+      paste0(".called_form_post_ui::", watchdog_key),
+      envir = .watchdog_environment,
+      inherits = FALSE,
+      ifnotfound = FALSE
+    )
+  ) {
+    return(invisible(NULL))
+  }
+
+  warn_pkg(
+    "form_post UI wrapper not detected",
+    c(
+      "!" = paste0(
+        "`oauth_module_server()` was called with a client that resolves to ",
+        "`response_mode = \"",
+        response_mode,
+        "\"`, but no previous call to ",
+        "`oauth_form_post_ui()` was detected for this module"
+      ),
+      "i" = paste0(
+        "Wrap your app UI with `oauth_form_post_ui(..., id = ",
+        deparse(id),
+        ", client = client)` so POST callbacks reach shinyOAuth before the ",
+        "Shiny session starts"
+      ),
+      "i" = paste0(
+        "If you already wrap the UI indirectly and this reminder fires before ",
+        "that call is made, you can ignore it"
+      )
+    ),
+    .frequency = "once",
+    .frequency_id = paste0("form_post_ui_warning::", watchdog_key)
   )
 
   invisible(TRUE)

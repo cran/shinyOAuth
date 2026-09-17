@@ -1,5 +1,6 @@
 # This file contains the low-level compact JWE helpers used for outbound
-# request-object encryption and test-only decryption of nested JWTs
+# request-object encryption and inbound decryption of nested JWTs such as
+# encrypted JARM responses
 # A JWE is the encrypted JWT form used when request objects need
 # confidentiality in addition to signature protection
 # Used for compact JWE encoding/decoding, recipient-key normalization, and
@@ -131,15 +132,20 @@ jwe_compact_parts <- function(jwe) {
     protected_raw,
     "protected header"
   )
+  validate_jose_header_size(protected_text, "JWE protected header")
   reject_duplicate_json_object_members(protected_text, "JWE protected header")
   assert_json_text_is_object(protected_text, "JWE protected header")
   protected_header <- tryCatch(
     jsonlite::fromJSON(protected_text, simplifyVector = FALSE),
     error = function(e) {
-      err_parse(c(
+      err_parse(
         "Failed to parse JWE protected header JSON",
-        "i" = conditionMessage(e)
-      ))
+        context = safe_parse_failure_context(
+          protected_text,
+          "jwe_protected_header_json",
+          e
+        )
+      )
     }
   )
 
@@ -164,6 +170,41 @@ jwe_compact_parts <- function(jwe) {
 
 ## 1.3 Key normalization ------------------------------------------------------
 
+#' Normalize JWK recipient metadata
+#'
+#' Returns a structured JWK for parsed JWK and JWK JSON inputs while returning
+#' `NULL` for PEM and OpenSSL key inputs, which carry no JOSE metadata.
+#'
+#' @param key Recipient public-key input.
+#' @param arg_name Argument name used in error messages.
+#' @return A parsed JWK list or `NULL`.
+#' @keywords internal
+#' @noRd
+normalize_jwe_recipient_jwk <- function(
+  key,
+  arg_name = "request_object_encryption_jwk"
+) {
+  if (is.list(key) && !inherits(key, c("key", "pubkey", "rsa", "ecdsa"))) {
+    return(key)
+  }
+
+  if (is.character(key) && length(key) >= 1L) {
+    text <- paste(key, collapse = "\n")
+    if (grepl("^\\s*\\{", text)) {
+      parsed_jwk <- try(
+        jsonlite::fromJSON(text, simplifyVector = FALSE),
+        silent = TRUE
+      )
+      if (!inherits(parsed_jwk, "try-error") && is.list(parsed_jwk)) {
+        return(parsed_jwk)
+      }
+      err_config(paste0("Failed to parse ", arg_name, " JWK JSON"))
+    }
+  }
+
+  NULL
+}
+
 #' Normalize a compact JWE recipient public-key input
 #'
 #' Accepts an OpenSSL key object, a PEM string, a parsed JWK object, or a JWK
@@ -187,22 +228,21 @@ normalize_jwe_recipient_public_key <- function(
     return(key)
   }
 
-  if (is.list(key)) {
-    return(jwk_to_pubkey(key))
+  structured_jwk <- normalize_jwe_recipient_jwk(key, arg_name = arg_name)
+  if (!is.null(structured_jwk)) {
+    return(jwk_to_pubkey(structured_jwk))
   }
 
   if (is.character(key) && length(key) >= 1L) {
     text <- paste(key, collapse = "\n")
-    if (grepl("^\\s*\\{", text)) {
-      parsed_jwk <- try(
-        jsonlite::fromJSON(text, simplifyVector = FALSE),
-        silent = TRUE
-      )
-      if (!inherits(parsed_jwk, "try-error") && is.list(parsed_jwk)) {
-        return(jwk_to_pubkey(parsed_jwk))
-      }
+    parsed_key <- try(openssl::read_pubkey(text), silent = TRUE)
+    if (!inherits(parsed_key, "try-error")) {
+      return(parsed_key)
     }
 
+    # Retain support for callers that supply a private key object as PEM. The
+    # public-key reader is tried first because this helper's documented input
+    # is recipient public-key material.
     parsed_key <- try(openssl::read_key(text), silent = TRUE)
     if (!inherits(parsed_key, "try-error")) {
       return(parsed_key)
@@ -217,6 +257,54 @@ normalize_jwe_recipient_public_key <- function(
   ))
 }
 
+#' Return the size of an OpenSSL RSA key
+#'
+#' @param key OpenSSL RSA public or private key.
+#' @return Integer key size in bits, or `NA_integer_` when it cannot be read.
+#' @keywords internal
+#' @noRd
+jwe_rsa_key_size_bits <- function(key) {
+  key_details <- try(as.list(key), silent = TRUE)
+  if (inherits(key_details, "try-error") || !is.list(key_details)) {
+    return(NA_integer_)
+  }
+
+  size <- key_details[["size"]] %||% NA_integer_
+  if (
+    !is.numeric(size) ||
+      length(size) != 1L ||
+      is.na(size) ||
+      !is.finite(size)
+  ) {
+    return(NA_integer_)
+  }
+
+  as.integer(size)
+}
+
+#' Enforce the minimum RSA key size for RSA-OAEP JWE
+#'
+#' RFC 7518 section 4.3 requires RSA keys used with RSA-OAEP to be at least
+#' 2048 bits. This guard is shared by outbound Request Object encryption and
+#' inbound encrypted JARM decryption.
+#'
+#' @param key Normalized OpenSSL RSA public or private key.
+#' @param arg_name Key name used in configuration errors.
+#' @return `key`, invisibly.
+#' @keywords internal
+#' @noRd
+validate_jwe_rsa_key_strength <- function(key, arg_name) {
+  key_bits <- jwe_rsa_key_size_bits(key)
+  if (!inherits(key, "rsa") || is.na(key_bits)) {
+    err_config(paste0(arg_name, " must be an RSA key"))
+  }
+  if (key_bits < 2048L) {
+    err_config(paste0(arg_name, " RSA modulus must be at least 2048 bits"))
+  }
+
+  invisible(key)
+}
+
 #' Normalize a JWKS or JWK collection into a list of key objects
 #'
 #' Used by Request Object encryption key selection helpers.
@@ -227,8 +315,8 @@ normalize_jwe_recipient_public_key <- function(
 #' @noRd
 normalize_request_object_encryption_jwks <- function(jwks_or_keys) {
   keys <- jwks_or_keys
-  if (is.list(jwks_or_keys) && !is.null(jwks_or_keys$keys)) {
-    keys <- jwks_or_keys$keys
+  if (is.list(jwks_or_keys) && !is.null(jwks_or_keys[["keys"]])) {
+    keys <- jwks_or_keys[["keys"]]
   }
   if (is.data.frame(keys)) {
     keys <- unname(lapply(seq_len(nrow(keys)), function(index) {
@@ -263,7 +351,7 @@ normalize_request_object_encryption_jwks <- function(jwks_or_keys) {
 #' @keywords internal
 #' @noRd
 jwk_is_compatible_with_jwe_alg <- function(jwk, alg) {
-  kty <- toupper(jwk$kty %||% "")
+  kty <- jwk[["kty"]] %||% ""
 
   switch(
     canonicalize_jwe_alg(alg),
@@ -280,24 +368,38 @@ jwk_is_compatible_with_jwe_alg <- function(jwk, alg) {
 #' @param jwks_or_keys A JWKS list or candidate JWK list.
 #' @param alg JOSE key-management algorithm.
 #' @param kid Optional key id used to select one provider encryption key.
+#' @param pins Optional character vector of JWK thumbprints (base64url, RFC 7638)
+#'   to restrict recipient keys to.
 #' @return Filtered list of candidate JWK objects.
 #' @keywords internal
 #' @noRd
 select_candidate_jwks_for_encryption <- function(
   jwks_or_keys,
   alg,
-  kid = NULL
+  kid = NULL,
+  pins = NULL
 ) {
   keys <- normalize_request_object_encryption_jwks(jwks_or_keys)
+
+  if (!is.null(pins) && length(pins) > 0L) {
+    pins <- unique(as.character(pins))
+    keys <- Filter(
+      function(key) {
+        thumbprint <- try(compute_jwk_thumbprint(key), silent = TRUE)
+        !inherits(thumbprint, "try-error") && thumbprint %in% pins
+      },
+      keys
+    )
+  }
 
   keep_use <- vapply(
     keys,
     function(key) {
-      use <- try(key$use, silent = TRUE)
+      use <- try(key[["use"]], silent = TRUE)
       if (inherits(use, "try-error") || is.null(use)) {
         return(TRUE)
       }
-      is.character(use) && length(use) == 1L && identical(tolower(use), "enc")
+      is.character(use) && length(use) == 1L && identical(use, "enc")
     },
     logical(1)
   )
@@ -311,27 +413,28 @@ select_candidate_jwks_for_encryption <- function(
         "verify",
         "encrypt",
         "decrypt",
-        "wrapkey",
-        "unwrapkey",
-        "derivekey",
-        "derivebits"
+        "wrapKey",
+        "unwrapKey",
+        "deriveKey",
+        "deriveBits"
       )
-      key_ops <- try(key$key_ops, silent = TRUE)
+      key_ops <- try(key[["key_ops"]], silent = TRUE)
       if (inherits(key_ops, "try-error") || is.null(key_ops)) {
         return(TRUE)
       }
-      if (!is.character(key_ops) || length(key_ops) == 0L || anyNA(key_ops)) {
+      key_ops <- normalize_jwk_key_ops(key_ops)
+      if (is.null(key_ops) || length(key_ops) == 0L || anyNA(key_ops)) {
         return(FALSE)
       }
-      key_ops_norm <- tolower(key_ops)
       if (
         !all(nzchar(key_ops)) ||
-          anyDuplicated(key_ops_norm) > 0L ||
-          !all(key_ops_norm %in% valid_key_ops)
+          anyDuplicated(key_ops) > 0L ||
+          !all(key_ops %in% valid_key_ops) ||
+          !jwk_key_ops_consistent(key, key_ops)
       ) {
         return(FALSE)
       }
-      any(key_ops_norm %in% c("encrypt", "wrapkey"))
+      any(key_ops %in% c("encrypt", "wrapKey"))
     },
     logical(1)
   )
@@ -340,7 +443,7 @@ select_candidate_jwks_for_encryption <- function(
   if (is_valid_string(kid)) {
     keys <- Filter(
       function(key) {
-        key_kid <- key$kid %||% NA_character_
+        key_kid <- key[["kid"]] %||% NA_character_
         is.character(key_kid) &&
           length(key_kid) == 1L &&
           !is.na(key_kid) &&
@@ -359,7 +462,7 @@ select_candidate_jwks_for_encryption <- function(
 
   Filter(
     function(key) {
-      key_alg <- canonicalize_jwe_alg(key$alg %||% "")
+      key_alg <- key[["alg"]] %||% ""
       !nzchar(key_alg) || identical(key_alg, canonicalize_jwe_alg(alg))
     },
     keys
@@ -379,17 +482,20 @@ select_candidate_jwks_for_encryption <- function(
 rank_request_object_encryption_jwk <- function(jwk, alg) {
   score <- 0L
 
-  use <- tolower(jwk$use %||% "")
+  use <- jwk[["use"]] %||% ""
   if (identical(use, "enc")) {
     score <- score + 4L
   }
 
-  key_ops <- tolower(jwk$key_ops %||% character(0))
-  if (length(key_ops) > 0 && any(key_ops %in% c("encrypt", "wrapkey"))) {
+  key_ops <- normalize_jwk_key_ops(
+    jwk[["key_ops"]] %||% character(0)
+  ) %||%
+    character(0)
+  if (length(key_ops) > 0 && any(key_ops %in% c("encrypt", "wrapKey"))) {
     score <- score + 2L
   }
 
-  key_alg <- canonicalize_jwe_alg(jwk$alg %||% "")
+  key_alg <- jwk[["alg"]] %||% ""
   if (nzchar(key_alg) && identical(key_alg, canonicalize_jwe_alg(alg))) {
     score <- score + 4L
   }
@@ -410,12 +516,12 @@ resolve_authorization_request_encryption_config <- function(client) {
   S7::check_is_S7(client, class = OAuthClient)
 
   alg <- canonicalize_jwe_alg(
-    client@authorization_request_encryption_alg %||% NA_character_
+    client@request_object_encryption_alg %||% NA_character_
   )
   enc <- canonicalize_jwe_enc(
-    client@authorization_request_encryption_enc %||% NA_character_
+    client@request_object_encryption_enc %||% NA_character_
   )
-  kid <- client@authorization_request_encryption_kid %||% NA_character_
+  kid <- client@request_object_encryption_kid %||% NA_character_
 
   if (!nzchar(alg) && !nzchar(enc)) {
     return(NULL)
@@ -423,8 +529,8 @@ resolve_authorization_request_encryption_config <- function(client) {
   if (!nzchar(alg) || !nzchar(enc)) {
     err_config(
       paste(
-        "authorization_request_encryption_alg and",
-        "authorization_request_encryption_enc must both be provided"
+        "request_object_encryption_alg and",
+        "request_object_encryption_enc must both be provided"
       )
     )
   }
@@ -455,10 +561,17 @@ resolve_authorization_request_encryption_public_key <- function(
   S7::check_is_S7(client, class = OAuthClient)
 
   explicit_key <- client@provider@request_object_encryption_jwk %||% NULL
-  if (!is.null(explicit_key)) {
-    explicit_jwk <- if (is.list(explicit_key)) explicit_key else NULL
-    explicit_kid <- explicit_jwk$kid %||% NULL
-    explicit_alg <- canonicalize_jwe_alg(explicit_jwk$alg %||% "")
+  if (
+    identical(
+      resolve_request_object_encryption_key_source(client@provider),
+      "explicit_key"
+    )
+  ) {
+    explicit_jwk <- normalize_jwe_recipient_jwk(explicit_key)
+    explicit_kid <- explicit_jwk[["kid"]] %||% NULL
+    explicit_alg <- canonicalize_jwe_alg(
+      explicit_jwk[["alg"]] %||% ""
+    )
 
     if (
       is_valid_string(kid) &&
@@ -467,7 +580,7 @@ resolve_authorization_request_encryption_public_key <- function(
     ) {
       err_config(
         paste(
-          "authorization_request_encryption_kid does not match the provider's",
+          "request_object_encryption_kid does not match the provider's",
           "explicit request_object_encryption_jwk kid"
         )
       )
@@ -483,6 +596,21 @@ resolve_authorization_request_encryption_public_key <- function(
           "' but the client requested '",
           canonicalize_jwe_alg(alg),
           "'"
+        )
+      )
+    }
+    if (
+      !is.null(explicit_jwk) &&
+        length(select_candidate_jwks_for_encryption(
+          explicit_jwk,
+          alg = alg
+        )) !=
+          1L
+    ) {
+      err_config(
+        paste(
+          "provider request_object_encryption_jwk is not permitted for",
+          "encryption by its use or key_ops metadata"
         )
       )
     }
@@ -513,8 +641,27 @@ resolve_authorization_request_encryption_public_key <- function(
   candidates <- select_candidate_jwks_for_encryption(
     jwks_or_keys = jwks,
     alg = alg,
-    kid = kid
+    kid = kid,
+    pins = client@provider@jwks_pins
   )
+
+  if (length(candidates) == 0L) {
+    refreshed <- force_refresh_provider_jwks(
+      issuer = issuer,
+      jwks_cache = client@provider@jwks_cache,
+      pins = client@provider@jwks_pins,
+      pin_mode = client@provider@jwks_pin_mode,
+      provider = client@provider
+    )
+    if (!is.null(refreshed)) {
+      candidates <- select_candidate_jwks_for_encryption(
+        refreshed,
+        alg = alg,
+        kid = kid,
+        pins = client@provider@jwks_pins
+      )
+    }
+  }
 
   if (length(candidates) == 0L) {
     err_config(
@@ -539,7 +686,7 @@ resolve_authorization_request_encryption_public_key <- function(
       err_config(
         paste(
           "Multiple provider Request Object encryption keys matched; set",
-          "authorization_request_encryption_kid or provider",
+          "request_object_encryption_kid or provider",
           "request_object_encryption_jwk"
         )
       )
@@ -550,7 +697,7 @@ resolve_authorization_request_encryption_public_key <- function(
 
   list(
     public_key = jwk_to_pubkey(selected_jwk),
-    kid = selected_jwk$kid %||% kid
+    kid = selected_jwk[["kid"]] %||% kid
   )
 }
 
@@ -597,19 +744,20 @@ uint64_to_big_endian_raw <- function(value) {
 #' @noRd
 split_jwe_cbc_hmac_cek <- function(cek_raw, enc) {
   spec <- jwe_cbc_hmac_spec(enc)
-  if (!is.raw(cek_raw) || length(cek_raw) != spec$cek_bytes) {
+  if (!is.raw(cek_raw) || length(cek_raw) != spec[["cek_bytes"]]) {
     err_config(paste0(
-      spec$enc,
+      spec[["enc"]],
       " requires a CEK of ",
-      spec$cek_bytes,
+      spec[["cek_bytes"]],
       " bytes"
     ))
   }
 
   list(
-    mac_key = cek_raw[seq_len(spec$mac_key_bytes)],
+    mac_key = cek_raw[seq_len(spec[["mac_key_bytes"]])],
     enc_key = cek_raw[
-      (spec$mac_key_bytes + 1L):(spec$mac_key_bytes + spec$enc_key_bytes)
+      (spec[["mac_key_bytes"]] + 1L):(spec[["mac_key_bytes"]] +
+        spec[["enc_key_bytes"]])
     ]
   )
 }
@@ -635,11 +783,11 @@ compute_compact_jwe_auth_tag <- function(
 ) {
   spec <- jwe_cbc_hmac_spec(enc)
 
-  if (!is.raw(mac_key) || length(mac_key) != spec$mac_key_bytes) {
+  if (!is.raw(mac_key) || length(mac_key) != spec[["mac_key_bytes"]]) {
     err_config(paste0(
-      spec$enc,
+      spec[["enc"]],
       " requires a MAC key of ",
-      spec$mac_key_bytes,
+      spec[["mac_key_bytes"]],
       " bytes"
     ))
   }
@@ -649,17 +797,17 @@ compute_compact_jwe_auth_tag <- function(
   mac_input <- c(aad_raw, iv_raw, ciphertext_raw, al_raw)
 
   full_tag <- switch(
-    spec$hmac_alg,
+    spec[["hmac_alg"]],
     HS256 = openssl::sha256(mac_input, key = mac_key),
     HS384 = openssl::sha384(mac_input, key = mac_key),
     HS512 = openssl::sha512(mac_input, key = mac_key),
     err_config(paste0(
       "Unsupported compact JWE HMAC algorithm: ",
-      spec$hmac_alg
+      spec[["hmac_alg"]]
     ))
   )
 
-  full_tag[seq_len(spec$tag_bytes)]
+  full_tag[seq_len(spec[["tag_bytes"]])]
 }
 
 ## 1.5 Compact JWE encryption and decryption ----------------------------------
@@ -697,6 +845,7 @@ jwe_compact_encrypt <- function(
 
   spec <- jwe_cbc_hmac_spec(enc)
   recipient_key <- normalize_jwe_recipient_public_key(public_key)
+  validate_jwe_rsa_key_strength(recipient_key, "compact JWE recipient key")
   plaintext_raw <- if (is.raw(plaintext)) {
     plaintext
   } else if (
@@ -711,13 +860,13 @@ jwe_compact_encrypt <- function(
 
   header <- list(alg = alg, enc = enc)
   if (is_valid_string(kid)) {
-    header$kid <- kid
+    header[["kid"]] <- kid
   }
   if (is_valid_string(typ)) {
-    header$typ <- typ
+    header[["typ"]] <- typ
   }
   if (is_valid_string(cty)) {
-    header$cty <- cty
+    header[["cty"]] <- cty
   }
 
   header_json <- jsonlite::toJSON(
@@ -728,7 +877,7 @@ jwe_compact_encrypt <- function(
   )
   protected_header_b64 <- base64url_encode(charToRaw(enc2utf8(header_json)))
 
-  cek_raw <- openssl::rand_bytes(spec$cek_bytes)
+  cek_raw <- openssl::rand_bytes(spec[["cek_bytes"]])
   key_parts <- split_jwe_cbc_hmac_cek(cek_raw, enc)
   encrypted_key_raw <- try(
     openssl::rsa_encrypt(
@@ -743,15 +892,15 @@ jwe_compact_encrypt <- function(
       "Failed to encrypt compact JWE CEK with the recipient public key"
     )
   }
-  iv_raw <- openssl::rand_bytes(spec$iv_bytes)
+  iv_raw <- openssl::rand_bytes(spec[["iv_bytes"]])
   ciphertext_raw <- openssl::aes_cbc_encrypt(
     plaintext_raw,
-    key = key_parts$enc_key,
+    key = key_parts[["enc_key"]],
     iv = iv_raw
   )
   tag_raw <- compute_compact_jwe_auth_tag(
     enc = enc,
-    mac_key = key_parts$mac_key,
+    mac_key = key_parts[["mac_key"]],
     protected_header_b64 = protected_header_b64,
     iv_raw = iv_raw,
     ciphertext_raw = ciphertext_raw
@@ -769,8 +918,8 @@ jwe_compact_encrypt <- function(
 
 #' Decrypt a compact JWE using RSA-OAEP and AES-CBC-HMAC
 #'
-#' Used by tests that need to inspect nested request objects after compact JWE
-#' encryption.
+#' Used by inbound encrypted JARM validation and tests that need to inspect
+#' nested JWTs after compact JWE encryption.
 #'
 #' @param jwe Compact JWE string.
 #' @param private_key Recipient private key input.
@@ -779,9 +928,13 @@ jwe_compact_encrypt <- function(
 #' @noRd
 jwe_compact_decrypt <- function(jwe, private_key) {
   parts <- jwe_compact_parts(jwe)
-  header <- parts$protected_header
-  alg <- canonicalize_jwe_alg(header$alg %||% "")
-  enc <- canonicalize_jwe_enc(header$enc %||% "")
+  header <- parts[["protected_header"]]
+  alg <- canonicalize_jwe_alg(
+    jwt_header_field_exact(header, "alg") %||% ""
+  )
+  enc <- canonicalize_jwe_enc(
+    jwt_header_field_exact(header, "enc") %||% ""
+  )
 
   if (!identical(alg, "RSA-OAEP")) {
     err_parse(paste0("Unsupported compact JWE alg: ", alg))
@@ -792,45 +945,53 @@ jwe_compact_decrypt <- function(jwe, private_key) {
     private_key,
     arg_name = "request_object_encryption_private_key"
   )
+  validate_jwe_rsa_key_strength(key, "compact JWE decryption key")
+  cek_failed <- FALSE
   cek_raw <- try(
-    openssl::rsa_decrypt(parts$encrypted_key_raw, key = key, oaep = TRUE),
+    openssl::rsa_decrypt(
+      parts[["encrypted_key_raw"]],
+      key = key,
+      oaep = TRUE
+    ),
     silent = TRUE
   )
   if (inherits(cek_raw, "try-error")) {
-    err_parse("Failed to decrypt compact JWE encrypted key")
-  }
-  if (!is.raw(cek_raw) || length(cek_raw) != spec$cek_bytes) {
-    err_parse(paste0(
-      "Compact JWE CEK length mismatch for ",
-      enc,
-      ": expected ",
-      spec$cek_bytes,
-      " bytes"
-    ))
+    cek_failed <- TRUE
+    cek_raw <- openssl::rand_bytes(spec[["cek_bytes"]])
+  } else if (!is.raw(cek_raw) || length(cek_raw) != spec[["cek_bytes"]]) {
+    cek_failed <- TRUE
+    cek_raw <- openssl::rand_bytes(spec[["cek_bytes"]])
   }
 
   key_parts <- split_jwe_cbc_hmac_cek(cek_raw, enc)
   expected_tag <- compute_compact_jwe_auth_tag(
     enc = enc,
-    mac_key = key_parts$mac_key,
-    protected_header_b64 = parts$protected,
-    iv_raw = parts$iv_raw,
-    ciphertext_raw = parts$ciphertext_raw
+    mac_key = key_parts[["mac_key"]],
+    protected_header_b64 = parts[["protected"]],
+    iv_raw = parts[["iv_raw"]],
+    ciphertext_raw = parts[["ciphertext_raw"]]
   )
-  if (!constant_time_compare(parts$tag_raw, expected_tag)) {
-    err_parse("Compact JWE authentication tag validation failed")
+  tag_matches <- constant_time_compare(parts[["tag_raw"]], expected_tag)
+  if (isTRUE(cek_failed) || !tag_matches) {
+    err_parse(
+      "Compact JWE decryption failed",
+      context = list(compact_jwe_failure = "authenticated_decryption")
+    )
   }
 
   plaintext_raw <- try(
     openssl::aes_cbc_decrypt(
-      parts$ciphertext_raw,
-      key = key_parts$enc_key,
-      iv = parts$iv_raw
+      parts[["ciphertext_raw"]],
+      key = key_parts[["enc_key"]],
+      iv = parts[["iv_raw"]]
     ),
     silent = TRUE
   )
   if (inherits(plaintext_raw, "try-error")) {
-    err_parse("Failed to decrypt compact JWE ciphertext")
+    err_parse(
+      "Compact JWE decryption failed",
+      context = list(compact_jwe_failure = "authenticated_decryption")
+    )
   }
 
   plaintext <- tryCatch(

@@ -1,62 +1,52 @@
 # This file contains the helpers that publish Request Objects through a live
-# Shiny session
+# Shiny app
 # Used for caller-managed request_uri support on the app's existing Shiny URL
 
 # 1 Shiny request_uri helpers -------------------------------------------------
 
 ## 1.1 Session URL helpers ----------------------------------------------------
 
-#' Warn when a caller-managed request_uri is not HTTPS
+#' Require HTTPS for a caller-managed request_uri
 #'
 #' Used for caller-managed Request Object publication flows. RFC 9101 Section
-#' 5.2 requires client-provided `request_uri` values to use HTTPS, but
-#' shinyOAuth still allows HTTP when the configured host policy explicitly
-#' permits it.
+#' 5.2 requires client-provided `request_uri` values to use HTTPS.
 #'
 #' @param request_uri Absolute request URI string.
 #' @param subject Human-readable label used in the warning body.
-#' @return Invisibly returns `TRUE` when a warning was emitted, otherwise
-#'   `FALSE`.
+#' @return Invisibly returns `TRUE` for an HTTPS URI; otherwise raises a
+#'   configuration error.
 #' @keywords internal
 #' @noRd
-warn_if_request_uri_is_non_https <- function(
+require_https_request_uri <- function(
   request_uri,
-  subject = "The published {.code request_uri}"
+  subject = "The published `request_uri`"
 ) {
   if (!is_valid_string(request_uri)) {
-    return(invisible(FALSE))
+    return(invisible(TRUE))
   }
 
   parsed <- try(httr2::url_parse(request_uri), silent = TRUE)
   if (inherits(parsed, "try-error")) {
-    return(invisible(FALSE))
+    return(invisible(TRUE))
   }
 
-  scheme <- tolower(as.character(parsed$scheme %||% ""))
-  host <- as.character(parsed$hostname %||% "")
+  scheme <- tolower(as.character(parsed[["scheme"]] %||% ""))
+  host <- as.character(parsed[["hostname"]] %||% "")
 
   if (!nzchar(host) || identical(scheme, "https")) {
-    return(invisible(FALSE))
+    return(invisible(TRUE))
   }
 
-  warn_pkg(
-    "Non-HTTPS request_uri is not RFC 9101 compliant",
+  err_config(
     c(
-      "!" = paste(subject, "uses", toupper(scheme), "instead of HTTPS."),
+      "x" = paste(subject, "must use HTTPS."),
+      "i" = paste0("Got scheme: ", toupper(scheme)),
       "i" = paste(
         "RFC 9101 Section 5.2 requires client-provided request_uri values",
         "to use HTTPS."
-      ),
-      "i" = paste(
-        "shinyOAuth is allowing this because your configured host policy",
-        "explicitly permits the non-HTTPS origin."
       )
-    ),
-    .frequency = "once",
-    .frequency_id = "shinyOAuth_request_uri_non_https"
+    )
   )
-
-  invisible(TRUE)
 }
 
 #' Normalize a public request_uri base URL override
@@ -81,10 +71,17 @@ normalize_request_uri_base_url <- function(
   if (!is_valid_string(base_url)) {
     err_input(
       sprintf(
-        "{.arg %s} must be NULL or a single non-empty absolute URL.",
+        "`%s` must be NULL or a single non-empty absolute URL.",
         arg
       )
     )
+  }
+
+  if (has_uri_fragment(base_url)) {
+    err_input(sprintf(
+      "`%s` must not include a query string or fragment.",
+      arg
+    ))
   }
 
   validate_endpoint(
@@ -93,22 +90,22 @@ normalize_request_uri_base_url <- function(
   )
 
   parsed <- httr2::url_parse(base_url)
-  query <- as.character(parsed$query %||% "")
-  fragment <- as.character(parsed$fragment %||% "")
+  query <- as.character(parsed[["query"]] %||% "")
+  fragment <- as.character(parsed[["fragment"]] %||% "")
 
   if (nzchar(query) || nzchar(fragment)) {
     err_input(
       sprintf(
-        "{.arg %s} must not include a query string or fragment.",
+        "`%s` must not include a query string or fragment.",
         arg
       )
     )
   }
 
-  port <- as.character(parsed$port %||% "")
+  port <- as.character(parsed[["port"]] %||% "")
   port <- if (!is.na(port) && nzchar(port)) paste0(":", port) else ""
 
-  path <- as.character(parsed$path %||% "")
+  path <- as.character(parsed[["path"]] %||% "")
   path <- if (!nzchar(path) || identical(path, "/")) {
     ""
   } else {
@@ -117,19 +114,17 @@ normalize_request_uri_base_url <- function(
   }
 
   paste0(
-    tolower(as.character(parsed$scheme %||% "")),
+    tolower(as.character(parsed[["scheme"]] %||% "")),
     "://",
-    tolower(as.character(parsed$hostname %||% "")),
+    tolower(as.character(parsed[["hostname"]] %||% "")),
     port,
     path
   )
 }
 
-#' Build the base URL for Shiny session data-object endpoints
+#' Build the public base URL for the Shiny app
 #'
-#' Mirrors Shiny's client-side path handling so relative `session/.../dataobj`
-#' paths returned by `session$registerDataObj()` become absolute URLs on the
-#' current app origin.
+#' Mirrors Shiny client-side path handling to locate the current app root.
 #'
 #' @param session Active Shiny session.
 #' @param base_url Optional absolute base URL override used instead of the
@@ -148,19 +143,19 @@ shiny_request_uri_base_url <- function(session, base_url = NULL) {
   }
 
   protocol <- tryCatch(
-    as.character(session$clientData$url_protocol %||% NA_character_),
+    as.character(session[["clientData"]][["url_protocol"]] %||% NA_character_),
     error = function(...) NA_character_
   )
   hostname <- tryCatch(
-    as.character(session$clientData$url_hostname %||% NA_character_),
+    as.character(session[["clientData"]][["url_hostname"]] %||% NA_character_),
     error = function(...) NA_character_
   )
   port <- tryCatch(
-    as.character(session$clientData$url_port %||% NA_character_),
+    as.character(session[["clientData"]][["url_port"]] %||% NA_character_),
     error = function(...) NA_character_
   )
   pathname <- tryCatch(
-    as.character(session$clientData$url_pathname %||% NA_character_),
+    as.character(session[["clientData"]][["url_pathname"]] %||% NA_character_),
     error = function(...) NA_character_
   )
 
@@ -190,10 +185,9 @@ shiny_request_uri_base_url <- function(session, base_url = NULL) {
 
 ## 1.2 Response builders ------------------------------------------------------
 
-#' Serve one published Request Object through a Shiny data-object endpoint
+#' Build the response for a published Request Object
 #'
-#' Used as the `filterFunc` passed to `session$registerDataObj()` for
-#' caller-managed `request_uri` values.
+#' Used by the app-level request-object HTTP handler.
 #'
 #' @param data Registered Request Object data.
 #' @param req Rook request environment.
@@ -203,7 +197,10 @@ shiny_request_uri_base_url <- function(session, base_url = NULL) {
 serve_shiny_request_object <- function(data, req) {
   method <- toupper(
     as.character(
-      req$REQUEST_METHOD %||% req$request_method %||% req$method %||% "GET"
+      req[["REQUEST_METHOD"]] %||%
+        req[["request_method"]] %||%
+        req[["method"]] %||%
+        "GET"
     )[[1]]
   )
   headers <- c(
@@ -225,8 +222,8 @@ serve_shiny_request_object <- function(data, req) {
     ))
   }
 
-  usage_state <- data$usage_state %||% NULL
-  if (is.environment(usage_state) && isTRUE(usage_state$consumed)) {
+  usage_state <- data[["usage_state"]] %||% NULL
+  if (is.environment(usage_state) && isTRUE(usage_state[["consumed"]])) {
     return(list(
       status = 410L,
       headers = gone_headers,
@@ -238,7 +235,7 @@ serve_shiny_request_object <- function(data, req) {
     ))
   }
 
-  expires_at <- data$expires_at %||% NULL
+  expires_at <- data[["expires_at"]] %||% NULL
   if (!is.null(expires_at) && isTRUE(Sys.time() > expires_at)) {
     return(list(
       status = 410L,
@@ -248,13 +245,17 @@ serve_shiny_request_object <- function(data, req) {
   }
 
   if (identical(method, "GET") && is.environment(usage_state)) {
-    usage_state$consumed <- TRUE
+    usage_state[["consumed"]] <- TRUE
   }
 
   list(
     status = 200L,
     headers = headers,
-    body = if (identical(method, "HEAD")) "" else data$request_object
+    body = if (identical(method, "HEAD")) {
+      ""
+    } else {
+      data[["request_object"]]
+    }
   )
 }
 
@@ -262,18 +263,16 @@ serve_shiny_request_object <- function(data, req) {
 
 #' Publish a Request Object on the current Shiny app origin
 #'
-#' Registers a session data-object endpoint, then returns the absolute URL that
-#' an authorization server can fetch via `request_uri`. The default Shiny data-
-#' object URL includes session-routing path segments, so deployments that do
-#' not want provider-facing logs to see those URLs should prefer PAR or place
-#' an opaque rewriting layer in front of the published endpoint.
+#' Uses an independent random handle and the client's state store. The app UI
+#' wrapper serves the object without exposing a Shiny session-routing token.
 #'
 #' @param session Active Shiny session.
 #' @param request_object Compact Request Object JWT or JWE.
-#' @param request_handle_id Optional stable handle identifier.
-#' @param expires_at Optional expiry timestamp for the published object.
+#' @param request_handle_id Legacy argument; handles are independently random.
+#' @param expires_at Optional expiry timestamp, capped at 120 seconds.
 #' @param base_url Optional absolute base URL override used instead of the
 #'   browser-visible session origin.
+#' @param oauth_client OAuth client whose state store backs the app route.
 #' @return Absolute request-object URL.
 #' @keywords internal
 #' @noRd
@@ -282,54 +281,157 @@ publish_shiny_request_object <- function(
   request_object,
   request_handle_id = NULL,
   expires_at = NULL,
-  base_url = NULL
+  base_url = NULL,
+  oauth_client
 ) {
+  S7::check_is_S7(oauth_client, class = OAuthClient)
   if (!is_valid_string(request_object)) {
     err_config("request_object must be a single non-empty string")
   }
 
-  object_name <- if (is_valid_string(request_handle_id)) {
-    paste0("oauth-request-", request_handle_id)
-  } else {
-    paste0("oauth-request-", random_urlsafe(32))
+  public_base_url <- shiny_request_uri_base_url(session, base_url = base_url)
+  require_https_request_uri(public_base_url)
+
+  store <- oauth_client@state_store
+  require_request_object_atomic_store(store)
+  now <- as.numeric(Sys.time())
+  expiry <- if (is.null(expires_at)) now + 120 else as.numeric(expires_at)
+  if (length(expiry) != 1L || !is.finite(expiry)) {
+    err_config("Request Object expiry must be a single finite timestamp")
   }
-  usage_state <- new.env(parent = emptyenv())
-  usage_state$consumed <- FALSE
-
-  relative_url <- tryCatch(
-    {
-      session$registerDataObj(
-        object_name,
-        list(
-          request_object = request_object,
-          expires_at = expires_at,
-          usage_state = usage_state
-        ),
-        serve_shiny_request_object
-      )
-    },
-    error = function(e) {
-      err_config(c(
-        "x" = "Failed to register a Shiny request_uri endpoint",
-        "i" = conditionMessage(e)
-      ))
-    }
-  )
-
-  if (!is_valid_string(relative_url)) {
-    err_config("Shiny request_uri registration did not return a usable URL")
-  }
-
+  expiry <- as.POSIXct(min(expiry, now + 120), origin = "1970-01-01")
+  handle <- random_urlsafe(43)
   absolute_url <- paste0(
-    shiny_request_uri_base_url(session, base_url = base_url),
-    if (startsWith(relative_url, "/")) "" else "/",
-    relative_url
+    public_base_url,
+    "/?",
+    shiny_request_object_param,
+    "=",
+    handle
   )
   validate_endpoint(
     absolute_url,
     getOption("shinyOAuth.allowed_hosts", default = NULL)
   )
-  warn_if_request_uri_is_non_https(absolute_url)
-
+  require_https_request_uri(absolute_url)
+  store[["set"]](
+    shiny_request_object_key(oauth_client, handle),
+    list(
+      request_object = request_object,
+      expires_at = expiry
+    )
+  )
   absolute_url
+}
+
+shiny_request_object_param <- "shinyOAuth_request_object"
+
+shiny_request_object_key <- function(client, handle) {
+  paste0(
+    "request_object_",
+    string_digest(
+      paste(
+        client@client_id,
+        client@provider@name,
+        client@redirect_uri,
+        handle,
+        sep = "\n"
+      ),
+      key = NULL
+    )
+  )
+}
+
+require_request_object_atomic_store <- function(store) {
+  if (!is.function(store[["take"]]) && !inherits(store, "cache_mem")) {
+    err_config(paste(
+      "Request Object publication requires atomic `$take(key, missing)`",
+      "or cachem::cache_mem() for a single-process app"
+    ))
+  }
+  invisible(TRUE)
+}
+
+# Return NULL for ordinary app requests; all handle requests terminate here.
+shiny_request_object_http_handler <- function(req, client) {
+  query_error <- oauth_http_query_guard(req)
+  if (!is.null(query_error)) {
+    return(query_error)
+  }
+  query <- req[["QUERY_STRING"]] %||% ""
+  handles <- oauth_module_query_raw_values(query, shiny_request_object_param)
+  if (!length(handles)) {
+    return(NULL)
+  }
+  method <- toupper(req[["REQUEST_METHOD"]] %||% "GET")
+  response <- function(
+    status,
+    content = "Request Object unavailable",
+    allow = FALSE
+  ) {
+    shiny::httpResponse(
+      status,
+      content_type = "text/plain; charset=utf-8",
+      content = if (identical(method, "HEAD")) "" else content,
+      headers = c(
+        list(
+          "Cache-Control" = "no-store",
+          "Pragma" = "no-cache",
+          "Referrer-Policy" = "no-referrer",
+          "X-Content-Type-Options" = "nosniff"
+        ),
+        if (allow) list(Allow = "GET, HEAD")
+      )
+    )
+  }
+  if (!method %in% c("GET", "HEAD")) {
+    return(response(405L, "Method not allowed", allow = TRUE))
+  }
+  if (length(handles) != 1L || !grepl("^[A-Za-z0-9_-]{43}$", handles[[1L]])) {
+    return(response(400L))
+  }
+  if (is.null(client)) {
+    return(response(410L))
+  }
+  tryCatch(
+    {
+      store <- client@state_store
+      require_request_object_atomic_store(store)
+      key <- shiny_request_object_key(client, handles[[1L]])
+      data <- if (identical(method, "GET") && is.function(store[["take"]])) {
+        store[["take"]](key, missing = NULL)
+      } else {
+        value <- store[["get"]](key, missing = NULL)
+        if (identical(method, "GET")) {
+          # No event-loop yield occurs between read and removal in cache_mem.
+          store[["remove"]](key)
+          if (!is.null(store[["get"]](key, missing = NULL))) {
+            stop("Request Object removal failed")
+          }
+        }
+        value
+      }
+      if (
+        !is.list(data) ||
+          !is_valid_string(data[["request_object"]]) ||
+          length(data[["expires_at"]]) != 1L ||
+          !is.finite(as.numeric(data[["expires_at"]])) ||
+          Sys.time() >= data[["expires_at"]]
+      ) {
+        return(response(410L))
+      }
+      result <- serve_shiny_request_object(data, req)
+      shiny::httpResponse(
+        result[["status"]],
+        content_type = result[["headers"]][["Content-Type"]],
+        content = result[["body"]],
+        headers = c(
+          as.list(result[["headers"]][
+            names(result[["headers"]]) != "Content-Type"
+          ]),
+          list("Referrer-Policy" = "no-referrer")
+        )
+      )
+    },
+    error = function(...) response(503L)
+  )
 }

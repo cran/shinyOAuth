@@ -28,8 +28,14 @@ err_abort <- function(
   trace_id = NULL
 ) {
   trace_id <- resolve_trace_id(trace_id)
+  context <- sanitize_event_diagnostics(sanitize_event_url_fields(context))
   emit_trace_event(c(
-    list(type = "error", trace_id = trace_id, message = msg),
+    list(
+      type = "error",
+      trace_id = trace_id,
+      error_class = class[[1L]],
+      message = msg
+    ),
     context
   ))
   primary <- short_desc_for_class(c(class, "shinyOAuth_error"))
@@ -46,6 +52,87 @@ err_abort <- function(
   )
 }
 
+#' Raise a claim-validation error with opt-in diagnostic values
+#'
+#' Keeps direct R conditions and event sinks on the same exposure policy.
+#' @param msg Stable classification message without claim values.
+#' @param claim Name of the claim being checked.
+#' @param expected Configured expected value or allowlist.
+#' @param received Received claim value, including `NULL` for a missing claim.
+#' @param error Typed error constructor accepting message and context.
+#' @return This function does not return; it raises a condition.
+#' @keywords internal
+#' @noRd
+err_claim_validation <- function(msg, claim, expected, received, error) {
+  encode <- function(value) {
+    as.character(jsonlite::toJSON(value, auto_unbox = TRUE, null = "null"))
+  }
+  expected <- encode(expected)
+  received <- encode(received)
+  bullets <- c("x" = msg)
+  if (allow_expose_error_body()) {
+    bullets <- c(
+      bullets,
+      "i" = paste0(
+        "Expected: ",
+        sanitize_diagnostic_text(expected)
+      ),
+      "i" = paste0(
+        "Got: ",
+        sanitize_diagnostic_text(received)
+      )
+    )
+  }
+  error(
+    bullets,
+    context = list(
+      claim = claim,
+      expected_claim_digest = string_digest(expected),
+      received_claim_digest = string_digest(received)
+    )
+  )
+}
+
+#' Build non-sensitive context for a parser failure
+#'
+#' Records only the parser phase, input size, keyed digest, and condition class.
+#' Raw parser diagnostics can include fragments of an untrusted response and
+#' must not be copied into audit or telemetry events.
+#'
+#' @param input Parsed character input, when available.
+#' @param phase Stable parser phase identifier.
+#' @param error Optional parser condition.
+#' @return Named list safe for condition context and event sinks.
+#' @keywords internal
+#' @noRd
+safe_parse_failure_context <- function(input, phase, error = NULL) {
+  input_value <- if (is_valid_string(input)) as.character(input) else NULL
+  error_classes <- tryCatch(class(error), error = function(...) character(0))
+  error_class <- if (
+    length(error_classes) > 0L && is_valid_string(error_classes[[1L]])
+  ) {
+    error_classes[[1L]]
+  } else {
+    NULL
+  }
+
+  compact_list(list(
+    phase = phase,
+    reason = "parse_error",
+    body_bytes = if (!is.null(input_value)) {
+      nchar(input_value, type = "bytes")
+    } else {
+      NULL
+    },
+    body_digest = if (!is.null(input_value)) {
+      string_digest(input_value)
+    } else {
+      NULL
+    },
+    error_class = error_class
+  ))
+}
+
 #' Format the standard shinyOAuth condition header
 #'
 #' Used by errors, warnings, and informs that present a concise shinyOAuth
@@ -60,15 +147,15 @@ format_header <- function(short, strong = TRUE) {
   short <- as.character(short %||% "")
 
   if (isTRUE(strong)) {
-    return(paste0("[{.pkg shinyOAuth}] - {.strong ", short, "}"))
+    return(cli::format_inline("[{.pkg shinyOAuth}] - {.strong {short}}"))
   }
 
-  paste0("[{.pkg shinyOAuth}] - ", short)
+  cli::format_inline("[{.pkg shinyOAuth}] - {short}")
 }
 
 #' Build a standard shinyOAuth condition message
 #'
-#' Combines the package header, normalized bullet body, and any footer bullets
+#' Combines the package header, literal bullet body, and literal footer bullets
 #' into the character vector expected by `rlang` condition helpers.
 #'
 #' @param short Short description shown in the condition header.
@@ -274,6 +361,89 @@ deprecate_warn_pkg <- function(
   )
 }
 
+#' Resolve deprecated constructor argument aliases
+#'
+#' Used by exported helper constructors to accept renamed arguments through
+#' `...` during a deprecation window.
+#'
+#' @param dots Named list collected from `...`.
+#' @param arg_map Named character vector mapping deprecated argument names to
+#'   current argument names.
+#' @param fn_name Constructor name used in warnings and errors.
+#' @param provided_new Named logical vector indicating which current argument
+#'   names were already supplied directly.
+#' @param when Package version where the deprecation started.
+#' @param env Environment forwarded to `deprecate_warn_pkg()`.
+#' @param user_env User environment forwarded to `deprecate_warn_pkg()`.
+#' @return Named list of remapped current argument names and values.
+#' @keywords internal
+#' @noRd
+resolve_deprecated_constructor_args <- function(
+  dots,
+  arg_map,
+  fn_name,
+  provided_new = stats::setNames(logical(0), character(0)),
+  when = "0.5.0.9000",
+  env = rlang::caller_env(),
+  user_env = rlang::caller_env()
+) {
+  if (length(dots) == 0) {
+    return(list())
+  }
+
+  dot_names <- names(dots) %||% character(length(dots))
+  if (!all(nzchar(dot_names))) {
+    err_input(paste0(fn_name, "() does not accept unnamed arguments in ..."))
+  }
+
+  unknown <- setdiff(dot_names, names(arg_map))
+  if (length(unknown) > 0) {
+    err_input(paste0(
+      fn_name,
+      "(): unknown argument(s) in ...: ",
+      paste(sQuote(unknown), collapse = ", ")
+    ))
+  }
+
+  resolved <- list()
+  for (old_name in dot_names) {
+    new_name <- unname(arg_map[[old_name]])
+
+    if (isTRUE(provided_new[[new_name]]) || new_name %in% names(resolved)) {
+      err_input(paste0(
+        fn_name,
+        "(): cannot supply both deprecated argument `",
+        old_name,
+        "` and current argument `",
+        new_name,
+        "`."
+      ))
+    }
+
+    deprecate_warn_pkg(
+      when = when,
+      what = paste0(fn_name, "() argument `", old_name, "`"),
+      with = paste0(fn_name, "() argument `", new_name, "`"),
+      details = paste(
+        "Backward-compatible forwarding via ... is temporary and will be",
+        "removed in a future release."
+      ),
+      id = paste0(
+        gsub("[^a-z0-9]+", "-", tolower(fn_name)),
+        "-",
+        old_name,
+        "-arg"
+      ),
+      env = env,
+      user_env = user_env
+    )
+
+    resolved[[new_name]] <- dots[[old_name]]
+  }
+
+  resolved
+}
+
 #' Resolve an error header description from condition classes
 #'
 #' Used by `err_abort()` to pick the short description shown in the header.
@@ -364,11 +534,33 @@ normalize_bullets <- function(msg, default_type = "!") {
 #' @noRd
 err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
   trace_id <- resolve_trace_id(trace_id)
+  context <- sanitize_event_diagnostics(sanitize_event_url_fields(context))
   expose <- isTRUE(allow_expose_error_body())
   status <- NA_integer_
   desc <- NULL
   url <- NULL
+  transport_error <- NULL
+  issuer <- NULL
   body_snippet <- NULL
+
+  if (is_valid_string(context[["transport_error"]])) {
+    transport_error <- as.character(context[["transport_error"]])
+  }
+  if (is_valid_string(context[["issuer"]])) {
+    issuer <- as.character(context[["issuer"]])
+  }
+  if (is_valid_string(context[["url"]])) {
+    url <- otel_http_url_full(context[["url"]])
+  } else if (is_valid_string(context[["request_url"]])) {
+    url <- otel_http_url_full(context[["request_url"]])
+  } else if (is_valid_string(context[["discovery_url"]])) {
+    url <- otel_http_url_full(context[["discovery_url"]])
+  }
+
+  if (inherits(url, "try-error")) {
+    url <- NULL
+  }
+
   if (!is.null(resp) && inherits(resp, "httr2_response")) {
     st <- try(httr2::resp_status(resp), silent = TRUE)
     status <- if (!inherits(st, "try-error") && length(st) == 1) {
@@ -411,26 +603,36 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
   # and extract RFC 6749 §5.2 structured error fields when present
   body_digest <- NULL
   oauth_error <- NULL
+  oauth_error_digest <- NULL
+  oauth_error_detail <- NULL
   oauth_error_description <- NULL
   oauth_error_uri <- NULL
   if (!is.null(resp) && inherits(resp, "httr2_response")) {
     bs <- try(httr2::resp_body_string(resp), silent = TRUE)
     if (!inherits(bs, "try-error")) {
-      dig <- try(openssl::sha256(charToRaw(bs)), silent = TRUE)
-      if (!inherits(dig, "try-error")) {
-        body_digest <- paste0(sprintf("%02x", as.integer(dig)), collapse = "")
-      }
+      body_digest <- string_digest(bs)
       # RFC 6749 §5.2: try to extract structured error fields from JSON body
       parsed <- try(
         jsonlite::fromJSON(bs, simplifyVector = TRUE),
         silent = TRUE
       )
       if (!inherits(parsed, "try-error") && is.list(parsed)) {
-        if (is_valid_string(parsed[["error"]])) {
-          oauth_error <- parsed[["error"]]
+        if (
+          is_valid_string(parsed[["error"]]) &&
+            is_oauth_error_text(parsed[["error"]])
+        ) {
+          oauth_error <- oauth_error_code(parsed[["error"]])
+          if (identical(oauth_error, "unknown")) {
+            oauth_error_digest <- string_digest(parsed[["error"]])
+            if (expose) {
+              oauth_error_detail <- sanitize_diagnostic_text(parsed[["error"]])
+            }
+          }
         }
-        if (is_valid_string(parsed[["error_description"]])) {
-          oauth_error_description <- parsed[["error_description"]]
+        if (expose && is_oauth_error_text(parsed[["error_description"]])) {
+          oauth_error_description <- sanitize_diagnostic_text(parsed[[
+            "error_description"
+          ]])
         }
         if (is_valid_string(parsed[["error_uri"]])) {
           oauth_error_uri <- otel_http_url_full(parsed[["error_uri"]])
@@ -454,6 +656,8 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
       url = url,
       body_digest = body_digest,
       oauth_error = oauth_error,
+      oauth_error_digest = oauth_error_digest,
+      oauth_error_detail = oauth_error_detail,
       oauth_error_description = event_oauth_error_description,
       oauth_error_uri = oauth_error_uri
     ),
@@ -472,11 +676,14 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
   }
   # RFC 6749 §5.2: surface structured error fields from token endpoint
   oauth_error_msg <- if (!is.null(oauth_error)) {
-    reason <- oauth_error
+    reason <- oauth_error_detail %||% oauth_error
     if (!is.null(oauth_error_description)) {
       reason <- paste0(reason, ": ", oauth_error_description)
     }
-    stats::setNames(paste0("OAuth error: ", reason), "x")
+    stats::setNames(
+      paste0("OAuth error: ", reason),
+      "x"
+    )
   } else {
     character()
   }
@@ -485,20 +692,47 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
   } else {
     character()
   }
+  transport_msg <- if (expose && is_valid_string(transport_error)) {
+    stats::setNames(
+      paste0("Transport error: ", sanitize_diagnostic_text(transport_error)),
+      "x"
+    )
+  } else {
+    character()
+  }
   url_msg <- if (!is.null(url)) {
     stats::setNames(paste0("URL: ", url), "i")
   } else {
     character()
   }
+  issuer_msg <- if (is_valid_string(issuer)) {
+    stats::setNames(paste0("Issuer: ", issuer), "i")
+  } else {
+    character()
+  }
   trace_msg <- c("i" = paste0("Trace ID: ", trace_id))
   body_msg <- if (expose && !is.null(body_snippet)) {
-    stats::setNames(paste0("Body: ", body_snippet), "i")
+    stats::setNames(
+      paste0(
+        "Body: ",
+        sanitize_diagnostic_text(body_snippet)
+      ),
+      "i"
+    )
   } else {
     character()
   }
   message <- format_condition_message(
     "HTTP request failed",
-    c(msg, status_msg, oauth_error_msg, oauth_error_uri_msg, url_msg),
+    c(
+      msg,
+      status_msg,
+      oauth_error_msg,
+      oauth_error_uri_msg,
+      transport_msg,
+      url_msg,
+      issuer_msg
+    ),
     footer = c(trace_msg, body_msg)
   )
 
@@ -510,6 +744,8 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
     url = url,
     body_digest = body_digest,
     oauth_error = oauth_error,
+    oauth_error_digest = oauth_error_digest,
+    oauth_error_detail = oauth_error_detail,
     oauth_error_description = oauth_error_description,
     oauth_error_uri = oauth_error_uri,
     context = context
@@ -535,6 +771,8 @@ err_transport <- function(
   trace_id = NULL
 ) {
   trace_id <- resolve_trace_id(trace_id)
+  context <- sanitize_event_diagnostics(sanitize_event_url_fields(context))
+  parent <- sanitize_condition_parent(parent)
   emit_trace_event(c(
     list(type = "transport_error", trace_id = trace_id, message = msg),
     context

@@ -30,6 +30,7 @@
 #'   and consume the single-use state entry before success is final. Failures
 #'   are still audited.
 #' @keywords internal
+#' @noRd
 state_payload_decrypt_validate <- function(
   client,
   encrypted_payload,
@@ -49,6 +50,8 @@ state_payload_decrypt_validate <- function(
       # Verify freshness and client/provider binding
       payload_verify_issued_at(client, pld)
       payload_verify_client_binding(client, pld)
+      payload_verify_authorization_context(client, pld)
+      payload_requested_max_age(pld)
 
       if (isTRUE(audit_success)) {
         audit_callback_validation_success(client, pld, shiny_session)
@@ -84,6 +87,84 @@ state_payload_decrypt_validate <- function(
   )
 }
 
+#' Revalidate a cached decrypted OAuth state payload
+#'
+#' Internal utility used when callback handling resumes from a cached,
+#' already-decrypted state payload such as the form_post bridge or async
+#' prefetch. It rechecks the original issued-at freshness and client/policy
+#' binding so cached payloads cannot outlive the sealed state lifetime or be
+#' resumed under a different client policy.
+#'
+#' @param client [OAuthClient] instance.
+#' @param payload Previously decrypted state payload list.
+#' @param shiny_session Optional pre-captured Shiny session context.
+#' @param audit_success Whether successful payload validation should emit the
+#'   standard callback validation audit event.
+#' @return The validated payload list on success; otherwise throws an error via
+#'   `err_invalid_state()`.
+#' @keywords internal
+#' @noRd
+state_payload_revalidate <- function(
+  client,
+  payload,
+  shiny_session = NULL,
+  audit_success = FALSE
+) {
+  S7::check_is_S7(client, class = OAuthClient)
+
+  tryCatch(
+    {
+      if (!is.list(payload)) {
+        err_invalid_state("Invalid payload: cached state payload is malformed")
+      }
+
+      payload_verify_issued_at(client, payload)
+      payload_verify_client_binding(client, payload)
+      payload_verify_authorization_context(client, payload)
+      payload_requested_max_age(payload)
+
+      if (isTRUE(audit_success)) {
+        audit_callback_validation_success(client, payload, shiny_session)
+      }
+
+      payload
+    },
+    error = function(e) {
+      payload_state <- tryCatch(
+        payload[["state"]],
+        error = function(...) NULL
+      )
+      try(
+        audit_event(
+          "callback_validation_failed",
+          context = list(
+            provider = client@provider@name %||% NA_character_,
+            issuer = client@provider@issuer %||% NA_character_,
+            client_id_digest = string_digest(client@client_id),
+            state_digest = if (is_valid_string(payload_state)) {
+              string_digest(payload_state)
+            } else {
+              NA_character_
+            },
+            error_class = paste(class(e), collapse = ", "),
+            phase = "payload_validation"
+          ),
+          shiny_session = shiny_session
+        ),
+        silent = TRUE
+      )
+      rethrow_with_context(
+        e,
+        class = c("shinyOAuth_state_error", "shinyOAuth_error"),
+        message = c(
+          "State payload validation failed",
+          "i" = conditionMessage(e)
+        )
+      )
+    }
+  )
+}
+
 #' Audit successful callback state validation
 #'
 #' Used after a callback has completed its state, browser-token, and single-use
@@ -101,7 +182,7 @@ audit_callback_validation_success <- function(
   shiny_session = NULL
 ) {
   with_trace_id(
-    payload$trace_id %||% NULL,
+    payload[["trace_id"]] %||% NULL,
     try(
       audit_event(
         "callback_validation_success",
@@ -109,7 +190,7 @@ audit_callback_validation_success <- function(
           provider = client@provider@name %||% NA_character_,
           issuer = client@provider@issuer %||% NA_character_,
           client_id_digest = string_digest(client@client_id),
-          state_digest = string_digest(payload$state)
+          state_digest = string_digest(payload[["state"]])
         ),
         shiny_session = shiny_session
       ),
@@ -300,6 +381,87 @@ state_policy_string_set <- function(value, transform = identity) {
   sort(unique(enc2utf8(as.character(values))))
 }
 
+#' Digest an arbitrary policy value without embedding it in state
+#'
+#' Used for token parameters, headers, and credentials whose exact value must
+#' be bound to a callback without copying that value into the sealed payload.
+#'
+#' @param value Policy value to digest canonically.
+#' @return A length-1 SHA-256 fingerprint.
+#' @keywords internal
+#' @noRd
+state_policy_value_digest <- function(value) {
+  state_policy_digest(list(value = value))
+}
+
+#' Compute a client assertion signing-key thumbprint for state binding
+#'
+#' @param client OAuth client carrying assertion/JAR signing configuration.
+#' @return RFC 7638 JWK thumbprint, or `NA_character_` without a private key.
+#' @keywords internal
+#' @noRd
+state_policy_client_assertion_key_thumbprint <- function(client) {
+  if (is.null(client@client_assertion_private_key)) {
+    return(NA_character_)
+  }
+
+  key <- normalize_private_key_input(
+    client@client_assertion_private_key,
+    arg_name = "client_assertion_private_key"
+  )
+  public_key <- as.list(key)[["pubkey"]]
+  jwk <- jsonlite::fromJSON(
+    jose::write_jwk(public_key),
+    simplifyVector = TRUE
+  )
+  compute_jwk_thumbprint(canonicalize_local_public_jwk(jwk))
+}
+
+#' Identify an explicit provider Request Object encryption key
+#'
+#' @param value Provider `request_object_encryption_jwk` value.
+#' @return Canonical public-key identity suitable for a provider fingerprint.
+#' @keywords internal
+#' @noRd
+state_policy_request_encryption_key_identity <- function(value) {
+  if (is.null(value)) {
+    return(NULL)
+  }
+
+  metadata <- if (is.list(value)) {
+    value
+  } else if (
+    is.character(value) &&
+      length(value) >= 1L &&
+      grepl("^\\s*\\{", paste(value, collapse = "\n"))
+  ) {
+    tryCatch(
+      jsonlite::fromJSON(
+        paste(value, collapse = "\n"),
+        simplifyVector = FALSE
+      ),
+      error = function(...) list()
+    )
+  } else {
+    list()
+  }
+  public_key <- normalize_jwe_recipient_public_key(value)
+  public_jwk <- jsonlite::fromJSON(
+    jose::write_jwk(public_key),
+    simplifyVector = TRUE
+  )
+
+  list(
+    thumbprint = compute_jwk_thumbprint(canonicalize_local_public_jwk(
+      public_jwk
+    )),
+    kid = metadata[["kid"]] %||% NA_character_,
+    alg = metadata[["alg"]] %||% NA_character_,
+    use = metadata[["use"]] %||% NA_character_,
+    key_ops = state_policy_string_set(metadata[["key_ops"]])
+  )
+}
+
 #' Compute a DPoP key thumbprint for state binding
 #'
 #' Used by `state_client_policy_fingerprint()` when a client enables DPoP.
@@ -333,14 +495,38 @@ state_policy_mtls_cert_thumbprint <- function(client) {
   }
 
   tls_client_cert_thumbprint_s256(
-    client@tls_client_cert_file,
-    key_file = client@tls_client_key_file,
-    key_password = if (is_valid_string(client@tls_client_key_password)) {
-      client@tls_client_key_password
+    client@mtls_client_cert_file,
+    key_file = client@mtls_client_key_file,
+    key_password = if (is_valid_string(client@mtls_client_key_password)) {
+      client@mtls_client_key_password
     } else {
       NULL
     }
   )
+}
+
+#' Compute a JARM decryption-key thumbprint for state binding
+#'
+#' Used by `state_client_policy_fingerprint()` when encrypted JARM is enabled.
+#'
+#' @param client OAuth client carrying inbound JARM decryption configuration.
+#' @return RFC 7638 JWK thumbprint string, or `NA_character_` when no JARM
+#'   decryption key is configured.
+#' @keywords internal
+#' @noRd
+state_policy_jarm_decryption_key_thumbprint <- function(client) {
+  if (is.null(client@jarm_decryption_private_key)) {
+    return(NA_character_)
+  }
+
+  key <- normalize_private_key_input(
+    client@jarm_decryption_private_key,
+    arg_name = "jarm_decryption_private_key"
+  )
+  key_pubkey <- as.list(key)[["pubkey"]]
+  jwk <- jsonlite::fromJSON(jose::write_jwk(key_pubkey), simplifyVector = TRUE)
+
+  compute_jwk_thumbprint(canonicalize_local_public_jwk(jwk))
 }
 
 #' Build a client-side callback policy fingerprint
@@ -356,26 +542,119 @@ state_policy_mtls_cert_thumbprint <- function(client) {
 state_client_policy_fingerprint <- function(client) {
   S7::check_is_S7(client, class = OAuthClient)
 
+  response_mode_info <- resolve_oauth_client_response_mode(client)
+  if (!is.null(response_mode_info[["error"]])) {
+    err_config(response_mode_info[["error"]])
+  }
+
+  response_mode <- response_mode_info[["mode"]] %||% "query"
+  jarm_response_mode <- response_mode %in% c("query.jwt", "form_post.jwt")
+  jarm_encryption_config <- if (isTRUE(jarm_response_mode)) {
+    resolve_authorization_response_encryption_config(client)
+  } else {
+    NULL
+  }
+
   components <- list(
+    response_mode = response_mode,
+    tls_min_version = configured_tls_minimum() %||% NA_character_,
+    oidc_max_age = provider_auth_max_age(client@provider) %||% NA_real_,
     enforce_callback_issuer = isTRUE(client@enforce_callback_issuer),
+    compare_callback_issuer = isTRUE(client@compare_callback_issuer),
+    authorization_server_mode = client@authorization_server_mode,
+    authorization_server_redirect_uris = vapply(
+      lapply(client@authorization_server_redirect_uris, oauth_callback_route),
+      function(route) {
+        if (is.null(route)) {
+          return(NA_character_)
+        }
+        paste(
+          route[["scheme"]],
+          route[["hostname"]],
+          route[["port"]],
+          route[["path"]],
+          sep = "\n"
+        )
+      },
+      ""
+    ),
     resource = state_policy_string_set(client@resource),
     claims = client@claims,
     state_payload_max_age = client_state_payload_max_age(client),
+    jarm_max_lifetime = if (isTRUE(jarm_response_mode)) {
+      client_jarm_max_lifetime(client)
+    } else {
+      NA_real_
+    },
     scope_validation = client@scope_validation,
     claims_validation = client@claims_validation,
-    userinfo_jwt_required_temporal_claims = state_policy_string_set(
-      client@userinfo_jwt_required_temporal_claims,
+    userinfo_jwt_required_time_claims = state_policy_string_set(
+      client@userinfo_jwt_required_time_claims,
       transform = tolower
     ),
     required_acr_values = state_policy_string_set(client@required_acr_values),
+    trusted_id_token_audiences = state_policy_string_set(
+      client@trusted_id_token_audiences
+    ),
     introspect = isTRUE(client@introspect),
     introspect_elements = state_policy_string_set(client@introspect_elements),
-    dpop_require_access_token = isTRUE(client@dpop_require_access_token),
-    mtls_request_certificate_bound_access_tokens = isTRUE(
-      client@mtls_request_certificate_bound_access_tokens
+    client_secret_digest = if (is_valid_string(client@client_secret)) {
+      state_policy_value_digest(client@client_secret)
+    } else {
+      NA_character_
+    },
+    client_assertion_private_key_kid = client@client_assertion_private_key_kid,
+    client_assertion_private_key_thumbprint = state_policy_client_assertion_key_thumbprint(
+      client
     ),
+    client_assertion_alg = client@client_assertion_alg,
+    client_assertion_audience = client@client_assertion_audience,
+    client_assertion_typ = client@client_assertion_typ,
+    endpoint_auth_digest = endpoint_auth_policy_digest(client@endpoint_auth),
+    dpop_require_access_token = isTRUE(client@dpop_require_access_token),
+    dpop_require_observed_cnf = isTRUE(client@dpop_require_observed_cnf),
+    mtls_certificate_bound_access_tokens = isTRUE(
+      client@mtls_certificate_bound_access_tokens
+    ),
+    mtls_require_observed_cnf = isTRUE(client@mtls_require_observed_cnf),
+    request_object_mode = client@request_object_mode,
+    request_object_signing_alg = client@request_object_signing_alg,
+    request_object_audience = client@request_object_audience,
+    request_object_encryption_alg = client@request_object_encryption_alg,
+    request_object_encryption_enc = client@request_object_encryption_enc,
+    request_object_encryption_kid = client@request_object_encryption_kid,
+    request_object_ttl = client@request_object_ttl,
+    request_object_nbf_skew = client@request_object_nbf_skew,
     dpop_signing_alg = if (client_has_dpop(client)) {
       resolve_dpop_alg(client)
+    } else {
+      NA_character_
+    },
+    jarm_signed_response_alg = if (isTRUE(jarm_response_mode)) {
+      resolve_authorization_response_signing_alg(client)
+    } else {
+      NA_character_
+    },
+    jarm_encrypted_response_alg = jarm_encryption_config[[
+      "alg",
+      exact = TRUE
+    ]] %||%
+      NA_character_,
+    jarm_encrypted_response_enc = jarm_encryption_config[[
+      "enc",
+      exact = TRUE
+    ]] %||%
+      NA_character_,
+    jarm_decryption_private_key_kid = if (!is.null(jarm_encryption_config)) {
+      client@jarm_decryption_private_key_kid %||%
+        NA_character_
+    } else {
+      NA_character_
+    },
+    authorization_response_decryption_key_thumbprint = if (
+      !is.null(jarm_encryption_config)
+    ) {
+      state_policy_jarm_decryption_key_thumbprint(client)
     } else {
       NA_character_
     },
@@ -384,14 +663,59 @@ state_client_policy_fingerprint <- function(client) {
     mtls_cert_thumbprint = state_policy_mtls_cert_thumbprint(client)
   )
 
+  # Preserve the fingerprint of existing GET transactions.
+  if (!identical(client@authorization_method, "GET")) {
+    components[["authorization_method"]] <- client@authorization_method
+  }
+  if (client_uses_smart_scopes(client)) {
+    components[["scope_policy"]] <- client@scope_policy
+  }
+  if (client_uses_smart(client)) {
+    components[["smart"]] <- client@smart
+  }
+  if (length(client@resource_bases)) {
+    bases <- normalize_resource_bases(client@resource_bases)
+    components[["resource_bases"]] <- as.list(bases[sort(names(bases))])
+  }
+  if (length(client@required_scopes)) {
+    components[["required_scopes"]] <- normalize_scope_tokens(
+      client@required_scopes
+    )
+  }
   state_policy_digest(components)
+}
+
+#' Read the OIDC max_age bound to an encrypted state payload
+#'
+#' @param payload Decrypted state payload.
+#' @return A normalized non-negative numeric scalar, or `NULL` when the
+#'   authorization request did not include `max_age`.
+#' @keywords internal
+#' @noRd
+payload_requested_max_age <- function(payload) {
+  if (!is.list(payload) || !"max_age" %in% names(payload)) {
+    return(NULL)
+  }
+
+  max_age <- payload[["max_age"]]
+  if (
+    length(max_age) != 1L ||
+      !is.numeric(max_age) ||
+      is.na(max_age) ||
+      !is.finite(max_age) ||
+      max_age < 0
+  ) {
+    err_invalid_state("Invalid payload: max_age must be a non-negative number")
+  }
+
+  as.numeric(max_age)
 }
 
 ## 1.3 Payload binding and freshness -------------------------------------------
 
 #' Verify encrypted state payload freshness
 #'
-#' Used by [state_payload_decrypt_validate()].
+#' Used by `state_payload_decrypt_validate()`.
 #'
 #' @param client OAuth client carrying the payload age policy.
 #' @param payload Decrypted state payload list.
@@ -404,7 +728,7 @@ payload_verify_issued_at <- function(client, payload) {
   max_age <- client_state_payload_max_age(client)
 
   # Validate issued_at (integer seconds OK)
-  ia <- payload$issued_at
+  ia <- payload[["issued_at"]]
   if (length(ia) != 1L || !is.numeric(ia) || !is.finite(ia)) {
     err_invalid_state("Invalid payload: missing or invalid issued_at")
   }
@@ -436,7 +760,7 @@ payload_verify_issued_at <- function(client, payload) {
 
 #' Verify encrypted state payload client binding
 #'
-#' Used by [state_payload_decrypt_validate()].
+#' Used by `state_payload_decrypt_validate()`.
 #'
 #' @param client OAuth client expected to match the payload.
 #' @param payload Decrypted state payload list.
@@ -452,7 +776,7 @@ payload_verify_client_binding <- function(client, payload) {
   # Client ID ------------------------------------------------------------------
 
   expected_client_id <- client@client_id
-  payload_client_id <- payload$client_id
+  payload_client_id <- payload[["client_id"]]
 
   if (!is_valid_string(payload_client_id)) {
     err_invalid_state("Invalid payload: missing or invalid client_id")
@@ -467,7 +791,7 @@ payload_verify_client_binding <- function(client, payload) {
   # Redirect_uri ---------------------------------------------------------------
 
   expected_redirect <- client@redirect_uri
-  payload_redirect <- payload$redirect_uri
+  payload_redirect <- payload[["redirect_uri"]]
 
   if (!is_valid_string(payload_redirect)) {
     err_invalid_state("Invalid payload: missing or invalid redirect_uri")
@@ -483,7 +807,7 @@ payload_verify_client_binding <- function(client, payload) {
   # Scopes (order-insensitive set comparison) ----------------------------------
 
   expected_scopes <- as_scope_tokens(effective_client_scopes(client))
-  payload_scopes <- as_scope_tokens(payload$scopes %||% NULL)
+  payload_scopes <- as_scope_tokens(payload[["scopes"]] %||% NULL)
 
   # Normalize by unique + sort so we can produce clear differences
   exp_norm <- sort(unique(expected_scopes))
@@ -517,7 +841,7 @@ payload_verify_client_binding <- function(client, payload) {
   # Provider fingerprint -------------------------------------------------------
 
   expected_fp <- provider_fingerprint(client@provider)
-  payload_fp <- payload$provider
+  payload_fp <- payload[["provider"]]
 
   if (!is_valid_string(payload_fp)) {
     err_invalid_state(
@@ -534,7 +858,7 @@ payload_verify_client_binding <- function(client, payload) {
   # Client-side callback policy fingerprint -----------------------------------
 
   expected_client_policy <- state_client_policy_fingerprint(client)
-  payload_client_policy <- payload$client_policy
+  payload_client_policy <- payload[["client_policy"]]
 
   if (!is_valid_string(payload_client_policy)) {
     err_invalid_state(
@@ -559,7 +883,7 @@ payload_verify_client_binding <- function(client, payload) {
 #'
 #' Used when the caller must validate browser-bound data before burning the
 #' single-use state entry. Single-use enforcement must still happen later via
-#' [state_store_get_remove()].
+#' `state_store_get_remove()`.
 #'
 #' @param client [OAuthClient] instance
 #' @param state Plain (decrypted) state string used as the logical key
@@ -596,9 +920,12 @@ state_store_get <- function(client, state, shiny_session = NULL) {
 
   tryCatch(
     {
-      ssv <- store$get(key, missing = NULL)
+      ssv <- state_store_backend_call(
+        store[["get"]](key, missing = NULL),
+        "state_store_lookup"
+      )
       ssv <- validate_state_store_value(
-        ssv,
+        state_store_unseal(ssv, client, state),
         client,
         validate_policy_fields = FALSE
       )
@@ -648,11 +975,11 @@ state_store_get <- function(client, state, shiny_session = NULL) {
 #' Uses the client's `state_store` to read and remove the state-bound values
 #' after the encrypted callback payload has been decrypted and validated.
 #'
-#' When the store exposes an atomic `$take(key, missing)` method (see
+#' When the store exposes an atomic `[["take"]](key, missing)` method (see
 #' [custom_cache()]), that path is used first so single-use semantics still
 #' hold under concurrent access.
-#' When `$take()` is unavailable, the function falls back to `$get()` +
-#' `$remove()` with a post-removal absence check.
+#' When `[["take"]]()` is unavailable, the function falls back to `[["get"]]()` +
+#' `[["remove"]]()` with a post-removal absence check.
 #' That fallback is safe for per-process caches such as [cachem::cache_mem()].
 #' For shared stores it errors by default, because non-atomic get+remove cannot
 #' guarantee single-use semantics under concurrent access; operators may opt in
@@ -669,6 +996,7 @@ state_store_get <- function(client, state, shiny_session = NULL) {
 #' @return Validated state-store value list. On failure this function raises
 #'   `err_invalid_state()` instead of returning a partial result.
 #' @keywords internal
+#' @noRd
 state_store_get_remove <- function(client, state, shiny_session = NULL) {
   S7::check_is_S7(client, class = OAuthClient)
   # Validate state early and emit audited error instead of raw assertion
@@ -694,8 +1022,8 @@ state_store_get_remove <- function(client, state, shiny_session = NULL) {
   key <- state_cache_key(state)
   store <- client@state_store
 
-  # Prefer atomic $take() when available; fall back to $get() + $remove().
-  has_take <- !is.null(store$take) && is.function(store$take)
+  # Prefer atomic [["take"]]() when available; fall back to [["get"]]() + [["remove"]]().
+  has_take <- !is.null(store[["take"]]) && is.function(store[["take"]])
 
   if (has_take) {
     ssv <- state_store_consume_atomic(store, key, client, state, shiny_session)
@@ -703,7 +1031,7 @@ state_store_get_remove <- function(client, state, shiny_session = NULL) {
     # Fail closed: the non-atomic get()+remove() fallback is only safe for
     # per-process caches.  cachem::cache_mem() is the only built-in backend
     # that is inherently per-process; cachem::cache_disk() and any other
-    # shared or custom stores MUST provide an atomic $take() method to
+    # shared or custom stores MUST provide an atomic [["take"]]() method to
     # guarantee single-use state consumption under concurrent access.
     #
     # Users can opt in to the non-atomic fallback for shared stores by setting
@@ -763,6 +1091,10 @@ state_store_get_remove <- function(client, state, shiny_session = NULL) {
     )
   }
 
+  if (client@response_mode %in% c("form_post", "form_post.jwt")) {
+    oauth_form_post_store_remove_siblings(client, state)
+  }
+
   ssv
 }
 
@@ -771,7 +1103,7 @@ state_store_get_remove <- function(client, state, shiny_session = NULL) {
 
 #' Consume a state-store entry atomically
 #'
-#' @param store State-store backend exposing `$take()`.
+#' @param store State-store backend exposing `[["take"]]()`.
 #' @param key Computed store key.
 #' @param client OAuth client used for audit context.
 #' @param state Raw state string.
@@ -792,10 +1124,16 @@ state_store_consume_atomic <- function(
 
   tryCatch(
     {
-      ssv <- store$take(key, missing = NULL)
+      ssv <- state_store_backend_call(
+        store[["take"]](key, missing = NULL),
+        "state_store_atomic_take"
+      )
       # Validate the returned value in the same tryCatch so failures are
       # audited consistently
-      ssv <- validate_state_store_value(ssv, client)
+      ssv <- validate_state_store_value(
+        state_store_unseal(ssv, client, state),
+        client
+      )
     },
     error = function(e) {
       consume_error_class <<- paste(class(e), collapse = ", ")
@@ -841,7 +1179,7 @@ state_store_consume_atomic <- function(
 
 #' Consume a state-store entry with a fallback path
 #'
-#' @param store State-store backend exposing `$get()` and `$remove()`.
+#' @param store State-store backend exposing `[["get"]]()` and `[["remove"]]()`.
 #' @param key Computed store key.
 #' @param client OAuth client used for audit context.
 #' @param state Raw state string.
@@ -866,8 +1204,14 @@ state_store_consume_fallback <- function(
   # -- Step 1: Get the value --------------------------------------------------
   tryCatch(
     {
-      ssv <- store$get(key, missing = NULL)
-      ssv <- validate_state_store_value(ssv, client)
+      ssv <- state_store_backend_call(
+        store[["get"]](key, missing = NULL),
+        "state_store_lookup"
+      )
+      ssv <- validate_state_store_value(
+        state_store_unseal(ssv, client, state),
+        client
+      )
       get_succeeded <- TRUE
     },
     error = function(e) {
@@ -892,17 +1236,20 @@ state_store_consume_fallback <- function(
   )
 
   # -- Step 2: Remove + post-check -------------------------------------------
-  # Do NOT trust the return value of $remove() (e.g., cachem::cache_mem()
+  # Do NOT trust the return value of [["remove"]]() (e.g., cachem::cache_mem()
   # returns TRUE even for already-absent keys).  Instead, always verify
-  # absence via a post-removal $get().
+  # absence via a post-removal [["get"]]().
   tryCatch(
     {
-      store$remove(key)
+      state_store_backend_call(store[["remove"]](key), "state_store_removal")
       # Post-check: the key MUST be absent now.  If the store is shared and
       # another consumer already removed the entry, the key is absent and
       # remove was a no-op — that is the expected single-use path. However,
       # if the key is *still present* after our remove, something went wrong.
-      post <- store$get(key, missing = NA)
+      post <- state_store_backend_call(
+        store[["get"]](key, missing = NA),
+        "state_store_removal"
+      )
       remove_succeeded <- isTRUE(is.na(post))
     },
     error = function(e) {
@@ -995,7 +1342,7 @@ validate_state_store_value <- function(
       class = c("shinyOAuth_state_error", "shinyOAuth_error")
     )
   }
-  if (!is_valid_string(ssv$browser_token)) {
+  if (!is_valid_string(ssv[["browser_token"]])) {
     abort_pkg(
       "State store entry is malformed: browser_token must be a non-empty string",
       class = c("shinyOAuth_state_error", "shinyOAuth_error")
@@ -1005,7 +1352,7 @@ validate_state_store_value <- function(
   if (
     isTRUE(validate_policy_fields) &&
       isTRUE(client@provider@use_pkce) &&
-      !is_valid_string(ssv$pkce_code_verifier)
+      !is_valid_string(ssv[["pkce_code_verifier"]])
   ) {
     abort_pkg(
       paste0(
@@ -1019,7 +1366,7 @@ validate_state_store_value <- function(
   if (
     isTRUE(validate_policy_fields) &&
       isTRUE(client@provider@use_nonce) &&
-      !is_valid_string(ssv$nonce)
+      !is_valid_string(ssv[["nonce"]])
   ) {
     abort_pkg(
       paste0(
@@ -1031,4 +1378,126 @@ validate_state_store_value <- function(
   }
 
   invisible(ssv)
+}
+
+# External state-store records use a separate, context-bound AES-GCM key. The
+# HMAC derivation binds ciphertext to this client/provider and state lookup key,
+# preventing a backend from moving valid records between login transactions.
+state_store_sealing_key <- function(client, state) {
+  openssl::sha256(
+    serialize(
+      list(
+        "shinyOAuth:external-state-record:v1",
+        state_cache_key(state),
+        client@client_id,
+        client@provider@issuer,
+        client@provider@token_url
+      ),
+      NULL,
+      version = 2
+    ),
+    key = normalize_key32(client@state_key)
+  )
+}
+
+state_store_seal <- function(record, client, state) {
+  if (inherits(client@state_store, "cache_mem")) {
+    return(record)
+  }
+  list(
+    sealed_state_record = state_encrypt_gcm(
+      record,
+      key = state_store_sealing_key(client, state)
+    )
+  )
+}
+
+state_store_unseal <- function(record, client, state) {
+  if (inherits(client@state_store, "cache_mem")) {
+    return(record)
+  }
+  if (!is.list(record) || !is_valid_string(record[["sealed_state_record"]])) {
+    err_invalid_state("External state store entry is missing or is not sealed")
+  }
+  state_decrypt_gcm(
+    record[["sealed_state_record"]],
+    key = state_store_sealing_key(client, state),
+    size_limits = list(
+      token = 16384,
+      wrapper = 12288,
+      ct_b64 = 12288,
+      ct = 8192
+    )
+  )
+}
+
+# Bind all fields used by callback processing, with stable names and NULLs so
+# harmless backend field reordering or omission of unused NULLs is tolerated.
+state_store_record_digest <- function(record, client) {
+  fields <- c("browser_token", "pkce_code_verifier", "nonce")
+  if (!is.null(record[["transaction_context"]])) {
+    fields <- c(fields, "transaction_context")
+  }
+  canonical <- stats::setNames(
+    lapply(fields, function(nm) record[[nm]]),
+    fields
+  )
+  openssl::sha256(
+    serialize(canonical, NULL, version = 2),
+    key = openssl::sha256(
+      charToRaw("shinyOAuth:state-record-comparison:v1"),
+      key = normalize_key32(client@state_key)
+    )
+  )
+}
+
+# Capture the preliminary record before consuming. Reject a changed record
+# before its PKCE verifier, nonce, or browser binding can be used.
+state_store_consume_checked <- function(
+  client,
+  state,
+  expected_record,
+  shiny_session = NULL,
+  .transaction_context = NULL,
+  .transaction_context_digest = NULL
+) {
+  state_record_verify_authorization_context(
+    expected_record,
+    .transaction_context_digest
+  )
+  # The future manager supplies the exact context only after validating its
+  # intended owner and generation. Legacy callbacks cannot consume managed state.
+  if (
+    !identical(expected_record[["transaction_context"]], .transaction_context)
+  ) {
+    err_invalid_state(
+      "Managed authorization requires its verified transaction context"
+    )
+  }
+  expected_digest <- state_store_record_digest(expected_record, client)
+  consumed <- state_store_get_remove(
+    client,
+    state,
+    shiny_session = shiny_session
+  )
+  if (
+    !constant_time_compare(
+      expected_digest,
+      state_store_record_digest(consumed, client)
+    )
+  ) {
+    err_invalid_state("State store record changed during consumption")
+  }
+  consumed
+}
+
+# Backend exceptions can contain credentials or stored records. Never attach
+# the original condition as a parent or forward its message to audit/OTel.
+state_store_backend_call <- function(expr, phase) {
+  tryCatch(force(expr), error = function(e) {
+    err_invalid_state(
+      "State store backend operation failed",
+      context = list(phase = phase, backend_error_class = class(e)[[1L]])
+    )
+  })
 }

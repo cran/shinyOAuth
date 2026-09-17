@@ -7,42 +7,31 @@
 
 ## 1.1 Check host policy -------------------------------------------------------
 
-#' @title
-#' Check if URL(s) are HTTPS and/or in allowed hosts lists
+#' Check a URL against the package's host policy
 #'
 #' @description
-#' Returns `TRUE` if every input URL passes shinyOAuth's scheme and host
-#' policy. In practice, each URL must be either:
-#' - a syntactically valid HTTPS URL, and (if set) whose host matches `allowed_hosts`, or
-#' - an HTTP URL whose host matches `allowed_non_https_hosts` (e.g. localhost, 127.0.0.1, ::1),
-#'   and (if set) also matches `allowed_hosts`.
+#' Test whether a URL is allowed by shinyOAuth's ordinary scheme and host rules.
+#' HTTPS is accepted by default. HTTP is limited to local development hosts
+#' unless you change `allowed_non_https_hosts`. Supply `allowed_hosts` to
+#' restrict which services your app may contact.
 #'
-#' If the input omits the scheme (e.g., "localhost:8080/cb"), this function
-#' will first attempt to validate it as HTTP (useful for loopback development),
-#' and if that fails, as HTTPS. This mirrors how helpers normalize inputs for
-#' convenience while still enforcing the same host and scheme policies.
-#'
-#' `allowed_hosts` is the allowlist of hosts or domains that are permitted,
-#' while `allowed_non_https_hosts` defines which hosts are allowed to use HTTP
-#' instead of HTTPS. If `allowed_hosts` is `NULL` or length 0, all hosts are
-#' allowed subject to the scheme rules above.
-#'
-#' Since `allowed_hosts` supports globs, a value like "*" matches any host
-#' and therefore effectively disables endpoint host restrictions. Only use a catch-all
-#' pattern when you truly intend to allow any host. In most deployments you should pin
-#' to your expected domain(s), e.g. `c(".example.com")` or a specific host name.
-#'
-#' Wildcards: `allowed_hosts` and `allowed_non_https_hosts` support globs:
-#' `*` = any chars, `?` = one char. A leading `.example.com` matches the
-#' domain itself and any subdomain.
-#'
-#' Any non-URLs, NAs, or empty strings cause a FALSE result.
+#' Call this when checking configured endpoint URLs or diagnosing a URL-policy
+#' rejection. The provider and API request helpers apply these checks internally;
+#' a direct call lets you inspect the result without making a network request.
 #'
 #' @details
-#' This function is used internally to validate redirect URIs in OAuth clients,
-#' but can also be used directly to test whether URLs would be accepted.
-#' Internally, the defaults come from the options
-#' `shinyOAuth.allowed_non_https_hosts` and `shinyOAuth.allowed_hosts`.
+#' Both host lists support `*` (any characters), `?` (one character), and a
+#' leading dot: `".example.com"` matches the domain and its subdomains.
+#' `"*"` permits every host. If `allowed_hosts` is empty, only the scheme
+#' rules apply. Missing values, empty strings, and malformed URLs return `FALSE`.
+#'
+#' If the scheme is absent, this helper tries HTTP, then HTTPS. Request helpers
+#' can impose additional requirements, including an absolute URL. OIDC
+#' discovery has a separate HTTPS policy and requires an explicit loopback
+#' development opt-in; a `TRUE` result here does not override it.
+#'
+#' Defaults come from `shinyOAuth.allowed_hosts` and
+#' `shinyOAuth.allowed_non_https_hosts`.
 #'
 #' @param url Single URL or vector of URLs (character; length 1 or more)
 #' @param allowed_non_https_hosts Character vector of hostnames that are allowed
@@ -127,13 +116,143 @@ url_append_query_params <- function(url, params) {
 
 ## 1.3 Normalize and validate issuer or endpoint URLs --------------------------
 
+# Extract the escaped path without decoding reserved delimiters. Callers validate
+# the absolute URL first; an empty HTTP path denotes the root resource.
+url_raw_path <- function(url) {
+  path <- sub("^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*", "", url)
+  path <- sub("[?#].*$", "", path)
+  if (nzchar(path)) path else "/"
+}
+
+url_raw_query <- function(url) {
+  base <- sub("#.*$", "", url)
+  if (!grepl("?", base, fixed = TRUE)) {
+    return("")
+  }
+  sub("^[^?]*\\?", "", base)
+}
+
+# OAuth and OIDC authorization singleton fields; resource is repeatable under
+# RFC 8707. Parameter names are case sensitive, including percent-decoded names.
+authorization_singleton_params <- function() {
+  c(
+    "response_type",
+    "client_id",
+    "redirect_uri",
+    "scope",
+    "state",
+    "nonce",
+    "code_challenge",
+    "code_challenge_method",
+    "dpop_jkt",
+    "response_mode",
+    "request",
+    "request_uri",
+    "display",
+    "prompt",
+    "max_age",
+    "ui_locales",
+    "id_token_hint",
+    "login_hint",
+    "acr_values",
+    "claims"
+  )
+}
+
+# Pure resolver used by constructors, URL composition and configuration checks.
+# Return only a generic problem message, never a configured URL or value.
+authorization_query_resolution <- function(
+  url,
+  params = list(),
+  require_managed = FALSE
+) {
+  fixed <- tryCatch(
+    decode_form_pairs(url_raw_query(url), "Authorization endpoint query"),
+    error = function(e) NULL
+  )
+  if (is.null(fixed)) {
+    return(list(
+      problem = "Authorization endpoint query contains malformed encoding"
+    ))
+  }
+  params <- compact_list(params)
+  singletons <- authorization_singleton_params()
+  for (fields in list(fixed, params)) {
+    managed <- fields[names(fields) %in% singletons]
+    if (anyDuplicated(names(managed)) || any(lengths(managed) != 1L)) {
+      return(list(
+        problem = "Authorization parameters contain repeated managed singleton fields"
+      ))
+    }
+  }
+  # Policy parameters must flow through their typed configuration so the
+  # callback policy, signed Request Object and PAR body all see the same value.
+  policy_fields <- c(
+    "scope",
+    "resource",
+    "response_mode",
+    "display",
+    "prompt",
+    "max_age",
+    "ui_locales",
+    "id_token_hint",
+    "login_hint",
+    "acr_values",
+    "claims"
+  )
+  if (any(names(fixed) %in% policy_fields)) {
+    return(list(
+      problem = paste(
+        "Authorization endpoint query must not contain policy parameters;",
+        "use client properties or extra_auth_params instead"
+      )
+    ))
+  }
+  if (
+    isTRUE(require_managed) &&
+      any(
+        names(fixed) %in% singletons & !names(fixed) %in% names(params)
+      )
+  ) {
+    return(list(
+      problem = paste(
+        "Authorization endpoint query contains protocol parameters",
+        "that are not enabled in the client configuration"
+      )
+    ))
+  }
+  shared <- intersect(intersect(names(fixed), names(params)), singletons)
+  if (
+    !all(vapply(
+      shared,
+      function(key) {
+        identical(as.character(fixed[[key]]), as.character(params[[key]]))
+      },
+      logical(1)
+    ))
+  ) {
+    return(list(
+      problem = "Authorization endpoint query conflicts with managed parameters"
+    ))
+  }
+  list(problem = NULL, params = params[!names(params) %in% shared])
+}
+
+authorization_url_append <- function(url, params) {
+  resolved <- authorization_query_resolution(url, params)
+  if (!is.null(resolved[["problem"]])) {
+    err_config(resolved[["problem"]])
+  }
+  url_append_query_params(url, resolved[["params"]])
+}
+
 #' Internal: Resolve issuer from discovery with issuer matching policy
 #'
 #' Requires the discovery issuer to be present and well-formed.
 #'
 #' Matching is controlled by `issuer_match`:
-#' - "url": require an exact match against the issuer URL prefix used for
-#'   discovery (after removing one trailing slash, if present)
+#' - "url": require code-point equality with the issuer URL used for discovery
+#'   (including any trailing slash)
 #' - "host": require scheme+host match only (explicit opt-out)
 #' - "none": do not validate issuer consistency
 #' Used after OIDC discovery fetches issuer metadata.
@@ -174,17 +293,24 @@ validate_discovery_issuer <- function(
     p_dc <- parse_url_components(issuer_discovered, "discovery issuer")
 
     if (
-      !identical(p_in$scheme, p_dc$scheme) || !identical(p_in$host, p_dc$host)
+      !identical(
+        p_in[["scheme"]],
+        p_dc[["scheme"]]
+      ) ||
+        !identical(
+          p_in[["host"]],
+          p_dc[["host"]]
+        )
     ) {
       err_config(
         c(
           "x" = "OIDC discovery issuer mismatch",
           "!" = sprintf(
             "Input '%s://%s' vs discovery '%s://%s'",
-            p_in$scheme,
-            p_in$host,
-            p_dc$scheme,
-            p_dc$host
+            p_in[["scheme"]],
+            p_in[["host"]],
+            p_dc[["scheme"]],
+            p_dc[["host"]]
           )
         )
       )
@@ -193,15 +319,13 @@ validate_discovery_issuer <- function(
     return(iss)
   }
 
-  expected_issuer <- rtrim_slash(issuer_input)
-
-  if (!identical(expected_issuer, issuer_discovered)) {
+  if (!identical(issuer_input, issuer_discovered)) {
     err_config(
       c(
         "x" = "OIDC discovery issuer mismatch",
         "!" = sprintf(
           "Input '%s' vs discovery '%s'",
-          expected_issuer,
+          issuer_input,
           issuer_discovered
         ),
         "i" = "Set issuer_match = 'host' to compare only scheme+host (not recommended)"
@@ -226,6 +350,7 @@ validate_discovery_issuer <- function(
 #' @noRd
 validate_endpoint <- function(u, allowed_hosts_vec) {
   is_scalar_string <- is.character(u) && length(u) == 1
+  display_url <- otel_http_url_full(u) %||% "[invalid URL]"
 
   # Allow NA/empty to pass silently (callers may treat missing endpoints as optional)
   if (is_scalar_string && (is.na(u) || !nzchar(u))) {
@@ -238,9 +363,16 @@ validate_endpoint <- function(u, allowed_hosts_vec) {
         "x" = "Endpoint must be an absolute URL",
         "i" = paste0(
           "Got invalid URL: ",
-          paste(as.character(u), collapse = ", ")
+          display_url
         )
       ),
+      context = list(endpoint = u)
+    )
+  }
+
+  if (has_uri_fragment(u)) {
+    err_config(
+      "Endpoint must not contain a fragment component",
       context = list(endpoint = u)
     )
   }
@@ -253,7 +385,7 @@ validate_endpoint <- function(u, allowed_hosts_vec) {
         "x" = "Endpoint must be an absolute URL",
         "i" = paste0(
           "Got invalid URL: ",
-          as.character(u)
+          display_url
         )
       ),
       context = list(endpoint = u)
@@ -262,17 +394,17 @@ validate_endpoint <- function(u, allowed_hosts_vec) {
 
   # absolute URL required
   if (
-    is.null(p$scheme) ||
-      !nzchar(p$scheme) ||
-      is.null(p$hostname) ||
-      !nzchar(p$hostname)
+    is.null(p[["scheme"]]) ||
+      !nzchar(p[["scheme"]]) ||
+      is.null(p[["hostname"]]) ||
+      !nzchar(p[["hostname"]])
   ) {
     err_config(
       c(
         "x" = "Endpoint must be an absolute URL",
         "i" = paste0(
           "Got invalid URL: ",
-          as.character(u)
+          display_url
         )
       ),
       context = list(endpoint = u)
@@ -283,14 +415,14 @@ validate_endpoint <- function(u, allowed_hosts_vec) {
   # This permits HTTP only for hosts in shinyOAuth.allowed_non_https_hosts,
   # while still pinning endpoints to the issuer host (or allowlist).
   if (!is_ok_host(u, allowed_hosts = allowed_hosts_vec)) {
-    chost <- tolower(trimws(p$hostname))
+    chost <- tolower(trimws(p[["hostname"]]))
     chost <- sub("\\.$", "", chost)
     err_config(
       c(
         "x" = "Endpoint host or scheme not allowed (see `?is_ok_host`)",
         "i" = paste0(
           "Got endpoint: ",
-          as.character(u)
+          display_url
         ),
         "i" = paste0(
           "Allowed hosts: ",
@@ -325,14 +457,56 @@ is_absolute_uri <- function(x) {
     return(FALSE)
   }
 
-  x <- trimws(x)
-  if (!grepl("^[A-Za-z][A-Za-z0-9+.-]*:[^[:space:]]+$", x, perl = TRUE)) {
+  # Validate RFC 3986 syntax before using a URL parser: URL parsers can be
+  # permissive about bad escapes, and often do not understand opaque URIs.
+  atom <- "(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})"
+  pchar <- paste0("(?:", atom, "|[:@])")
+  authority <- paste0(
+    "(?:(?:",
+    atom,
+    "|:)*@)?(?:",
+    atom,
+    "*|\\[[A-Za-z0-9:._~!$&'()*+,;=-]+\\])(?::[0-9]*)?"
+  )
+  syntax <- paste0(
+    "^[A-Za-z][A-Za-z0-9+.-]*:",
+    "(?://",
+    authority,
+    "(?:/",
+    pchar,
+    "*)*|/?(?:",
+    pchar,
+    ")(?:",
+    pchar,
+    "|/)*|/|)",
+    "(?:\\?(?:",
+    pchar,
+    "|[/?])*)?(?:#(?:",
+    pchar,
+    "|[/?])*)?\\z"
+  )
+  if (!grepl(syntax, x, perl = TRUE)) {
     return(FALSE)
   }
-
-  parsed <- try(httr2::url_parse(x), silent = TRUE)
-  if (!inherits(parsed, "try-error")) {
-    return(is_valid_string(parsed$scheme %||% NA_character_))
+  # Brackets are reserved for IP literals in the authority.
+  if (grepl("[", x, fixed = TRUE)) {
+    literal <- sub("^[^[]*\\[([^]]+)\\].*$", "\\1", x)
+    ipvfuture <- grepl(
+      "^[vV][0-9A-Fa-f]+\\.[A-Za-z0-9._~!$&'()*+,;=:-]+$",
+      literal
+    )
+    if (
+      !ipvfuture &&
+        inherits(
+          try(
+            normalize_mtls_registration_ipv6_literal(literal),
+            silent = TRUE
+          ),
+          "try-error"
+        )
+    ) {
+      return(FALSE)
+    }
   }
 
   TRUE
@@ -357,15 +531,16 @@ has_uri_fragment <- function(x) {
 #' Internal: sanitize provider callback error_uri values
 #'
 #' Provider-supplied `error_uri` values are untrusted navigation inputs. Only
-#' absolute HTTPS URLs are surfaced; anything else is dropped. Used when the
-#' module surfaces provider error callbacks.
+#' absolute HTTPS URLs on trusted hosts are surfaced; anything else is dropped.
+#' Used when the module surfaces provider error callbacks.
 #'
 #' @param x Provider-supplied `error_uri` value.
+#' @param provider Optional OAuth provider used to derive trusted hosts.
 #' @return Sanitized HTTPS URL string, or `NULL` when the value should be
 #'   dropped.
 #' @keywords internal
 #' @noRd
-sanitize_callback_error_uri <- function(x) {
+sanitize_callback_error_uri <- function(x, provider = NULL) {
   if (!is_valid_string(x)) {
     return(NULL)
   }
@@ -376,14 +551,73 @@ sanitize_callback_error_uri <- function(x) {
     return(NULL)
   }
 
-  scheme <- tolower(parsed$scheme %||% "")
-  host <- trimws(parsed$hostname %||% "")
+  scheme <- tolower(parsed[["scheme"]] %||% "")
+  host <- trimws(parsed[["hostname"]] %||% "")
 
   if (!identical(scheme, "https") || !nzchar(host)) {
     return(NULL)
   }
 
+  allowed_hosts <- callback_error_uri_allowed_hosts(provider)
+  if (!length(allowed_hosts) || !is_ok_host(x, allowed_hosts = allowed_hosts)) {
+    return(NULL)
+  }
+
   x
+}
+
+#' Internal: collect trusted hosts for callback error_uri values
+#'
+#' Provider callback docs should stay on the provider's own hosts unless the
+#' app has already explicitly allowlisted an additional host.
+#'
+#' @param provider Optional OAuth provider used to derive trusted hosts.
+#' @return Character vector of trusted hosts/patterns.
+#' @keywords internal
+#' @noRd
+callback_error_uri_allowed_hosts <- function(provider = NULL) {
+  provider_urls <- list()
+
+  if (!is.null(provider)) {
+    provider_urls <- list(
+      provider@issuer %||% NULL,
+      provider@auth_url %||% NULL,
+      provider@token_url %||% NULL,
+      provider@userinfo_url %||% NULL,
+      provider@introspection_url %||% NULL,
+      provider@revocation_url %||% NULL,
+      provider@jwks_uri %||% NULL,
+      provider@par_url %||% NULL
+    )
+  }
+
+  provider_hosts <- vapply(
+    provider_urls,
+    function(url) {
+      if (!is_valid_string(url)) {
+        return(NA_character_)
+      }
+
+      tryCatch(
+        parse_url_host(url),
+        error = function(...) NA_character_
+      )
+    },
+    character(1)
+  )
+  provider_hosts <- unique(provider_hosts[
+    !is.na(provider_hosts) & nzchar(provider_hosts)
+  ])
+
+  configured_hosts <- getOption("shinyOAuth.allowed_hosts", default = NULL)
+  if (!is.character(configured_hosts)) {
+    configured_hosts <- character(0)
+  }
+  configured_hosts <- unique(configured_hosts[
+    !is.na(configured_hosts) & nzchar(trimws(configured_hosts))
+  ])
+
+  unique(c(provider_hosts, configured_hosts))
 }
 
 #' Internal: validate RFC 8707 resource indicators
@@ -577,21 +811,21 @@ parse_url_components <- function(url, label = "url") {
   parsed <- try(httr2::url_parse(url), silent = TRUE)
 
   if (inherits(parsed, "try-error")) {
-    err_config(c(
-      "x" = sprintf("Could not parse %s", label),
-      "!" = sprintf("Value: '%s'", url)
+    err_config(protocol_diagnostic_message(
+      sprintf("Could not parse %s", label),
+      url
     ))
   }
 
-  scheme <- tolower((parsed$scheme %||% ""))
-  host <- tolower(trimws(parsed$hostname %||% ""))
+  scheme <- tolower((parsed[["scheme"]] %||% ""))
+  host <- tolower(trimws(parsed[["hostname"]] %||% ""))
   host <- sub("^\\[([^\\]]+)\\](?::.*)?$", "\\1", host, perl = TRUE)
   host <- host_normalize_idna(host)
 
   if (!nzchar(host)) {
-    err_config(c(
-      "x" = sprintf("%s does not include a hostname", label),
-      "!" = sprintf("Value: '%s'", url)
+    err_config(protocol_diagnostic_message(
+      sprintf("%s does not include a hostname", label),
+      url
     ))
   }
 
@@ -608,7 +842,7 @@ parse_url_components <- function(url, label = "url") {
 #' @keywords internal
 #' @noRd
 parse_url_host <- function(url, label = "url") {
-  h <- parse_url_components(url, label)$host
+  h <- parse_url_components(url, label)[["host"]]
   sub("^\\[([^\\]]+)\\]$", "\\1", h)
 }
 
@@ -664,8 +898,8 @@ is_ok_host_one <- function(x, allowed_non_https_hosts, allowed_hosts) {
     return(FALSE)
   }
 
-  scheme <- tolower(parsed$scheme %||% "")
-  host <- tolower(trimws(parsed$hostname %||% ""))
+  scheme <- tolower(parsed[["scheme"]] %||% "")
+  host <- tolower(trimws(parsed[["hostname"]] %||% ""))
 
   if (!nzchar(host)) {
     mm <- regexec("^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]+)", x, perl = TRUE)

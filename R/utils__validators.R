@@ -101,6 +101,15 @@ validate_untrusted_query_param <- function(
     )
   }
 
+  if (
+    name %in% c("error", "error_description") && !is_oauth_error_text(value)
+  ) {
+    err_invalid_state(
+      "OAuth error text must use the RFC 6749 printable ASCII character set",
+      context = list(param = name)
+    )
+  }
+
   max_bytes <- as.numeric(max_bytes)
   if (!is.finite(max_bytes) || is.na(max_bytes) || max_bytes <= 0) {
     err_invalid_state(
@@ -195,6 +204,41 @@ validate_untrusted_query_string <- function(query_string, max_bytes) {
   invisible(NULL)
 }
 
+#' Validate the direct OAuth callback response shape
+#'
+#' Shared by query and plain form_post callback transports before either path
+#' validates or consumes encrypted state.
+#'
+#' @param code Authorization code, or `NULL`.
+#' @param state Encrypted callback state.
+#' @param error OAuth error code, or `NULL`.
+#' @param context Human-readable callback transport label.
+#' @param abort Function called with an error message for invalid shapes.
+#' @return `"code"` or `"error"` for a valid callback.
+#' @keywords internal
+#' @noRd
+validate_oauth_callback_shape <- function(
+  code,
+  state,
+  error,
+  context = "OAuth callback",
+  abort = err_invalid_state
+) {
+  has_code <- !is.null(code)
+  has_error <- !is.null(error)
+  if (isTRUE(has_code) && isTRUE(has_error)) {
+    abort(paste0(context, " must not contain both code and error."))
+  }
+  if (!isTRUE(has_code) && !isTRUE(has_error)) {
+    abort(paste0(context, " missing code or error."))
+  }
+  if (!is_valid_string(state)) {
+    abort(paste0(context, " missing state."))
+  }
+
+  if (isTRUE(has_error)) "error" else "code"
+}
+
 #' Internal: callback size limits
 #'
 #' Centralizes callback limits used by URL query callbacks and form_post
@@ -206,7 +250,7 @@ validate_untrusted_query_string <- function(query_string, max_bytes) {
 oauth_callback_limits <- function() {
   max_code_bytes <- get_option_positive_number(
     "shinyOAuth.callback_max_code_bytes",
-    4096
+    8192
   )
   max_state_bytes <- get_option_positive_number(
     "shinyOAuth.callback_max_state_bytes",
@@ -251,6 +295,10 @@ oauth_callback_limits <- function() {
 
   list(
     code = max_code_bytes,
+    browser_token = get_option_positive_number(
+      "shinyOAuth.callback_max_browser_token_bytes",
+      256
+    ),
     state = max_state_bytes,
     error = max_error_bytes,
     error_description = max_error_desc_bytes,
@@ -265,7 +313,7 @@ oauth_callback_limits <- function() {
     form_post_body = get_option_positive_number(
       "shinyOAuth.callback_max_form_post_body_bytes",
       derived_query_bytes,
-      max_value = .Machine$integer.max - 1L
+      max_value = .Machine[["integer.max"]] - 1L
     )
   )
 }
@@ -281,4 +329,23 @@ oauth_callback_limits <- function() {
     return(NA_character_)
   }
   as.character(x[[1]])
+}
+# Resolve scalar numeric options without coercing arbitrary R objects. Invalid
+# values retain the caller's documented fallback; range rules stay at the caller.
+numeric_option_or_default <- function(name, default, integer = FALSE) {
+  value <- getOption(name, default)
+  if (
+    !is.numeric(value) ||
+      is.complex(value) ||
+      length(value) != 1L ||
+      is.na(value) ||
+      !is.finite(value)
+  ) {
+    return(default)
+  }
+  if (integer) {
+    value <- suppressWarnings(as.integer(value))
+    if (is.na(value)) return(default)
+  }
+  value
 }

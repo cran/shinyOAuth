@@ -2,8 +2,49 @@
 #
 # Verifies that each pre-configured provider constructor produces an
 # OAuthProvider with the expected properties. Discovery-based providers
-# (Slack, Keycloak, Okta, Auth0) are tested by mocking the discovery
+# (Apple, Slack, Keycloak, Okta, Auth0) are tested by mocking the discovery
 # call to avoid network access.
+
+make_apple_discovery_doc <- function() {
+  jsonlite::toJSON(
+    list(
+      issuer = "https://appleid.apple.com",
+      authorization_endpoint = "https://appleid.apple.com/auth/authorize",
+      token_endpoint = "https://appleid.apple.com/auth/token",
+      revocation_endpoint = "https://appleid.apple.com/auth/revoke",
+      jwks_uri = "https://appleid.apple.com/auth/keys",
+      response_types_supported = list("code"),
+      subject_types_supported = list("public"),
+      response_modes_supported = list("query", "fragment", "form_post"),
+      token_endpoint_auth_methods_supported = list("client_secret_post"),
+      id_token_signing_alg_values_supported = list("RS256")
+    ),
+    auto_unbox = TRUE
+  )
+}
+
+mock_apple_discovery <- function(
+  disc_json = make_apple_discovery_doc(),
+  .env = parent.frame()
+) {
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      testthat::expect_match(
+        as.character(req[["url"]]),
+        "appleid\\.apple\\.com/.well-known/openid-configuration"
+      )
+
+      httr2::response(
+        url = as.character(req[["url"]]),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(as.character(disc_json))
+      )
+    },
+    .package = "shinyOAuth",
+    .env = .env
+  )
+}
 
 # ── Non-discovery providers ─────────────────────────────────────────────────
 
@@ -33,7 +74,7 @@ test_that("oauth_provider_github returns valid OAuthProvider with expected defau
     "application/json"
   )
 
-  # userinfo_id_selector should extract $id (not $sub)
+  # userinfo_id_selector should extract [["id"]] (not [["sub"]])
   fake_ui <- list(id = 12345, login = "octocat")
   expect_identical(p@userinfo_id_selector(fake_ui), "12345")
 })
@@ -41,6 +82,102 @@ test_that("oauth_provider_github returns valid OAuthProvider with expected defau
 test_that("oauth_provider_github allows custom name", {
   p <- oauth_provider_github(name = "my-github")
   expect_identical(p@name, "my-github")
+})
+
+test_that("oauth_provider_apple returns valid OAuthProvider with expected defaults", {
+  mock_apple_discovery()
+
+  p <- oauth_provider_apple()
+
+  expect_s3_class(p, "shinyOAuth::OAuthProvider")
+  expect_identical(p@name, "apple")
+  expect_identical(p@auth_url, "https://appleid.apple.com/auth/authorize")
+  expect_identical(p@token_url, "https://appleid.apple.com/auth/token")
+  expect_identical(p@revocation_url, "https://appleid.apple.com/auth/revoke")
+  expect_true(is.na(p@userinfo_url))
+  expect_true(is.na(p@introspection_url))
+  expect_identical(p@issuer, "https://appleid.apple.com")
+  expect_true(p@use_nonce)
+  expect_true(p@use_pkce)
+  expect_identical(p@pkce_method, "S256")
+  expect_identical(p@token_auth_style, "body")
+  expect_identical(
+    p@response_modes_supported,
+    c("query", "fragment", "form_post")
+  )
+  expect_identical(p@allowed_algs, "RS256")
+  expect_false(p@userinfo_required)
+  expect_false(p@userinfo_id_token_match)
+  expect_true(p@id_token_required)
+  expect_true(p@id_token_validation)
+})
+
+test_that("Apple signed ID tokens accept only documented email verification values", {
+  mock_apple_discovery()
+  local_options(shinyOAuth.skip_id_sig = FALSE)
+  provider <- oauth_provider_apple()
+  client <- oauth_client(
+    provider,
+    client_id = "com.example.app",
+    client_secret = "secret",
+    redirect_uri = "https://app.example/callback",
+    response_mode = "form_post",
+    scopes = "openid email"
+  )
+  key <- openssl::read_key(mtls_pem_fixture("client-key.pem"))
+  jwk <- jsonlite::fromJSON(
+    write_test_jwk(key[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  jwk[["alg"]] <- "RS256"
+  local_mocked_bindings(fetch_jwks = function(...) list(keys = list(jwk)))
+  claims <- list(
+    iss = provider@issuer,
+    aud = client@client_id,
+    sub = "apple-user",
+    iat = as.numeric(Sys.time()),
+    exp = as.numeric(Sys.time()) + 120,
+    nonce = "nonce"
+  )
+  sign <- function(value, signing_key = key) {
+    payload <- c(claims, list(email_verified = value))
+    jose::jwt_encode_sig(do.call(jose::jwt_claim, payload), key = signing_key)
+  }
+  for (value in list(TRUE, FALSE, "true", "false")) {
+    result <- validate_id_token(client, sign(value), expected_nonce = "nonce")
+    expect_identical(
+      result[["email_verified"]],
+      identical(value, TRUE) || identical(value, "true")
+    )
+  }
+  for (value in list("TRUE", "False", "yes", 1, list("true"))) {
+    expect_error(
+      validate_id_token(client, sign(value), expected_nonce = "nonce"),
+      "JSON Boolean",
+      class = "shinyOAuth_id_token_error"
+    )
+  }
+  expect_error(
+    validate_id_token(
+      client,
+      sign("true", openssl::rsa_keygen(2048)),
+      expected_nonce = "nonce"
+    ),
+    class = "shinyOAuth_id_token_error"
+  )
+  client@provider@issuer <- "https://other.example"
+  claims[["iss"]] <- "https://other.example"
+  expect_error(
+    validate_id_token(client, sign("true"), expected_nonce = "nonce"),
+    "JSON Boolean"
+  )
+})
+
+test_that("oauth_provider_apple allows custom name", {
+  mock_apple_discovery()
+
+  p <- oauth_provider_apple(name = "my-apple")
+  expect_identical(p@name, "my-apple")
 })
 
 test_that("oauth_provider_google returns valid OAuthProvider with expected defaults", {
@@ -87,9 +224,16 @@ test_that("oauth_provider_spotify returns valid OAuthProvider with expected defa
   expect_false(p@id_token_required)
   expect_false(p@id_token_validation)
 
-  # userinfo_id_selector should extract $id
-  fake_ui <- list(id = "spotify-user-123", display_name = "DJ Test")
-  expect_identical(p@userinfo_id_selector(fake_ui), "spotify-user-123")
+  fake_ui <- list(account_id = "stable-account", id = "mutable-id")
+  expect_identical(p@userinfo_id_selector(fake_ui), "stable-account")
+  expect_true(is.na(p@userinfo_id_selector(list(id = "old-id"))))
+  legacy <- oauth_provider_spotify(allow_legacy_id = TRUE)
+  expect_identical(legacy@userinfo_id_selector(fake_ui), "stable-account")
+  expect_identical(legacy@userinfo_id_selector(list(id = "old-id")), "old-id")
+  expect_true(is.na(legacy@userinfo_id_selector(list(
+    account_id = "",
+    id = "old"
+  ))))
 })
 
 test_that("oauth_provider_microsoft with common tenant has correct defaults", {
@@ -139,6 +283,34 @@ test_that("oauth_provider_microsoft with GUID tenant enables validation", {
   expect_true(p@id_token_validation)
   expect_true(p@id_token_required)
   expect_true(p@userinfo_id_token_match)
+})
+
+test_that("Microsoft tenant inputs cannot silently disable OIDC validation", {
+  for (tenant in c("contoso.onmicrosoft.com", "unknown", "Common")) {
+    expect_error(
+      oauth_provider_microsoft(tenant = tenant),
+      "directory GUID",
+      class = "shinyOAuth_input_error"
+    )
+    expect_error(
+      oauth_provider_microsoft(tenant = tenant, id_token_validation = TRUE),
+      "directory GUID",
+      class = "shinyOAuth_input_error"
+    )
+  }
+  for (value in list(NA, "TRUE", 1, logical(), c(TRUE, FALSE))) {
+    expect_error(
+      oauth_provider_microsoft(id_token_validation = value),
+      "single non-missing logical",
+      class = "shinyOAuth_input_error"
+    )
+  }
+  provider <- oauth_provider_microsoft(
+    tenant = "contoso.onmicrosoft.com",
+    id_token_validation = FALSE
+  )
+  expect_false(provider@id_token_validation)
+  expect_false(provider@use_nonce)
 })
 
 test_that("oauth_provider_microsoft respects explicit id_token_validation override", {
@@ -239,6 +411,16 @@ test_that("oauth_provider_oidc passes through extra args", {
   expect_identical(p@extra_auth_params, list(prompt = "consent"))
 })
 
+test_that("oauth_provider_oidc allows token authentication overrides", {
+  p <- oauth_provider_oidc(
+    name = "body-auth",
+    base_url = "https://auth.example.com",
+    token_auth_style = "body"
+  )
+
+  expect_identical(p@token_auth_style, "body")
+})
+
 # ── Discovery-based providers (mocked) ──────────────────────────────────────
 
 # Minimal OIDC discovery document for mocking
@@ -258,6 +440,8 @@ make_discovery_doc <- function(
       userinfo_endpoint = userinfo_endpoint,
       introspection_endpoint = introspection_endpoint,
       jwks_uri = jwks_uri,
+      response_types_supported = list("code"),
+      subject_types_supported = list("public"),
       token_endpoint_auth_methods_supported = list(
         "client_secret_basic",
         "client_secret_post"
@@ -275,7 +459,7 @@ test_that("oauth_provider_keycloak constructs correct issuer from base_url + rea
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(as.character(disc_json))
@@ -286,7 +470,8 @@ test_that("oauth_provider_keycloak constructs correct issuer from base_url + rea
 
   # Allow non-HTTPS for localhost (Keycloak dev)
   withr::local_options(list(
-    shinyOAuth.allowed_non_https_hosts = c("localhost")
+    shinyOAuth.allowed_non_https_hosts = c("localhost"),
+    shinyOAuth.allow_insecure_oidc_loopback = TRUE
   ))
 
   p <- oauth_provider_keycloak(
@@ -298,6 +483,37 @@ test_that("oauth_provider_keycloak constructs correct issuer from base_url + rea
   expect_identical(p@name, "keycloak-myrealm")
   expect_identical(p@issuer, issuer)
   expect_identical(p@token_auth_style, "body")
+  expect_true(p@jarm_tolerate_duplicate_top_level_iss)
+})
+
+test_that("oauth_provider_keycloak lets callers override duplicate JARM iss tolerance", {
+  issuer <- "http://localhost:8080/realms/myrealm"
+  disc_json <- make_discovery_doc(issuer)
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req[["url"]]),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(as.character(disc_json))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  withr::local_options(list(
+    shinyOAuth.allowed_non_https_hosts = c("localhost"),
+    shinyOAuth.allow_insecure_oidc_loopback = TRUE
+  ))
+
+  p <- oauth_provider_keycloak(
+    base_url = "http://localhost:8080",
+    realm = "myrealm",
+    jarm_tolerate_duplicate_top_level_iss = FALSE
+  )
+
+  expect_false(p@jarm_tolerate_duplicate_top_level_iss)
 })
 
 test_that("oauth_provider_okta constructs correct issuer from domain + auth_server", {
@@ -307,7 +523,7 @@ test_that("oauth_provider_okta constructs correct issuer from domain + auth_serv
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(as.character(disc_json))
@@ -326,14 +542,40 @@ test_that("oauth_provider_okta constructs correct issuer from domain + auth_serv
   expect_identical(p@issuer, issuer)
 })
 
-test_that("oauth_provider_auth0 constructs correct issuer from domain", {
-  issuer <- "https://my-domain.auth0.com"
+test_that("oauth_provider_okta can target the org authorization server", {
+  issuer <- "https://dev-123456.okta.com"
   disc_json <- make_discovery_doc(issuer)
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(as.character(disc_json))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  p <- oauth_provider_okta(
+    domain = "dev-123456.okta.com",
+    auth_server = NULL
+  )
+
+  expect_s3_class(p, "shinyOAuth::OAuthProvider")
+  expect_identical(p@name, "okta")
+  expect_identical(p@issuer, issuer)
+})
+
+test_that("oauth_provider_auth0 constructs correct issuer from domain", {
+  issuer <- "https://my-domain.auth0.com/"
+  disc_json <- make_discovery_doc(issuer)
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(as.character(disc_json))
@@ -349,14 +591,37 @@ test_that("oauth_provider_auth0 constructs correct issuer from domain", {
   expect_identical(p@issuer, issuer)
 })
 
-test_that("oauth_provider_auth0 includes audience in extra_auth_params", {
+test_that("oauth_provider_auth0 rejects a discovered issuer without its trailing slash", {
   issuer <- "https://my-domain.auth0.com"
   disc_json <- make_discovery_doc(issuer)
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
+        status = 200,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(as.character(disc_json))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+
+  expect_error(
+    oauth_provider_auth0(domain = "my-domain.auth0.com"),
+    class = "shinyOAuth_config_error",
+    regexp = "issuer mismatch"
+  )
+})
+
+test_that("oauth_provider_auth0 includes audience in extra_auth_params", {
+  issuer <- "https://my-domain.auth0.com/"
+  disc_json <- make_discovery_doc(issuer)
+
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      httr2::response(
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(as.character(disc_json))
@@ -383,7 +648,7 @@ test_that("oauth_provider_slack constructs correct issuer", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(as.character(disc_json))
@@ -421,6 +686,14 @@ test_that("oauth_provider_okta rejects empty domain", {
   expect_error(
     oauth_provider_okta(domain = ""),
     "domain must be a non-empty string",
+    class = "shinyOAuth_input_error"
+  )
+})
+
+test_that("oauth_provider_okta rejects empty auth_server", {
+  expect_error(
+    oauth_provider_okta(domain = "dev-123456.okta.com", auth_server = ""),
+    "auth_server must be NULL or a non-empty string",
     class = "shinyOAuth_input_error"
   )
 })

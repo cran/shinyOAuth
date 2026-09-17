@@ -80,6 +80,9 @@ reject_redirect_response <- function(resp, context = "request") {
     if (inherits(location, "try-error")) {
       location <- NA_character_
     }
+    location <- tryCatch(otel_http_url_full(location), error = function(...) {
+      NULL
+    })
     err_http(
       c(
         "x" = paste0(
@@ -90,7 +93,7 @@ reject_redirect_response <- function(resp, context = "request") {
           ")"
         ),
         "!" = "Redirects are disabled for security; endpoint may be misconfigured",
-        "i" = if (!is.na(location)) {
+        "i" = if (is_valid_string(location)) {
           paste0("Would have redirected to: ", location)
         } else {
           NULL
@@ -101,6 +104,29 @@ reject_redirect_response <- function(resp, context = "request") {
     )
   }
   TRUE
+}
+
+#' Internal: resolve the outbound HTTP timeout
+#'
+#' @return Validated timeout in seconds, bounded to curl's integer range.
+#' @keywords internal
+#' @noRd
+resolve_http_timeout <- function() {
+  timeout <- suppressWarnings(tryCatch(
+    as.numeric(getOption("shinyOAuth.timeout", 5)),
+    error = function(...) NA_real_
+  ))
+  if (
+    length(timeout) != 1L ||
+      is.na(timeout) ||
+      !is.finite(timeout) ||
+      timeout < 0.001
+  ) {
+    return(10)
+  }
+
+  # curl represents timeout_ms as a signed 32-bit integer.
+  min(timeout, as.double(.Machine[["integer.max"]]) / 1000)
 }
 
 #' Internal: HTTP defaults (timeout and User-Agent)
@@ -116,16 +142,20 @@ reject_redirect_response <- function(resp, context = "request") {
 #'   applied.
 #' @keywords internal
 #' @noRd
-add_req_defaults <- function(req) {
+add_req_defaults <- function(
+  req,
+  client = NULL,
+  tls_minimum = client_tls_minimum(client)
+) {
   # If a test double/fake is passed, do nothing
   if (!inherits(req, "httr2_request")) {
     return(req)
   }
-  # Resolve timeout (seconds)
-  t <- suppressWarnings(as.numeric(getOption("shinyOAuth.timeout", 5)))
-  if (!is.finite(t) || is.na(t) || t <= 0) {
-    t <- 10
+  if (!is.null(tls_minimum)) {
+    req[["shinyOAuth_tls_minimum"]] <- tls_minimum
   }
+  # Resolve timeout (seconds)
+  timeout <- resolve_http_timeout()
 
   # Resolve UA
   ua <- getOption("shinyOAuth.user_agent", NULL)
@@ -140,7 +170,11 @@ add_req_defaults <- function(req) {
         utils::packageDescription("shinyOAuth"),
         error = function(...) NULL
       )
-      ver <- if (!is.null(d$Version)) d$Version else "dev"
+      ver <- if (!is.null(d[["Version"]])) {
+        d[["Version"]]
+      } else {
+        "dev"
+      }
     }
     ua <- sprintf(
       "shinyOAuth/%s R/%s httr2/%s",
@@ -149,16 +183,15 @@ add_req_defaults <- function(req) {
       as.character(utils::packageVersion("httr2"))
     )
   }
-  # Max response body size (bytes). Curl aborts the transfer when the server
-  # advertises Content-Length exceeding this value, preventing large allocations
-  # from malicious or compromised endpoints. Default 1 MiB. Chunked responses
-  # without Content-Length are caught post-download by check_resp_body_size().
+  # Early encoded transfer limit. req_perform_bounded() also enforces the
+  # decoded budget independently of the linked libcurl version.
   max_bytes <- resolve_max_body_bytes()
 
   req |>
-    httr2::req_timeout(t) |>
+    httr2::req_timeout(timeout) |>
     httr2::req_user_agent(ua) |>
-    httr2::req_options(maxfilesize = max_bytes)
+    httr2::req_options(maxfilesize = max_bytes) |>
+    req_apply_tls_policy()
 }
 
 ## 1.2 Client-auth request shaping ---------------------------------------------
@@ -181,26 +214,43 @@ apply_direct_client_auth <- function(req, params, client, context) {
   )
 
   if (identical(tas, "header")) {
+    encoded_client_id <- encode_client_secret_basic_credential(
+      client@client_id
+    )
+    encoded_client_secret <- encode_client_secret_basic_credential(
+      client@client_secret
+    )
     req <- req |>
-      httr2::req_auth_basic(client@client_id, client@client_secret)
+      httr2::req_auth_basic(encoded_client_id, encoded_client_secret)
   } else if (identical(tas, "body")) {
-    params$client_id <- params$client_id %||% client@client_id
+    params[["client_id"]] <- params[["client_id"]] %||%
+      client@client_id
     # client_secret_post can omit client_secret for PKCE/public-like flows,
     # but it still sends the secret when one is configured.
     if (is_valid_string(client@client_secret)) {
-      params$client_secret <- client@client_secret
+      params[["client_secret"]] <- client@client_secret
     }
   } else if (identical(tas, "public")) {
-    params$client_id <- params$client_id %||% client@client_id
+    params[["client_id"]] <- params[["client_id"]] %||%
+      client@client_id
   } else if (tas %in% MTLS_TOKEN_AUTH_STYLES) {
-    params$client_id <- params$client_id %||% client@client_id
+    params[["client_id"]] <- params[["client_id"]] %||%
+      client@client_id
   } else if (
     identical(tas, "client_secret_jwt") || identical(tas, "private_key_jwt")
   ) {
-    params$client_id <- params$client_id %||% client@client_id
-    params$client_assertion_type <-
+    if (
+      client_uses_smart(client) &&
+        identical(tas, "private_key_jwt") &&
+        context %in% c("token_exchange", "refresh_token")
+    ) {
+      params[["client_id"]] <- NULL
+    } else {
+      params[["client_id"]] <- params[["client_id"]] %||% client@client_id
+    }
+    params[["client_assertion_type"]] <-
       "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-    params$client_assertion <- build_client_assertion(
+    params[["client_assertion"]] <- build_client_assertion(
       client,
       aud = resolve_client_assertion_audience(client, req)
     )
@@ -219,6 +269,25 @@ apply_direct_client_auth <- function(req, params, client, context) {
   }
 
   list(req = req, params = params)
+}
+
+#' Encode one client_secret_basic credential
+#'
+#' RFC 6749 section 2.3.1 requires the client identifier and client secret to
+#' each be application/x-www-form-urlencoded before HTTP Basic joins them with
+#' a colon and Base64-encodes the result.
+#'
+#' @param value Client identifier or client secret.
+#' @return Form-encoded scalar string.
+#' @keywords internal
+#' @noRd
+encode_client_secret_basic_credential <- function(value) {
+  encoded <- utils::URLencode(
+    enc2utf8(value),
+    reserved = TRUE,
+    repeated = TRUE
+  )
+  gsub("%20", "+", encoded, fixed = TRUE)
 }
 
 #' Attach per-attempt JWT client-assertion rebuilding to a request
@@ -261,15 +330,15 @@ req_refresh_jwt_client_assertion_on_retry <- function(
   body_mode <- match.arg(body_mode)
   base_params <- compact_list(params)
 
-  req$shinyOAuth_prepare_attempt <- function(attempt_req, attempt) {
+  req[["shinyOAuth_prepare_attempt"]] <- function(attempt_req, attempt) {
     prepared <- apply_direct_client_auth(
       req = attempt_req,
       params = base_params,
       client = client,
       context = context
     )
-    attempt_req <- prepared$req
-    attempt_params <- compact_list(prepared$params)
+    attempt_req <- prepared[["req"]]
+    attempt_params <- compact_list(prepared[["params"]])
 
     if (identical(body_mode, "encoded")) {
       return(req_body_form_encoded(attempt_req, attempt_params))
@@ -289,12 +358,25 @@ req_refresh_jwt_client_assertion_on_retry <- function(
 #' @keywords internal
 #' @noRd
 resolve_max_body_bytes <- function() {
-  max_bytes <- suppressWarnings(
-    as.numeric(getOption("shinyOAuth.max_body_bytes", 1048576L))
-  )
-  if (!is.finite(max_bytes) || is.na(max_bytes) || max_bytes < 1024) {
-    max_bytes <- 1048576L
+  max_bytes <- suppressWarnings(tryCatch(
+    as.numeric(getOption("shinyOAuth.max_body_bytes", 1048576L)),
+    error = function(...) NA_real_
+  ))
+  if (
+    length(max_bytes) != 1L ||
+      is.na(max_bytes) ||
+      !is.finite(max_bytes) ||
+      max_bytes < 1024
+  ) {
+    return(1048576L)
   }
+
+  # req_perform_bounded() reads one extra byte to detect an oversized body.
+  # Leave room for that sentinel without overflowing readBin()'s integer n.
+  max_bytes <- min(
+    max_bytes,
+    as.double(.Machine[["integer.max"]]) - 1
+  )
   as.integer(max_bytes)
 }
 
@@ -323,7 +405,7 @@ check_resp_body_size <- function(
   if (!inherits(resp, "httr2_response")) {
     return(invisible(TRUE))
   }
-  body_len <- length(resp$body)
+  body_len <- length(resp[["body"]])
   if (body_len > max_bytes) {
     err_parse(
       c(
@@ -340,12 +422,101 @@ check_resp_body_size <- function(
       ),
       context = list(
         phase = context,
+        reason = "body_too_large",
         body_bytes = body_len,
         max_bytes = max_bytes
       )
     )
   }
   invisible(TRUE)
+}
+
+# Download encoded bytes to a temporary file, then read at most the decoded
+# budget plus one sentinel byte. libcurl's connection API can buffer an entire
+# decompression burst before returning to R, so it is not a decoded-size guard.
+req_perform_bounded <- function(req) {
+  req <- req_apply_tls_policy(req)
+  # shinyOAuth owns retries and regenerates one-shot headers for each attempt.
+  req <- httr2::req_retry(req, max_tries = 1L)
+  max_bytes <- resolve_max_body_bytes()
+  path <- tempfile("shinyOAuth-response-")
+  on.exit(unlink(path), add = TRUE)
+  download_exceeded <- FALSE
+  req <- httr2::req_options(
+    req,
+    accept_encoding = "gzip",
+    http_content_decoding = FALSE,
+    maxfilesize = max_bytes,
+    noprogress = FALSE,
+    progressfunction = function(down, up) {
+      download_exceeded <<- down[[2L]] > max_bytes
+      !download_exceeded
+    }
+  )
+  resp <- tryCatch(httr2::req_perform(req, path = path), error = function(e) {
+    current <- e
+    while (!is.null(current)) {
+      if (inherits(current, "curl_error_filesize_exceeded")) {
+        download_exceeded <- TRUE
+        break
+      }
+      current <- current[["parent"]]
+    }
+    if (download_exceeded) {
+      err_parse(
+        "Response body too large during encoded download",
+        context = list(reason = "body_too_large", max_bytes = max_bytes)
+      )
+    }
+    stop(e)
+  })
+  # httr2 mocks return an already buffered response.
+  if (is.raw(resp[["body"]])) {
+    check_resp_body_size(resp)
+    return(resp)
+  }
+  if (file.info(path)[["size"]] > max_bytes) {
+    err_parse(
+      "Response body too large during encoded download",
+      context = list(reason = "body_too_large", max_bytes = max_bytes)
+    )
+  }
+  encoding <- tolower(trimws(
+    httr2::resp_header(resp, "content-encoding") %||% "identity"
+  ))
+  if (!encoding %in% c("identity", "gzip", "x-gzip")) {
+    err_parse(
+      "Unsupported response Content-Encoding; expected identity or gzip",
+      context = list(reason = "unsupported_encoding")
+    )
+  }
+  conn <- if (encoding %in% c("gzip", "x-gzip")) {
+    gzfile(path, "rb")
+  } else {
+    file(path, "rb")
+  }
+  on.exit(close(conn), add = TRUE, after = FALSE)
+  resp[["body"]] <- readBin(conn, "raw", n = max_bytes + 1)
+  check_resp_body_size(resp)
+  resp
+}
+
+#' Internal: resolve retryable HTTP statuses
+#'
+#' @return Unique integer status codes, with safe defaults when none are valid.
+#' @keywords internal
+#' @noRd
+resolve_retry_status <- function() {
+  default_status <- c(408L, 429L, 500:599)
+  retry_status <- suppressWarnings(tryCatch(
+    as.integer(getOption("shinyOAuth.retry_status", default_status)),
+    error = function(...) NA_integer_
+  ))
+  retry_status <- unique(retry_status[!is.na(retry_status)])
+  if (!length(retry_status)) {
+    return(default_status)
+  }
+  retry_status
 }
 
 #' Internal: Perform an httr2 request with retries
@@ -376,6 +547,7 @@ check_resp_body_size <- function(
 #'  - shinyOAuth.retry_max_tries (default 3)
 #'  - shinyOAuth.retry_backoff_base (seconds, default 0.5)
 #'  - shinyOAuth.retry_backoff_cap (seconds, default 5)
+#'  - shinyOAuth.retry_after_cap (server-requested seconds, default 60)
 #'  - shinyOAuth.retry_status (integer vector; default c(408, 429, 500:599))
 #'
 #' @return httr2 response object. Transport failures raise a typed transport
@@ -395,7 +567,15 @@ req_with_retry <- function(req, idempotent = TRUE) {
   # immediately returning non-retryable error responses to the caller.
   req <- httr2::req_error(req, is_error = \(resp) FALSE)
 
-  prepare_attempt <- req$shinyOAuth_prepare_attempt %||% NULL
+  prepare_attempt <- req[["shinyOAuth_prepare_attempt"]] %||% NULL
+  response_observer <- req[["shinyOAuth_response_observer"]] %||% NULL
+
+  observe_response <- function(resp) {
+    if (inherits(resp, "httr2_response") && is.function(response_observer)) {
+      response_observer(resp)
+    }
+    invisible(NULL)
+  }
 
   prepare_attempt_req <- function(attempt) {
     attempt_req <- req
@@ -403,7 +583,8 @@ req_with_retry <- function(req, idempotent = TRUE) {
       attempt_req <- prepare_attempt(req, attempt)
     }
     if (inherits(attempt_req, "httr2_request")) {
-      attempt_req$shinyOAuth_prepare_attempt <- NULL
+      attempt_req[["shinyOAuth_prepare_attempt"]] <- NULL
+      attempt_req[["shinyOAuth_response_observer"]] <- NULL
     }
     attempt_req
   }
@@ -414,9 +595,12 @@ req_with_retry <- function(req, idempotent = TRUE) {
   # or triggering refresh-token replay detection (full session revocation).
   if (!isTRUE(idempotent)) {
     attempt_req <- prepare_attempt_req(1L)
-    resp <- try(httr2::req_perform(attempt_req), silent = TRUE)
+    resp <- try(req_perform_bounded(attempt_req), silent = TRUE)
     if (inherits(resp, "try-error")) {
-      parent <- attr(resp, "condition")
+      parent <- attr(resp, "condition", exact = TRUE)
+      if (inherits(parent, "shinyOAuth_parse_error")) {
+        stop(parent)
+      }
       if (is.null(parent)) {
         parent <- simpleError(as.character(resp))
       }
@@ -424,63 +608,75 @@ req_with_retry <- function(req, idempotent = TRUE) {
         "Transport error performing HTTP request",
         context = compact_list(list(
           method = tryCatch(
-            toupper(as.character(attempt_req$method)),
+            toupper(as.character(attempt_req[["method"]])),
             error = function(...) NA_character_
           ),
           url = tryCatch(
-            as.character(attempt_req$url),
+            as.character(attempt_req[["url"]]),
             error = function(...) NA_character_
           )
         )),
         parent = parent
       )
     }
+    observe_response(resp)
     return(resp)
   }
 
-  max_tries <- suppressWarnings(as.integer(getOption(
+  max_tries <- numeric_option_or_default(
     "shinyOAuth.retry_max_tries",
-    3L
-  )))
+    3L,
+    integer = TRUE
+  )
   if (!is.finite(max_tries) || is.na(max_tries) || max_tries < 1L) {
     max_tries <- 3L
   }
-  base <- suppressWarnings(as.numeric(getOption(
+  base <- numeric_option_or_default(
     "shinyOAuth.retry_backoff_base",
     0.5
-  )))
+  )
   if (!is.finite(base) || is.na(base) || base <= 0) {
     base <- 0.5
   }
-  cap <- suppressWarnings(as.numeric(getOption(
+  cap <- numeric_option_or_default(
     "shinyOAuth.retry_backoff_cap",
     5
-  )))
+  )
   if (!is.finite(cap) || is.na(cap) || cap <= 0) {
     cap <- 5
   }
-  retry_status <- getOption("shinyOAuth.retry_status", c(408L, 429L, 500:599))
-  retry_status <- unique(as.integer(retry_status))
-  # Drop malformed entries to avoid NA propagation in %in% checks
-  retry_status <- retry_status[!is.na(retry_status)]
-  # If everything was invalid, restore safe defaults to preserve guardrails
-  if (length(retry_status) == 0L) {
-    retry_status <- c(408L, 429L, 500:599)
+  retry_after_cap <- numeric_option_or_default(
+    "shinyOAuth.retry_after_cap",
+    60
+  )
+  if (
+    length(retry_after_cap) != 1L ||
+      !is.finite(retry_after_cap) ||
+      is.na(retry_after_cap) ||
+      retry_after_cap <= 0
+  ) {
+    retry_after_cap <- 60
   }
+  retry_status <- resolve_retry_status()
 
   last_err <- NULL
   for (i in seq_len(max_tries)) {
     attempt_req <- prepare_attempt_req(i)
     # Try perform; catch transport errors
-    resp <- try(httr2::req_perform(attempt_req), silent = TRUE)
+    resp <- try(req_perform_bounded(attempt_req), silent = TRUE)
     # Transport error -> retry
     if (inherits(resp, "try-error")) {
+      parent <- attr(resp, "condition", exact = TRUE)
+      if (inherits(parent, "shinyOAuth_parse_error")) {
+        stop(parent)
+      }
       last_err <- resp
       # Backoff on transport errors (no Retry-After available)
       if (i < max_tries) {
         Sys.sleep(retry_backoff_delay(i, base = base, cap = cap))
       }
     } else if (inherits(resp, "httr2_response")) {
+      observe_response(resp)
       status <- try(httr2::resp_status(resp), silent = TRUE)
       status <- if (!inherits(status, "try-error")) {
         as.integer(status)
@@ -500,9 +696,10 @@ req_with_retry <- function(req, idempotent = TRUE) {
       wait <- parse_retry_after_header(resp)
       if (is.na(wait)) {
         wait <- retry_backoff_delay(i, base = base, cap = cap)
+      } else {
+        wait <- min(wait, retry_after_cap)
       }
-      # Avoid excessive sleep in tests; cap at 10s for sanity
-      wait <- max(0, min(wait, 10))
+      wait <- max(0, wait)
       if (i < max_tries && wait > 0) Sys.sleep(wait)
     } else {
       # Unexpected return; break
@@ -512,10 +709,10 @@ req_with_retry <- function(req, idempotent = TRUE) {
 
   # Out of tries: if we have a response, return it for caller to handle
   if (inherits(last_err, "shinyOAuth_transient_response")) {
-    return(last_err$response)
+    return(last_err[["response"]])
   }
   # Otherwise, rethrow transport error as a simple error for caller logic
-  parent <- attr(last_err, "condition")
+  parent <- attr(last_err, "condition", exact = TRUE)
   if (is.null(parent) && inherits(last_err, "try-error")) {
     parent <- simpleError(as.character(last_err))
   }
@@ -524,10 +721,12 @@ req_with_retry <- function(req, idempotent = TRUE) {
     "Transport error performing HTTP request",
     context = compact_list(list(
       method = tryCatch(
-        toupper(as.character(req$method)),
+        toupper(as.character(req[["method"]])),
         error = function(...) NA_character_
       ),
-      url = tryCatch(as.character(req$url), error = function(...) NA_character_)
+      url = tryCatch(as.character(req[["url"]]), error = function(...) {
+        NA_character_
+      })
     )),
     parent = parent
   )
@@ -542,10 +741,12 @@ req_with_retry <- function(req, idempotent = TRUE) {
 #' from `req_with_retry()` so retry-delay parsing stays testable on its own.
 #'
 #' @param resp httr2 response object.
-#' @return Retry delay in seconds, or `NA_real_` when parsing fails.
+#' @param now Current time, used as the origin for HTTP-date delays.
+#' @return Nonnegative retry delay in seconds (zero for elapsed dates), or
+#'   `NA_real_` when parsing fails.
 #' @keywords internal
 #' @noRd
-parse_retry_after_header <- function(resp) {
+parse_retry_after_header <- function(resp, now = Sys.time()) {
   ra <- try(httr2::resp_header(resp, "retry-after"), silent = TRUE)
   if (inherits(ra, "try-error") || !is_valid_string(ra)) {
     return(NA_real_)
@@ -556,21 +757,28 @@ parse_retry_after_header <- function(resp) {
     return(ifelse(is.finite(val) && !is.na(val) && val >= 0, val, NA_real_))
   }
 
+  # HTTP-date uses English day/month names regardless of the application's
+  # locale (RFC 9110 section 5.6.7). Restore LC_TIME even if parsing fails.
+  old_locale <- Sys.getlocale("LC_TIME")
+  on.exit(Sys.setlocale("LC_TIME", old_locale), add = TRUE)
+  Sys.setlocale("LC_TIME", "C")
   dt <- try(
     as.POSIXct(
       ra,
       tz = "GMT",
       tryFormats = c(
-        "%a, %d %b %Y %H:%M:%S %Z",
-        "%A, %d-%b-%y %H:%M:%S %Z",
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%A, %d-%b-%y %H:%M:%S GMT",
         "%a %b %d %H:%M:%S %Y"
       )
     ),
     silent = TRUE
   )
   if (!inherits(dt, "try-error") && !is.na(dt)) {
-    delta <- as.numeric(dt - Sys.time())
-    return(ifelse(delta > 0, delta, NA_real_))
+    delta <- as.numeric(difftime(dt, now, units = "secs"))
+    if (is.finite(delta)) {
+      return(max(0, delta))
+    }
   }
   NA_real_
 }

@@ -45,10 +45,12 @@ get_current_shiny_request <- function() {
   if (is.null(sess)) {
     return(NULL)
   }
-  # Accessing session$request under shiny::testServer emits warnings because
+  # Accessing session[["request"]] under shiny::testServer emits warnings because
   # the Rook request is not fully simulated. We only need a best-effort read,
   # so silence those warnings to keep tests/CI noise-free.
-  req <- suppressWarnings(tryCatch(sess$request, error = function(...) NULL))
+  req <- suppressWarnings(tryCatch(sess[["request"]], error = function(...) {
+    NULL
+  }))
   if (is.null(req)) {
     return(NULL)
   }
@@ -68,7 +70,7 @@ get_current_shiny_session_token <- function() {
   if (is.null(sess)) {
     return(NA_character_)
   }
-  .scalar_chr(tryCatch(sess$token, error = function(...) NULL))
+  .scalar_chr(tryCatch(sess[["token"]], error = function(...) NULL))
 }
 
 #' Capture the current HTTP summary for audit events
@@ -150,21 +152,21 @@ normalize_shiny_session_context <- function(shiny_session) {
 
   current_pid <- Sys.getpid()
   main_pid <- suppressWarnings(as.integer(
-    normalized$main_process_id %||% NA_integer_
+    normalized[["main_process_id"]] %||% NA_integer_
   ))
   process_pid <- suppressWarnings(as.integer(
-    normalized$process_id %||% NA_integer_
+    normalized[["process_id"]] %||% NA_integer_
   ))
 
-  if (isTRUE(normalized$is_async)) {
+  if (isTRUE(normalized[["is_async"]])) {
     if (!is.na(process_pid)) {
-      normalized$process_id <- process_pid
+      normalized[["process_id"]] <- process_pid
       return(normalized)
     }
 
     if (!is.na(main_pid) && identical(as.integer(current_pid), main_pid)) {
-      normalized$is_async <- FALSE
-      normalized$process_id <- current_pid
+      normalized[["is_async"]] <- FALSE
+      normalized[["process_id"]] <- current_pid
       return(normalized)
     }
 
@@ -172,13 +174,13 @@ normalize_shiny_session_context <- function(shiny_session) {
       isTRUE(is_async_worker_context()) ||
         (!is.na(main_pid) && !identical(as.integer(current_pid), main_pid))
     ) {
-      normalized$process_id <- current_pid
+      normalized[["process_id"]] <- current_pid
       return(normalized)
     }
   }
 
-  if (!isTRUE(normalized$is_async) && is.na(process_pid)) {
-    normalized$process_id <- current_pid
+  if (!isTRUE(normalized[["is_async"]]) && is.na(process_pid)) {
+    normalized[["process_id"]] <- current_pid
   }
 
   normalized
@@ -195,8 +197,8 @@ normalize_shiny_session_context <- function(shiny_session) {
 #' @keywords internal
 #' @noRd
 set_async_session_context <- function(ctx) {
-  old <- .async_context_env$current
-  .async_context_env$current <- ctx
+  old <- .async_context_env[["current"]]
+  .async_context_env[["current"]] <- ctx
   invisible(old)
 }
 
@@ -210,8 +212,8 @@ set_async_session_context <- function(ctx) {
 #' @keywords internal
 #' @noRd
 set_async_worker_context <- function(is_worker) {
-  old <- isTRUE(.async_context_env$is_worker)
-  .async_context_env$is_worker <- isTRUE(is_worker)
+  old <- isTRUE(.async_context_env[["is_worker"]])
+  .async_context_env[["is_worker"]] <- isTRUE(is_worker)
   invisible(old)
 }
 
@@ -222,7 +224,7 @@ set_async_worker_context <- function(is_worker) {
 #' @keywords internal
 #' @noRd
 is_async_worker_context <- function() {
-  isTRUE(.async_context_env$is_worker)
+  isTRUE(.async_context_env[["is_worker"]])
 }
 
 #' Get the current fallback Shiny session context
@@ -231,7 +233,7 @@ is_async_worker_context <- function() {
 #' @keywords internal
 #' @noRd
 get_async_session_context <- function() {
-  .async_context_env$current
+  .async_context_env[["current"]]
 }
 
 #' Evaluate code with fallback Shiny session context installed
@@ -247,7 +249,7 @@ get_async_session_context <- function() {
 with_async_session_context <- function(ctx, code) {
   # Inject the worker's process_id into the context
   if (!is.null(ctx)) {
-    ctx$process_id <- Sys.getpid()
+    ctx[["process_id"]] <- Sys.getpid()
   }
 
   old <- set_async_session_context(ctx)
@@ -271,8 +273,10 @@ augment_with_shiny_context <- function(event) {
   # If a caller already provided a shiny_session list, do not override.
   # Normalize it first so borrowed async contexts pick up worker-local fields,
   # or are corrected when the event is still emitted on the main process.
-  if (!is.null(event$shiny_session)) {
-    event$shiny_session <- normalize_shiny_session_context(event$shiny_session)
+  if (!is.null(event[["shiny_session"]])) {
+    event[["shiny_session"]] <- normalize_shiny_session_context(
+      event[["shiny_session"]]
+    )
     return(event)
   }
 
@@ -281,7 +285,7 @@ augment_with_shiny_context <- function(event) {
 
   # If we have reactive domain context, use it (main thread)
   if (!is.null(http) || !is.na(tok)) {
-    event$shiny_session <- list(
+    event[["shiny_session"]] <- list(
       token = if (!is.na(tok)) tok else NULL,
       http = http,
       is_async = FALSE, # Not pre-captured, so running on main R process
@@ -295,7 +299,7 @@ augment_with_shiny_context <- function(event) {
 
   async_ctx <- get_async_session_context()
   if (!is.null(async_ctx)) {
-    event$shiny_session <- async_ctx
+    event[["shiny_session"]] <- async_ctx
   }
 
   event
@@ -330,7 +334,7 @@ call_with_optional_shiny_session <- function(
   }
 
   if (!is.null(fn_formals) && ("shiny_session" %in% fn_formals || has_dots)) {
-    args$shiny_session <- shiny_session
+    args[["shiny_session"]] <- shiny_session
   }
   do.call(fn, args)
 }

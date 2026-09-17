@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Keep and use multiple OAuth authorizations</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Keep and use multiple OAuth
+authorizations</h1>
+
+
+
+<p>shinyOAuth allows you to keep multiple OAuth authorizations in one
+Shiny app. Users can connect several services, choose which saved
+authorization to use for a request, and disconnect each one
+separately.</p>
+<p>This is useful for a dashboard that combines data from several APIs,
+or an app where users need access to several accounts at the same
+service.</p>
+<p>This vignette builds an app that connects to two services and reads
+data from either one. It uses browser retention to keep both
+authorizations available when the user returns from a provider’s login
+page.</p>
+<div id="client-configuration-and-connections" class="section level2">
+<h2>Client configuration and connections</h2>
+<p>Create an <code>OAuthClient</code> for each service with its
+registration details, scopes and API addresses. Put the clients in a
+named list and pass it to <code>oauth_connections()</code>. Your app
+uses those names to choose which service to connect when a user clicks a
+Connect button.</p>
+<p>Each successful authorization creates a separate connection. Inside
+<code>server()</code>, retrieve that <code>OAuthConnection</code> to
+make requests with its current credentials.</p>
+<p>One client can have several connections. Connecting A again creates
+another authorization alongside the first. Account selection happens at
+the provider; it may reuse the account already signed in there.</p>
+<p>A provider may also return the same refresh credential for both
+connections. The manager queues overlapping asynchronous refreshes for
+that credential. If it rotates or its refresh outcome is uncertain,
+other connections holding the old credential become uncertain and
+require authorization again. The manager keeps their account identity
+and permissions separate. Successful revocation also stops use of known
+copies of the revoked credential within that manager.</p>
+<p>For apps that need one authorization per Shiny session, see the
+<code>oauth_ui()</code> and <code>oauth_module_server()</code> example
+in <a href="usage.html">Usage</a>.</p>
+</div>
+<div id="register-two-clients" class="section level2">
+<h2>Register two clients</h2>
+<p>This template uses two fictional services. Replace their endpoints,
+credentials, scope names and API path with values from your providers’
+documentation. It assumes authorization code flow with S256 PKCE and
+confidential clients using HTTP Basic client authentication. The
+providers must support that registration.</p>
+<p>Register these exact redirect URIs with the respective services:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Service</th>
+<th>Redirect URI</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>A</td>
+<td><code>http://127.0.0.1:8100/callback/a</code></td>
+</tr>
+<tr class="even">
+<td>B</td>
+<td><code>http://127.0.0.1:8100/callback/b</code></td>
+</tr>
+</tbody>
+</table>
+<p>These loopback HTTP addresses are for local development, if your
+providers permit them. Use your public HTTPS origin and corresponding
+registered callbacks when deploying, and omit the owner’s
+<code>allow_http_loopback</code> exception. Store the two client IDs and
+secrets in the environment variables used below, outside source
+control.</p>
+<p>Copy the next three code blocks, in order, into
+<code>app.R</code>.</p>
+<div id="configure-clients-outside-server" class="section level3">
+<h3>1. Configure clients outside <code>server()</code></h3>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(shiny)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">library</span>(shinyOAuth)</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>app_origin <span class="ot">&lt;-</span> <span class="st">&quot;http://127.0.0.1:8100&quot;</span></span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>callbacks <span class="ot">&lt;-</span> <span class="fu">paste0</span>(app_origin, <span class="fu">c</span>(<span class="st">&quot;/callback/a&quot;</span>, <span class="st">&quot;/callback/b&quot;</span>))</span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a></span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>provider_a <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;Service A&quot;</span>,</span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://login.a.example/authorize&quot;</span>,</span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://login.a.example/token&quot;</span>,</span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a>  <span class="at">token_auth_style =</span> <span class="st">&quot;header&quot;</span>,</span>
+<span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a>  <span class="at">use_pkce =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a>  <span class="at">pkce_method =</span> <span class="st">&quot;S256&quot;</span></span>
+<span id="cb1-14"><a href="#cb1-14" tabindex="-1"></a>)</span>
+<span id="cb1-15"><a href="#cb1-15" tabindex="-1"></a>provider_b <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb1-16"><a href="#cb1-16" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;Service B&quot;</span>,</span>
+<span id="cb1-17"><a href="#cb1-17" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://login.b.example/authorize&quot;</span>,</span>
+<span id="cb1-18"><a href="#cb1-18" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://login.b.example/token&quot;</span>,</span>
+<span id="cb1-19"><a href="#cb1-19" tabindex="-1"></a>  <span class="at">token_auth_style =</span> <span class="st">&quot;header&quot;</span>,</span>
+<span id="cb1-20"><a href="#cb1-20" tabindex="-1"></a>  <span class="at">use_pkce =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb1-21"><a href="#cb1-21" tabindex="-1"></a>  <span class="at">pkce_method =</span> <span class="st">&quot;S256&quot;</span></span>
+<span id="cb1-22"><a href="#cb1-22" tabindex="-1"></a>)</span>
+<span id="cb1-23"><a href="#cb1-23" tabindex="-1"></a></span>
+<span id="cb1-24"><a href="#cb1-24" tabindex="-1"></a>client_a <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb1-25"><a href="#cb1-25" tabindex="-1"></a>  provider_a,</span>
+<span id="cb1-26"><a href="#cb1-26" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;SERVICE_A_CLIENT_ID&quot;</span>),</span>
+<span id="cb1-27"><a href="#cb1-27" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;SERVICE_A_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb1-28"><a href="#cb1-28" tabindex="-1"></a>  <span class="at">redirect_uri =</span> callbacks[[<span class="dv">1</span>]],</span>
+<span id="cb1-29"><a href="#cb1-29" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="st">&quot;records.read&quot;</span>,</span>
+<span id="cb1-30"><a href="#cb1-30" tabindex="-1"></a>  <span class="at">resource_bases =</span> <span class="fu">c</span>(<span class="at">api =</span> <span class="st">&quot;https://api.a.example/v1&quot;</span>),</span>
+<span id="cb1-31"><a href="#cb1-31" tabindex="-1"></a>  <span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span>,</span>
+<span id="cb1-32"><a href="#cb1-32" tabindex="-1"></a>  <span class="at">label =</span> <span class="st">&quot;Service A&quot;</span>,</span>
+<span id="cb1-33"><a href="#cb1-33" tabindex="-1"></a>  <span class="at">authorization_server_mode =</span> <span class="st">&quot;multi_redirect_uri&quot;</span>,</span>
+<span id="cb1-34"><a href="#cb1-34" tabindex="-1"></a>  <span class="at">authorization_server_redirect_uris =</span> callbacks</span>
+<span id="cb1-35"><a href="#cb1-35" tabindex="-1"></a>)</span>
+<span id="cb1-36"><a href="#cb1-36" tabindex="-1"></a>client_b <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb1-37"><a href="#cb1-37" tabindex="-1"></a>  provider_b,</span>
+<span id="cb1-38"><a href="#cb1-38" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;SERVICE_B_CLIENT_ID&quot;</span>),</span>
+<span id="cb1-39"><a href="#cb1-39" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;SERVICE_B_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb1-40"><a href="#cb1-40" tabindex="-1"></a>  <span class="at">redirect_uri =</span> callbacks[[<span class="dv">2</span>]],</span>
+<span id="cb1-41"><a href="#cb1-41" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="st">&quot;records.read&quot;</span>,</span>
+<span id="cb1-42"><a href="#cb1-42" tabindex="-1"></a>  <span class="at">resource_bases =</span> <span class="fu">c</span>(<span class="at">api =</span> <span class="st">&quot;https://api.b.example/v1&quot;</span>),</span>
+<span id="cb1-43"><a href="#cb1-43" tabindex="-1"></a>  <span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span>,</span>
+<span id="cb1-44"><a href="#cb1-44" tabindex="-1"></a>  <span class="at">label =</span> <span class="st">&quot;Service B&quot;</span>,</span>
+<span id="cb1-45"><a href="#cb1-45" tabindex="-1"></a>  <span class="at">authorization_server_mode =</span> <span class="st">&quot;multi_redirect_uri&quot;</span>,</span>
+<span id="cb1-46"><a href="#cb1-46" tabindex="-1"></a>  <span class="at">authorization_server_redirect_uris =</span> callbacks</span>
+<span id="cb1-47"><a href="#cb1-47" tabindex="-1"></a>)</span>
+<span id="cb1-48"><a href="#cb1-48" tabindex="-1"></a></span>
+<span id="cb1-49"><a href="#cb1-49" tabindex="-1"></a>clients <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">a =</span> client_a, <span class="at">b =</span> client_b)</span></code></pre></div>
+<p><code>a</code> and <code>b</code> are app-local selectors,
+independent of the registered <code>client_id</code>. <code>api</code>
+names an approved resource within each client. For connection A,
+<code>[[&quot;request&quot;]](&quot;api&quot;, &quot;records&quot;)</code> means
+<code>https://api.a.example/v1/records</code>.</p>
+<p>The default callback policy gives each client a distinct route.
+Supply the <strong>complete callback vector to each client</strong>,
+even though each uses its own <code>redirect_uri</code>. The manager
+verifies that each client’s declared set includes all of its callback
+routes, comparing canonical origins and paths. Additional routes used
+elsewhere in the application may also be included. Shared callback
+routes are an advanced alternative documented in
+<code>?oauth_connections</code>.</p>
+</div>
+<div id="keep-authorizations-when-the-browser-returns" class="section level3">
+<h3>2. Keep authorizations when the browser returns</h3>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="co"># Temporary keys for this local demo, generated once per R process.</span></span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="co"># In a deployment, load two independent 32-byte raw keys from secret storage.</span></span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>keys <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>  <span class="at">credentials =</span> openssl<span class="sc">::</span><span class="fu">rand_bytes</span>(<span class="dv">32</span>),</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">owner =</span> openssl<span class="sc">::</span><span class="fu">rand_bytes</span>(<span class="dv">32</span>)</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>)</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a></span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>manager <span class="ot">&lt;-</span> <span class="fu">oauth_connections</span>(</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  clients,</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  <span class="at">app_origin =</span> app_origin,</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>  <span class="at">retention =</span> <span class="st">&quot;browser&quot;</span>,</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>  <span class="at">owner_policy =</span> <span class="fu">oauth_browser_owner</span>(<span class="at">allow_http_loopback =</span> <span class="cn">TRUE</span>),</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>  <span class="at">store =</span> <span class="fu">oauth_connection_store_memory</span>(),</span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>  <span class="at">keys =</span> keys</span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>)</span></code></pre></div>
+<p>Browser retention uses an HttpOnly cookie containing an opaque local
+owner ID. Tokens stay encrypted in the R process. The cookie associates
+saved connections with this browser; it does not identify a person or
+log them into either service.</p>
+<p>Without <code>retention = &quot;browser&quot;</code>, the default is
+<code>&quot;shiny&quot;</code>: existing connections are discarded when that Shiny
+session ends. Merely configuring multiple clients does not preserve A
+while the browser goes away to authorize B.</p>
+<p>Keep the manager, store and keys outside <code>server()</code> so
+returning Shiny sessions use the same configuration. This memory store
+supports <strong>one R process</strong> and does not survive an R
+restart. Stable keys alone do not make it persistent or share records
+between workers. Browser ownership also has idle and absolute expiry
+limits. Automatic refresh and API reads do not reset inactivity. Call
+<code>auth[[&quot;touch&quot;]]()</code> from a user input event handler, as the
+Read handler below does, to count an application action as activity.
+Explicit refresh also counts as activity; the absolute expiry remains
+fixed. For an app with its own verified account login, see
+<code>?oauth_account_owner</code> and
+<code>retention = &quot;account&quot;</code>.</p>
+<p>Size the owner registry and credential store separately. Both owner
+factories accept <code>max_entries</code> (default 1,000) per manager.
+Retained browser entries count browsers that successfully authorize a
+service. Recent visitors occupy a separate provisional pool with the
+same limit; entries without a pending authorization may be replaced and
+expire after at most five minutes. Pending authorizations protect their
+browser entries until cancellation or transaction expiry, subject to the
+owner’s idle and absolute limits. If all provisional entries are
+protected, new visitors are rejected. Account entries include logged-out
+login generations until their reauthentication deadline. A full retained
+registry rejects new retained owners while preserving existing retained
+sessions and retirement records.
+<code>oauth_connection_store_memory(max_entries = ...)</code> controls a
+different limit: successful authorization transactions occupy capacity
+for the store’s full <code>max_age</code>, including after a connection
+is disconnected. Neither limit measures only the number of currently
+open Shiny sessions.</p>
+</div>
+<div id="select-a-connection-and-make-a-request" class="section level3">
+<h3>3. Select a connection and make a request</h3>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>base_ui <span class="ot">&lt;-</span> <span class="fu">fluidPage</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  <span class="fu">use_shinyOAuth</span>(),</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="fu">h2</span>(<span class="st">&quot;My connected services&quot;</span>),</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;connect_a&quot;</span>, <span class="st">&quot;Connect Service A&quot;</span>),</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;connect_b&quot;</span>, <span class="st">&quot;Connect Service B&quot;</span>),</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="fu">selectInput</span>(<span class="st">&quot;connection_id&quot;</span>, <span class="st">&quot;Saved authorization&quot;</span>, <span class="at">choices =</span> <span class="fu">character</span>()),</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;read&quot;</span>, <span class="st">&quot;Read records&quot;</span>),</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;disconnect&quot;</span>, <span class="st">&quot;Disconnect selected&quot;</span>),</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;logout&quot;</span>, <span class="st">&quot;Disconnect all and leave&quot;</span>),</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>  <span class="fu">textOutput</span>(<span class="st">&quot;result&quot;</span>),</span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>  <span class="fu">textOutput</span>(<span class="st">&quot;auth_error&quot;</span>)</span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>)</span>
+<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">oauth_connections_ui</span>(base_ui, <span class="st">&quot;services&quot;</span>, manager)</span>
+<span id="cb3-14"><a href="#cb3-14" tabindex="-1"></a></span>
+<span id="cb3-15"><a href="#cb3-15" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_connections_server</span>(<span class="st">&quot;services&quot;</span>, manager)</span>
+<span id="cb3-17"><a href="#cb3-17" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input[[<span class="st">&quot;connect_a&quot;</span>]], auth[[<span class="st">&quot;connect&quot;</span>]](<span class="st">&quot;a&quot;</span>))</span>
+<span id="cb3-18"><a href="#cb3-18" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input[[<span class="st">&quot;connect_b&quot;</span>]], auth[[<span class="st">&quot;connect&quot;</span>]](<span class="st">&quot;b&quot;</span>))</span>
+<span id="cb3-19"><a href="#cb3-19" tabindex="-1"></a></span>
+<span id="cb3-20"><a href="#cb3-20" tabindex="-1"></a>  <span class="fu">observe</span>({</span>
+<span id="cb3-21"><a href="#cb3-21" tabindex="-1"></a>    rows <span class="ot">&lt;-</span> auth[[<span class="st">&quot;connections&quot;</span>]]()</span>
+<span id="cb3-22"><a href="#cb3-22" tabindex="-1"></a>    ids <span class="ot">&lt;-</span> <span class="fu">vapply</span>(rows, <span class="cf">function</span>(x) x[[<span class="st">&quot;connection_id&quot;</span>]], <span class="fu">character</span>(<span class="dv">1</span>))</span>
+<span id="cb3-23"><a href="#cb3-23" tabindex="-1"></a>    labels <span class="ot">&lt;-</span> <span class="fu">vapply</span>(<span class="fu">seq_along</span>(rows), <span class="cf">function</span>(i) {</span>
+<span id="cb3-24"><a href="#cb3-24" tabindex="-1"></a>      <span class="fu">paste</span>(rows[[i]][[<span class="st">&quot;client_label&quot;</span>]], i, <span class="fu">paste0</span>(<span class="st">&quot;(&quot;</span>, rows[[i]][[<span class="st">&quot;status&quot;</span>]], <span class="st">&quot;)&quot;</span>))</span>
+<span id="cb3-25"><a href="#cb3-25" tabindex="-1"></a>    }, <span class="fu">character</span>(<span class="dv">1</span>))</span>
+<span id="cb3-26"><a href="#cb3-26" tabindex="-1"></a>    selected <span class="ot">&lt;-</span> <span class="fu">isolate</span>(input[[<span class="st">&quot;connection_id&quot;</span>]])</span>
+<span id="cb3-27"><a href="#cb3-27" tabindex="-1"></a>    <span class="cf">if</span> (<span class="sc">!</span><span class="fu">length</span>(selected) <span class="sc">||</span> <span class="sc">!</span>selected <span class="sc">%in%</span> ids) selected <span class="ot">&lt;-</span> <span class="fu">head</span>(ids, <span class="dv">1</span>)</span>
+<span id="cb3-28"><a href="#cb3-28" tabindex="-1"></a>    <span class="fu">updateSelectInput</span>(session, <span class="st">&quot;connection_id&quot;</span>,</span>
+<span id="cb3-29"><a href="#cb3-29" tabindex="-1"></a>      <span class="at">choices =</span> <span class="fu">setNames</span>(ids, labels), <span class="at">selected =</span> selected)</span>
+<span id="cb3-30"><a href="#cb3-30" tabindex="-1"></a>  })</span>
+<span id="cb3-31"><a href="#cb3-31" tabindex="-1"></a></span>
+<span id="cb3-32"><a href="#cb3-32" tabindex="-1"></a>  selected_connection <span class="ot">&lt;-</span> <span class="fu">reactive</span>({</span>
+<span id="cb3-33"><a href="#cb3-33" tabindex="-1"></a>    rows <span class="ot">&lt;-</span> auth[[<span class="st">&quot;connections&quot;</span>]]()</span>
+<span id="cb3-34"><a href="#cb3-34" tabindex="-1"></a>    ids <span class="ot">&lt;-</span> <span class="fu">vapply</span>(rows, <span class="cf">function</span>(x) x[[<span class="st">&quot;connection_id&quot;</span>]], <span class="fu">character</span>(<span class="dv">1</span>))</span>
+<span id="cb3-35"><a href="#cb3-35" tabindex="-1"></a>    <span class="fu">req</span>(input[[<span class="st">&quot;connection_id&quot;</span>]], input[[<span class="st">&quot;connection_id&quot;</span>]] <span class="sc">%in%</span> ids)</span>
+<span id="cb3-36"><a href="#cb3-36" tabindex="-1"></a>    auth[[<span class="st">&quot;connection&quot;</span>]](input[[<span class="st">&quot;connection_id&quot;</span>]])</span>
+<span id="cb3-37"><a href="#cb3-37" tabindex="-1"></a>  })</span>
+<span id="cb3-38"><a href="#cb3-38" tabindex="-1"></a></span>
+<span id="cb3-39"><a href="#cb3-39" tabindex="-1"></a>  result <span class="ot">&lt;-</span> <span class="fu">eventReactive</span>(input[[<span class="st">&quot;read&quot;</span>]], {</span>
+<span id="cb3-40"><a href="#cb3-40" tabindex="-1"></a>    auth[[<span class="st">&quot;touch&quot;</span>]]()</span>
+<span id="cb3-41"><a href="#cb3-41" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> <span class="fu">selected_connection</span>()</span>
+<span id="cb3-42"><a href="#cb3-42" tabindex="-1"></a>    <span class="fu">req</span>(connection[[<span class="st">&quot;is_usable&quot;</span>]]())</span>
+<span id="cb3-43"><a href="#cb3-43" tabindex="-1"></a>    message <span class="ot">&lt;-</span> <span class="fu">tryCatch</span>({</span>
+<span id="cb3-44"><a href="#cb3-44" tabindex="-1"></a>      response <span class="ot">&lt;-</span> connection[[<span class="st">&quot;request&quot;</span>]](</span>
+<span id="cb3-45"><a href="#cb3-45" tabindex="-1"></a>        <span class="st">&quot;api&quot;</span>, <span class="st">&quot;records&quot;</span>, <span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span></span>
+<span id="cb3-46"><a href="#cb3-46" tabindex="-1"></a>      )</span>
+<span id="cb3-47"><a href="#cb3-47" tabindex="-1"></a>      httr2<span class="sc">::</span><span class="fu">resp_check_status</span>(response)</span>
+<span id="cb3-48"><a href="#cb3-48" tabindex="-1"></a>      <span class="co"># Parse the body here according to your API&#39;s schema.</span></span>
+<span id="cb3-49"><a href="#cb3-49" tabindex="-1"></a>      <span class="fu">paste</span>(<span class="st">&quot;Records request succeeded; HTTP&quot;</span>, httr2<span class="sc">::</span><span class="fu">resp_status</span>(response))</span>
+<span id="cb3-50"><a href="#cb3-50" tabindex="-1"></a>    }, <span class="at">error =</span> <span class="cf">function</span>(e) <span class="st">&quot;Could not read records. Check the connection and try again.&quot;</span>)</span>
+<span id="cb3-51"><a href="#cb3-51" tabindex="-1"></a>    <span class="fu">list</span>(<span class="at">connection_id =</span> connection[[<span class="st">&quot;id&quot;</span>]], <span class="at">message =</span> message)</span>
+<span id="cb3-52"><a href="#cb3-52" tabindex="-1"></a>  })</span>
+<span id="cb3-53"><a href="#cb3-53" tabindex="-1"></a></span>
+<span id="cb3-54"><a href="#cb3-54" tabindex="-1"></a>  output[[<span class="st">&quot;result&quot;</span>]] <span class="ot">&lt;-</span> <span class="fu">renderText</span>({</span>
+<span id="cb3-55"><a href="#cb3-55" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> <span class="fu">selected_connection</span>()</span>
+<span id="cb3-56"><a href="#cb3-56" tabindex="-1"></a>    <span class="fu">req</span>(connection[[<span class="st">&quot;is_usable&quot;</span>]]())</span>
+<span id="cb3-57"><a href="#cb3-57" tabindex="-1"></a>    value <span class="ot">&lt;-</span> <span class="fu">result</span>()</span>
+<span id="cb3-58"><a href="#cb3-58" tabindex="-1"></a>    <span class="fu">req</span>(<span class="fu">identical</span>(value[[<span class="st">&quot;connection_id&quot;</span>]], connection[[<span class="st">&quot;id&quot;</span>]]))</span>
+<span id="cb3-59"><a href="#cb3-59" tabindex="-1"></a>    value[[<span class="st">&quot;message&quot;</span>]]</span>
+<span id="cb3-60"><a href="#cb3-60" tabindex="-1"></a>  })</span>
+<span id="cb3-61"><a href="#cb3-61" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input[[<span class="st">&quot;disconnect&quot;</span>]], {</span>
+<span id="cb3-62"><a href="#cb3-62" tabindex="-1"></a>    auth[[<span class="st">&quot;disconnect&quot;</span>]](<span class="fu">selected_connection</span>()[[<span class="st">&quot;id&quot;</span>]])</span>
+<span id="cb3-63"><a href="#cb3-63" tabindex="-1"></a>  })</span>
+<span id="cb3-64"><a href="#cb3-64" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input[[<span class="st">&quot;logout&quot;</span>]], auth[[<span class="st">&quot;logout&quot;</span>]]())</span>
+<span id="cb3-65"><a href="#cb3-65" tabindex="-1"></a>  output[[<span class="st">&quot;auth_error&quot;</span>]] <span class="ot">&lt;-</span> <span class="fu">renderText</span>({</span>
+<span id="cb3-66"><a href="#cb3-66" tabindex="-1"></a>    <span class="cf">if</span> (<span class="fu">length</span>(auth[[<span class="st">&quot;errors&quot;</span>]]())) <span class="st">&quot;Authorization is unavailable. Try connecting again.&quot;</span></span>
+<span id="cb3-67"><a href="#cb3-67" tabindex="-1"></a>  })</span>
+<span id="cb3-68"><a href="#cb3-68" tabindex="-1"></a>}</span>
+<span id="cb3-69"><a href="#cb3-69" tabindex="-1"></a></span>
+<span id="cb3-70"><a href="#cb3-70" tabindex="-1"></a><span class="fu">runApp</span>(<span class="fu">shinyApp</span>(ui, server, <span class="at">uiPattern =</span> <span class="st">&quot;.*&quot;</span>),</span>
+<span id="cb3-71"><a href="#cb3-71" tabindex="-1"></a>  <span class="at">host =</span> <span class="st">&quot;127.0.0.1&quot;</span>, <span class="at">port =</span> <span class="dv">8100</span>, <span class="at">launch.browser =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<p>Open <code>http://127.0.0.1:8100</code> in a regular browser. Connect
+A, return, then connect B. Both authorizations should appear in the
+selector. Select each and read its records. Disconnect removes the
+selected local connection; provider revocation may affect other
+authorizations as explained below. The numeric suffix only distinguishes
+rows in this demo; use the opaque <code>connection_id</code> as the
+stable key.</p>
+<p>The UI wrapper handles callback pages; <code>uiPattern = &quot;.*&quot;</code>
+lets Shiny serve those paths. Use the same module ID
+(<code>&quot;services&quot;</code>) in UI and server. Deploying under a subpath or
+behind a proxy can also require <code>app_base_path</code> and a trusted
+<code>request_uri_resolver</code>; see
+<code>?oauth_connections_ui</code>.</p>
+</div>
+</div>
+<div id="requests-permissions-and-refresh" class="section level2">
+<h2>Requests, permissions and refresh</h2>
+<p>For optional writes, first configure the applicable client with
+<code>scopes = c(&quot;records.read&quot;, &quot;records.write&quot;)</code> and obtain a
+new authorization. Replace these example permissions with the provider’s
+actual scope names. Add
+<code>actionButton(&quot;write&quot;, &quot;Update selected record&quot;)</code> to the UI
+and place this observer inside <code>server()</code>, after
+<code>selected_connection</code> is defined:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">observeEvent</span>(input[[<span class="st">&quot;write&quot;</span>]], {</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  auth[[<span class="st">&quot;touch&quot;</span>]]()</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  connection <span class="ot">&lt;-</span> <span class="fu">selected_connection</span>()</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="fu">req</span>(connection[[<span class="st">&quot;is_usable&quot;</span>]]())</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="fu">tryCatch</span>({</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>    response <span class="ot">&lt;-</span> connection[[<span class="st">&quot;request&quot;</span>]](<span class="st">&quot;api&quot;</span>, <span class="st">&quot;records/example&quot;</span>, <span class="at">method =</span> <span class="st">&quot;PUT&quot;</span>,</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>      <span class="at">required_scopes =</span> <span class="st">&quot;records.write&quot;</span>, <span class="at">configure =</span> <span class="cf">function</span>(req) {</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>        req <span class="sc">|&gt;</span></span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>          httr2<span class="sc">::</span><span class="fu">req_body_json</span>(<span class="fu">list</span>(<span class="at">name =</span> <span class="st">&quot;Updated record&quot;</span>)) <span class="sc">|&gt;</span></span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>          httr2<span class="sc">::</span><span class="fu">req_headers</span>(<span class="st">`</span><span class="at">If-Match</span><span class="st">`</span> <span class="ot">=</span> <span class="st">&#39;W/&quot;7&quot;&#39;</span>)</span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>      })</span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a>    httr2<span class="sc">::</span><span class="fu">resp_check_status</span>(response)</span>
+<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a>    <span class="fu">showNotification</span>(<span class="st">&quot;Record updated.&quot;</span>)</span>
+<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a>  }, <span class="at">error =</span> <span class="cf">function</span>(e) {</span>
+<span id="cb4-15"><a href="#cb4-15" tabindex="-1"></a>    <span class="fu">showNotification</span>(<span class="st">&quot;Could not update the record.&quot;</span>, <span class="at">type =</span> <span class="st">&quot;error&quot;</span>)</span>
+<span id="cb4-16"><a href="#cb4-16" tabindex="-1"></a>  })</span>
+<span id="cb4-17"><a href="#cb4-17" tabindex="-1"></a>})</span></code></pre></div>
+<p><code>configure</code> adds a body or application headers to the
+unauthenticated request; <code>httr2::req_body_form()</code> and
+<code>httr2::req_body_raw()</code> are also supported. The connection
+retains control of its destination, authentication and redirect policy.
+The write scope is optional for connecting, but required for this
+action.</p>
+<p><code>OAuthConnection[[&quot;request&quot;]]()</code> uses the existing
+<code>perform_resource_req()</code> transport. It adds selection of the
+current owned credentials and checks the approved API base and required
+permissions. Existing code using
+<code>perform_resource_req(token, url)</code> remains supported. For a
+single existing module,
+<code>oauth_connection(client, reactive(auth[[&quot;token&quot;]]))</code>
+supplies the optional wrapper without adding retention.</p>
+<p><code>resource_bases</code> limits destinations, including absolute
+pagination links and their base paths. It does not automatically send
+OAuth’s <code>resource</code> parameter or prove the audience of an
+opaque token; configure resource indicators explicitly when your
+provider requires them. See <a href="https://www.rfc-editor.org/rfc/rfc8707.html">RFC 8707</a>.</p>
+<p><code>required_scopes</code> on the client is the minimum for usable
+access. Requesting additional optional scopes can produce a
+<code>limited</code> connection if only some are granted. Supply an
+operation’s additional permissions in <code>[[&quot;request&quot;]]()</code>;
+ordinary OAuth scope names are compared literally, and permissions are
+not inferred from the API path. A usable connection does not guarantee
+the API will accept every request.</p>
+<p>If the provider issues a refresh token, the manager attempts refresh
+at expiry; <code>refresh_proactively = TRUE</code> on
+<code>oauth_connections_server()</code> starts earlier. Explicit refresh
+is also available inside a server observer:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">observeEvent</span>(input[[<span class="st">&quot;refresh&quot;</span>]], {</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="fu">tryCatch</span>(<span class="fu">selected_connection</span>()[[<span class="st">&quot;refresh&quot;</span>]](), <span class="at">error =</span> <span class="cf">function</span>(e) {</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>    <span class="fu">showNotification</span>(<span class="st">&quot;Could not refresh. Connect again if access has ended.&quot;</span>, <span class="at">type =</span> <span class="st">&quot;error&quot;</span>)</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  })</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>})</span></code></pre></div>
+<p>Add <code>actionButton(&quot;refresh&quot;, &quot;Refresh selected&quot;)</code> to the
+UI to use this snippet. The example uses the default synchronous mode.
+<code>async = TRUE</code> needs worker setup and promise handling for
+explicit refresh; see <a href="usage.html#asynchronous-execution">Usage</a>.</p>
+<p>Retention itself does not request a refresh token. OAuth refresh
+cannot expand the authorization’s scope (<a href="https://www.rfc-editor.org/rfc/rfc6749.html#section-6">RFC 6749,
+section 6</a>). <code>[[&quot;refresh&quot;]](scopes = ...)</code> can
+deliberately narrow a managed connection’s accepted permissions; getting
+broader access again requires a new authorization.</p>
+<p>Disconnect immediately removes local usability. Remote token
+revocation is best effort and reported separately in the return value.
+This template does not configure revocation endpoints, so add each
+provider’s documented <code>revocation_url</code> if supported.
+<code>logout()</code> also ends this local owner session; it does not
+sign the person out of the external services or your own account login
+system.</p>
+<p>Separate connection IDs represent separate local records. A provider
+can reuse the same upstream grant for repeated authorizations and
+invalidate all related credentials when one is revoked; OAuth explicitly
+permits this behavior (<a href="https://www.rfc-editor.org/rfc/rfc7009.html#section-2.1">RFC 7009,
+section 2.1</a>). For example, Google’s documented revocation can affect
+all scopes granted to a project and invalidate related tokens (<a href="https://developers.google.com/identity/protocols/oauth2/web-server#tokenrevoke">Google’s
+revocation policy</a>). Repeated consent, distinct token strings, and
+local connection IDs do not prove independent upstream grants.</p>
+<p>The default <code>auth[[&quot;disconnect&quot;]](id)</code> requests remote
+revocation. To remove only the local connection, use
+<code>auth[[&quot;disconnect&quot;]](id, revoke = FALSE)</code>; those removed
+credentials remain valid remotely until expiry or provider-side
+revocation. Choose this deliberately using the provider’s documented
+behavior. Sibling connections can still report <code>active</code>
+locally after remote revocation: always handle API authorization
+failures and offer a new authorization.</p>
+</div>
+<div id="keep-an-ordinary-oidc-login-alongside-smart-connections" class="section level2">
+<h2>Keep an ordinary OIDC login alongside SMART connections</h2>
+<p>For an OIDC client inside the manager, select validated identity
+explicitly in the owning server session:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>identity <span class="ot">&lt;-</span> <span class="fu">selected_connection</span>()[[<span class="st">&quot;identity&quot;</span>]](<span class="at">userinfo =</span> <span class="fu">c</span>(<span class="st">&quot;name&quot;</span>, <span class="st">&quot;email&quot;</span>))</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a><span class="co"># identity[[&quot;id_token_claims&quot;]] contains only iss and sub by default.</span></span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a><span class="co"># identity[[&quot;userinfo&quot;]] contains only the selected, previously fetched fields.</span></span></code></pre></div>
+<p>This requires a usable connection with <code>openid</code> and a
+validated ID token. UserInfo fields are returned only when its
+<code>sub</code> matches that token. Configure the provider’s UserInfo
+endpoint and required profile scopes if those fields are needed; the
+accessor does not fetch them. Treat the returned data as sensitive.
+Identity stays out of connection summaries and printing, and raw
+credentials are never returned. These snapshots can predate the latest
+OAuth refresh; they do not establish fresh login or an account-retention
+owner.</p>
+<p>Use one callback wrapper with <code>additional_clients</code> for
+ordinary modules. Given your existing <code>login_provider</code> and a
+reviewed SMART discovery snapshot <code>site</code>, configure both
+registered callbacks with the same multi-server defense:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>callbacks <span class="ot">&lt;-</span> <span class="fu">c</span>(<span class="st">&quot;https://app.example/login/callback&quot;</span>, <span class="st">&quot;https://app.example/fhir/callback&quot;</span>)</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>login_client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(login_provider, <span class="st">&quot;registered-login-app&quot;</span>,</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">redirect_uri =</span> callbacks[[<span class="dv">1</span>]], <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>),</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">authorization_server_mode =</span> <span class="st">&quot;multi_redirect_uri&quot;</span>,</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  <span class="at">authorization_server_redirect_uris =</span> callbacks)</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>fhir_client <span class="ot">&lt;-</span> <span class="fu">smart_client</span>(site, <span class="st">&quot;registered-fhir-app&quot;</span>, callbacks[[<span class="dv">2</span>]],</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;launch/patient&quot;</span>, <span class="st">&quot;patient/Patient.r&quot;</span>),</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>  <span class="at">authorization_server_mode =</span> <span class="st">&quot;multi_redirect_uri&quot;</span>,</span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a>  <span class="at">authorization_server_redirect_uris =</span> callbacks)</span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a>manager <span class="ot">&lt;-</span> <span class="fu">oauth_connections</span>(<span class="fu">list</span>(<span class="at">fhir =</span> fhir_client), <span class="st">&quot;https://app.example&quot;</span>,</span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a>  <span class="at">retention =</span> <span class="st">&quot;browser&quot;</span>, <span class="at">owner_policy =</span> <span class="fu">oauth_browser_owner</span>(),</span>
+<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a>  <span class="at">store =</span> <span class="fu">oauth_connection_store_memory</span>(), <span class="at">keys =</span> keys)</span>
+<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a>base_ui <span class="ot">&lt;-</span> <span class="fu">fluidPage</span>(<span class="fu">actionButton</span>(<span class="st">&quot;sign_in&quot;</span>, <span class="st">&quot;Sign in&quot;</span>),</span>
+<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;connect_fhir&quot;</span>, <span class="st">&quot;Connect FHIR&quot;</span>))</span>
+<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">oauth_connections_ui</span>(base_ui, <span class="st">&quot;health&quot;</span>, manager,</span>
+<span id="cb7-16"><a href="#cb7-16" tabindex="-1"></a>  <span class="at">additional_clients =</span> <span class="fu">list</span>(<span class="at">login =</span> login_client))</span>
+<span id="cb7-17"><a href="#cb7-17" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb7-18"><a href="#cb7-18" tabindex="-1"></a>  login <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(<span class="st">&quot;login&quot;</span>, login_client, <span class="at">auto_redirect =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb7-19"><a href="#cb7-19" tabindex="-1"></a>  health <span class="ot">&lt;-</span> <span class="fu">oauth_connections_server</span>(<span class="st">&quot;health&quot;</span>, manager)</span>
+<span id="cb7-20"><a href="#cb7-20" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input[[<span class="st">&quot;sign_in&quot;</span>]], login[[<span class="st">&quot;request_login&quot;</span>]]())</span>
+<span id="cb7-21"><a href="#cb7-21" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input[[<span class="st">&quot;connect_fhir&quot;</span>]], health[[<span class="st">&quot;connect&quot;</span>]](<span class="st">&quot;fhir&quot;</span>))</span>
+<span id="cb7-22"><a href="#cb7-22" tabindex="-1"></a>}</span>
+<span id="cb7-23"><a href="#cb7-23" tabindex="-1"></a><span class="fu">shinyApp</span>(ui, server, <span class="at">uiPattern =</span> <span class="st">&quot;.*&quot;</span>)</span></code></pre></div>
+<p>Supply the existing registration’s secret or key to
+<code>login_client</code> as required. <code>keys</code> is the
+deployment key configuration described above. The additional client
+names are ordinary module IDs, without the manager namespace. Both GET
+and form-post callbacks are supported; select each registered response
+mode on its client. Additional clients need distinct routes from managed
+clients.</p>
+<p>This preserves the ordinary module’s token and logout API. The
+manager neither stores that login token nor changes its lifecycle. A
+full browser navigation still ends the ordinary Shiny session; retain
+application login through your existing application-session mechanism if
+needed. Disable automatic login redirects while processing other
+authorizations, as in this example. Browser ownership for retained SMART
+grants is independent of OIDC identity; use account retention with a
+trusted local-account resolver when that binding is required.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

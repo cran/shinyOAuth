@@ -84,7 +84,7 @@ coerce_expires_in <- function(x) {
 #' Used by [oauth_module_server()] when setting the browser-token cookie lifetime.
 #'
 #' Falls back to 5 minutes (300s) when the cache backend does not expose a
-#' finite `max_age` via `$info()`.
+#' finite `max_age` via `[["info"]]()`.
 #'
 #' When falling back, emits a once-per-session warning to help operators
 #' understand that browser cookie lifetimes will use the default rather than
@@ -97,13 +97,13 @@ coerce_expires_in <- function(x) {
 #' @noRd
 client_state_store_max_age <- function(client, default = 300) {
   max_age_raw <- tryCatch(
-    client@state_store$info(),
+    client@state_store[["info"]](),
     error = function(...) NULL
   )
 
   max_age <- suppressWarnings(
     tryCatch(
-      as.numeric(max_age_raw$max_age),
+      as.numeric(max_age_raw[["max_age"]]),
       error = function(...) NA_real_
     )
   )
@@ -133,7 +133,7 @@ client_state_store_max_age <- function(client, default = 300) {
         ),
         "i" = paste0(
           "To align the browser cookie with your cache TTL, ensure your state_store ",
-          "exposes {.code info()$max_age} or configure {.code cachem::cache_mem(max_age = ...)}"
+          "exposes `info()$max_age` or configure `cachem::cache_mem(max_age = ...)`"
         ),
         if (!is.null(st_class)) {
           paste0("i State store class: ", st_class)
@@ -164,10 +164,14 @@ client_state_store_max_age <- function(client, default = 300) {
 #' was not server-provided.
 #'
 #' @param phase Optional phase label.
+#' @param now Request-start timestamp in epoch seconds.
 #' @return Numeric scalar: computed `expires_at` (epoch seconds).
 #' @keywords internal
 #' @noRd
-resolve_missing_expires_in <- function(phase = NULL) {
+resolve_missing_expires_in <- function(
+  phase = NULL,
+  now = as.numeric(Sys.time())
+) {
   phase_msg <- if (is_valid_string(phase)) {
     paste0(" (phase: ", phase, ")")
   } else {
@@ -225,7 +229,17 @@ resolve_missing_expires_in <- function(phase = NULL) {
     )
   )
 
-  as.numeric(Sys.time()) + fallback_ei
+  now + fallback_ei
+}
+
+# Reject deadlines that elapsed during transport, verification, or async delivery.
+validate_token_acceptance_deadline <- function(token) {
+  if (
+    is.finite(token@expires_at) && token@expires_at <= as.numeric(Sys.time())
+  ) {
+    err_token("Access token expired before acceptance")
+  }
+  token
 }
 
 #' Internal: warn when expires_in is non-positive
@@ -309,4 +323,32 @@ client_state_payload_max_age <- function(client, default = 300) {
   }
 
   max_age
+}
+
+#' Internal: normalize JARM maximum accepted lifetime to seconds
+#'
+#' This caps how long a JWT Secured Authorization Response (JARM) is allowed to
+#' remain valid, independent of state payload freshness or state-store TTL.
+#'
+#' @param client OAuth client whose JARM lifetime policy is being read.
+#' @param default Fallback maximum lifetime in seconds.
+#' @return Positive maximum lifetime in seconds.
+#' @keywords internal
+#' @noRd
+client_jarm_max_lifetime <- function(client, default = 600) {
+  max_lifetime <- suppressWarnings(as.numeric(client@jarm_max_lifetime))
+
+  if (
+    length(max_lifetime) != 1L ||
+      !is.finite(max_lifetime) ||
+      max_lifetime <= 0
+  ) {
+    fallback <- suppressWarnings(as.numeric(default))
+    if (length(fallback) != 1L || !is.finite(fallback) || fallback <= 0) {
+      fallback <- 600
+    }
+    return(fallback)
+  }
+
+  max_lifetime
 }

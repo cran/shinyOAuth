@@ -54,20 +54,21 @@
 #   testing or interactive sessions; a few explicit opt-ins (for example,
 #   allow_redirect) are honored in all sessions.
 
-#' Throw an error if specific dev/debug softeners are enabled
+#' Check selected debugging options (deprecated)
 #'
 #' @description
 #' `r lifecycle::badge("deprecated")`
 #'
 #' Deprecated helper that errors when a small subset of shinyOAuth's
-#' development and debugging softeners are enabled. Use explicit startup checks
+#' options that relax security checks or expose debugging details are enabled. Use explicit startup checks
 #' for the exact options your deployment permits or forbids instead.
 #'
 #' @details It only checks the following options:
 #' \itemize{
 #'  \item `shinyOAuth.skip_browser_token`: Skips browser cookie presence check
 #'  \item `shinyOAuth.skip_id_sig`: Skips ID token signature verification
-#'  \item `shinyOAuth.expose_error_body`: Exposes HTTP response bodies
+#'  \item `shinyOAuth.expose_error_body`: Exposes HTTP response bodies and
+#'    claim values in diagnostics
 #'  \item `shinyOAuth.allow_unsigned_userinfo_jwt`: Accepts unsigned (`alg=none`) UserInfo JWTs
 #'  \item `shinyOAuth.allow_redirect`: Allows sensitive HTTP flows to follow redirects
 #'  }
@@ -177,11 +178,11 @@ allow_skip_signature <- function() {
   return(FALSE)
 }
 
-#' Check whether HTTP error bodies may be exposed
+#' Check whether sensitive diagnostic values may be exposed
 #'
-#' Used by HTTP error helpers.
+#' Used by HTTP error and claim-validation helpers.
 #'
-#' @return `TRUE` when error bodies may be included in thrown conditions for
+#' @return `TRUE` when sensitive values may be included in diagnostics for
 #'   development use; otherwise `FALSE`.
 #' @keywords internal
 #' @noRd

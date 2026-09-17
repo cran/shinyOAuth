@@ -27,7 +27,7 @@ test_that("state_store_get_remove errors on missing entry and audits lookup fail
   )
 
   # Assert an audit_state_store_lookup_failed event was emitted
-  types <- vapply(events, function(e) as.character(e$type), character(1))
+  types <- vapply(events, function(e) as.character(e[["type"]]), character(1))
   expect_true(any(grepl("^audit_state_store_lookup_failed$", types)))
 })
 
@@ -42,9 +42,9 @@ test_that("state_store_get_remove errors when atomic take fails and audits failu
   # Backend that throws on take
   mem <- cachem::cache_mem(max_age = 60)
   store <- shinyOAuth::custom_cache(
-    get = function(key, missing = NULL) mem$get(key, missing = missing),
-    set = function(key, value) mem$set(key, value),
-    remove = function(key) mem$remove(key),
+    get = function(key, missing = NULL) mem[["get"]](key, missing = missing),
+    set = function(key, value) mem[["set"]](key, value),
+    remove = function(key) mem[["remove"]](key),
     take = function(key, missing = NULL) stop("take_failed"),
     info = function() list(max_age = 60)
   )
@@ -65,7 +65,7 @@ test_that("state_store_get_remove errors when atomic take fails and audits failu
   # Put an entry
   st <- "strict-state-1"
   key <- shinyOAuth:::state_cache_key(st)
-  mem$set(
+  mem[["set"]](
     key,
     list(browser_token = "bt", pkce_code_verifier = "cv", nonce = "n")
   )
@@ -77,7 +77,7 @@ test_that("state_store_get_remove errors when atomic take fails and audits failu
   )
 
   # Assert an audit_state_store_lookup_failed event was emitted
-  types <- vapply(events, function(e) as.character(e$type), character(1))
+  types <- vapply(events, function(e) as.character(e[["type"]]), character(1))
   expect_true(any(grepl("^audit_state_store_lookup_failed$", types)))
 })
 
@@ -97,7 +97,7 @@ test_that("state_store_get_remove errors when atomic take returns NULL", {
 
   st <- "take-null-state"
   key <- shinyOAuth:::state_cache_key(st)
-  client@state_store$set(
+  client@state_store[["set"]](
     key,
     list(browser_token = "bt", pkce_code_verifier = "cv", nonce = "n")
   )
@@ -105,9 +105,9 @@ test_that("state_store_get_remove errors when atomic take returns NULL", {
   store <- client@state_store
   # custom_cache with take that always returns NULL (simulates missing entry)
   client@state_store <- shinyOAuth::custom_cache(
-    get = function(key, missing = NULL) store$get(key, missing = missing),
-    set = function(key, value) store$set(key, value),
-    remove = function(key) store$remove(key),
+    get = function(key, missing = NULL) store[["get"]](key, missing = missing),
+    set = function(key, value) store[["set"]](key, value),
+    remove = function(key) store[["remove"]](key),
     take = function(key, missing = NULL) missing,
     info = function() list(max_age = 60)
   )
@@ -141,7 +141,7 @@ test_that("state_store_get_remove errors on malformed stored value and audits lo
 
   st <- "malformed-state-1"
   key <- shinyOAuth:::state_cache_key(st)
-  client@state_store$set(key, "not-a-list")
+  client@state_store[["set"]](key, "not-a-list")
 
   expect_error(
     shinyOAuth:::state_store_get_remove(client, st),
@@ -149,7 +149,7 @@ test_that("state_store_get_remove errors on malformed stored value and audits lo
   )
 
   # Assert an audit_state_store_lookup_failed event was emitted
-  types <- vapply(events, function(e) as.character(e$type), character(1))
+  types <- vapply(events, function(e) as.character(e[["type"]]), character(1))
   expect_true(any(grepl("^audit_state_store_lookup_failed$", types)))
 })
 
@@ -178,7 +178,7 @@ test_that("state_store_get_remove errors on missing required fields", {
   # Entry missing all required fields
   st <- "missing-fields-state"
   key <- shinyOAuth:::state_cache_key(st)
-  client@state_store$set(key, list(some_other_field = "value"))
+  client@state_store[["set"]](key, list(some_other_field = "value"))
 
   expect_error(
     shinyOAuth:::state_store_get_remove(client, st),
@@ -189,7 +189,10 @@ test_that("state_store_get_remove errors on missing required fields", {
   # Entry missing only browser_token
   st2 <- "partial-fields-state"
   key2 <- shinyOAuth:::state_cache_key(st2)
-  client@state_store$set(key2, list(pkce_code_verifier = "cv", nonce = "n"))
+  client@state_store[["set"]](
+    key2,
+    list(pkce_code_verifier = "cv", nonce = "n")
+  )
 
   expect_error(
     shinyOAuth:::state_store_get_remove(client, st2),
@@ -198,7 +201,7 @@ test_that("state_store_get_remove errors on missing required fields", {
   )
 
   # Assert an audit_state_store_lookup_failed event was emitted
-  types <- vapply(events, function(e) as.character(e$type), character(1))
+  types <- vapply(events, function(e) as.character(e[["type"]]), character(1))
   expect_true(any(grepl("^audit_state_store_lookup_failed$", types)))
 })
 
@@ -247,13 +250,16 @@ test_that("state_store_get_remove accepts omitted optional fields when disabled"
 
   st <- "missing-optional-fields-state"
   key <- shinyOAuth:::state_cache_key(st)
-  store$set(key, list(browser_token = "bt"))
+  store[["set"]](
+    key,
+    shinyOAuth:::state_store_seal(list(browser_token = "bt"), client, st)
+  )
 
   out <- shinyOAuth:::state_store_get_remove(client, st)
 
-  expect_equal(out$browser_token, "bt")
-  expect_null(out$pkce_code_verifier)
-  expect_null(out$nonce)
+  expect_equal(out[["browser_token"]], "bt")
+  expect_null(out[["pkce_code_verifier"]])
+  expect_null(out[["nonce"]])
 })
 
 test_that("state_store_get_remove still requires policy-enabled fields", {
@@ -301,7 +307,14 @@ test_that("state_store_get_remove still requires policy-enabled fields", {
 
   st_pkce <- "missing-pkce-field-state"
   key_pkce <- shinyOAuth:::state_cache_key(st_pkce)
-  store$set(key_pkce, list(browser_token = "bt"))
+  store[["set"]](
+    key_pkce,
+    shinyOAuth:::state_store_seal(
+      list(browser_token = "bt"),
+      pkce_client,
+      st_pkce
+    )
+  )
 
   expect_error(
     shinyOAuth:::state_store_get_remove(pkce_client, st_pkce),
@@ -324,7 +337,14 @@ test_that("state_store_get_remove still requires policy-enabled fields", {
 
   st_nonce <- "missing-nonce-field-state"
   key_nonce <- shinyOAuth:::state_cache_key(st_nonce)
-  store$set(key_nonce, list(browser_token = "bt"))
+  store[["set"]](
+    key_nonce,
+    shinyOAuth:::state_store_seal(
+      list(browser_token = "bt"),
+      nonce_client,
+      st_nonce
+    )
+  )
 
   expect_error(
     shinyOAuth:::state_store_get_remove(nonce_client, st_nonce),
@@ -357,7 +377,7 @@ test_that("state_store_get_remove errors on invalid browser_token value", {
   # Entry with NULL browser_token
   st <- "null-browser-token"
   key <- shinyOAuth:::state_cache_key(st)
-  client@state_store$set(
+  client@state_store[["set"]](
     key,
     list(browser_token = NULL, pkce_code_verifier = "cv", nonce = "n")
   )
@@ -371,7 +391,7 @@ test_that("state_store_get_remove errors on invalid browser_token value", {
   # Entry with empty string browser_token
   st2 <- "empty-browser-token"
   key2 <- shinyOAuth:::state_cache_key(st2)
-  client@state_store$set(
+  client@state_store[["set"]](
     key2,
     list(browser_token = "", pkce_code_verifier = "cv", nonce = "n")
   )
@@ -383,6 +403,6 @@ test_that("state_store_get_remove errors on invalid browser_token value", {
   )
 
   # Assert an audit_state_store_lookup_failed event was emitted
-  types <- vapply(events, function(e) as.character(e$type), character(1))
+  types <- vapply(events, function(e) as.character(e[["type"]]), character(1))
   expect_true(any(grepl("^audit_state_store_lookup_failed$", types)))
 })

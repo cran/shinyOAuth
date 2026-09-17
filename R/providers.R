@@ -10,9 +10,12 @@
 #' Create a generic OpenID Connect (OIDC) [OAuthProvider]
 #'
 #' @description
-#' Helper for providers that follow a standard OpenID Connect endpoint layout.
-#' It builds the usual OIDC endpoints from one base URL and then calls
-#' [oauth_provider()] with OIDC-friendly defaults.
+#' Build OIDC provider URLs from a base address and known endpoint paths.
+#' Use this when configuring an OIDC service without discovery, with its
+#' endpoint paths available from the service configuration or documentation.
+#' Use [oauth_provider_oidc_discover()] if your provider offers discovery, which
+#' looks up its actual URLs. This helper is for manual configuration; its
+#' default paths must match the service you are using.
 #'
 #' @param name Friendly name for the provider
 #' @param base_url Base URL for OIDC endpoints
@@ -23,6 +26,8 @@
 #' @param use_nonce Logical, whether to use OIDC nonce. Defaults to TRUE
 #' @param id_token_validation Logical, whether to validate ID tokens automatically
 #'   for this provider. Defaults to TRUE
+#' @param token_auth_style Token endpoint client authentication style passed to
+#'   [oauth_provider()]. Defaults to `"header"`.
 #' @param jwks_host_issuer_match When TRUE (default), enforce that the JWKS host
 #'   discovered from the provider matches the issuer host exactly. For
 #'   providers that serve JWKS from a different host (e.g., Google), set
@@ -48,8 +53,9 @@ oauth_provider_oidc <- function(
   use_nonce = TRUE,
   id_token_validation = TRUE,
   jwks_host_issuer_match = TRUE,
-  allowed_token_types = c('Bearer'),
-  ...
+  allowed_token_types = c("Bearer"),
+  ...,
+  token_auth_style = "header"
 ) {
   base_url <- sub("/+$", "", base_url)
 
@@ -65,9 +71,10 @@ oauth_provider_oidc <- function(
     userinfo_url = userinfo_url,
     introspection_url = introspection_url,
     issuer = base_url,
+    infer_oidc_from_issuer = TRUE,
     use_nonce = use_nonce,
     id_token_validation = id_token_validation,
-    token_auth_style = "header",
+    token_auth_style = token_auth_style,
     allowed_token_types = allowed_token_types,
     jwks_host_issuer_match = jwks_host_issuer_match,
     ...
@@ -79,17 +86,20 @@ oauth_provider_oidc <- function(
 #' Create a GitHub [OAuthProvider]
 #'
 #' @description
-#' Ready-to-use OAuth 2.0 provider settings for GitHub.
+#' Create the provider configuration for a GitHub OAuth App, then pass it with
+#' your app credentials to [oauth_client()]. This configures profile retrieval
+#' from GitHub's API; GitHub does not return an OIDC ID token.
 #'
 #' @details
 #' You can register a new GitHub OAuth 2.0 app in your
-#' ['Developer Settings'](https://github.com/settings/apps).
+#' [OAuth App settings](https://github.com/settings/developers).
 #'
 #' @param name Optional provider name (default "github")
 #'
 #' @return [OAuthProvider] object for use with a GitHub OAuth 2.0 app
 #'
-#' @example inst/examples/oauth_provider.R
+#' @examples
+#' oauth_provider_github()
 #'
 #' @export
 oauth_provider_github <- function(name = "github") {
@@ -113,14 +123,17 @@ oauth_provider_github <- function(name = "github") {
 
     userinfo_required = TRUE,
     userinfo_id_token_match = FALSE,
-    userinfo_id_selector = function(userinfo) as.character(userinfo$id)
+    userinfo_id_selector = function(userinfo) {
+      as.character(userinfo[["id"]])
+    }
   )
 }
 
 #' Create a Google [OAuthProvider]
 #'
 #' @description
-#' Ready-to-use [OAuthProvider] settings for Google.
+#' Use your Google app registration with [oauth_client()] to add Google
+#' sign-in. The helper configures OIDC validation and profile retrieval.
 #'
 #' @param name Optional provider name (default "google")
 #'
@@ -131,7 +144,14 @@ oauth_provider_github <- function(name = "github") {
 #' [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
 #' Configure the client ID & secret in your [OAuthClient].
 #'
-#' @example inst/examples/oauth_provider.R
+#' This preset uses a restricted Google OIDC profile: ID tokens must have
+#' `iss = "https://accounts.google.com"`, matching Google's discovery issuer.
+#' Google's [ID token validation guidance](https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken)
+#' also permits `"accounts.google.com"`; this alternate issuer is not accepted
+#' by this preset. Issuer comparison remains exact, as for other OIDC providers.
+#'
+#' @examples
+#' oauth_provider_google()
 #'
 #' @export
 oauth_provider_google <- function(name = "google") {
@@ -144,6 +164,7 @@ oauth_provider_google <- function(name = "google") {
     revocation_url = "https://oauth2.googleapis.com/revoke",
     userinfo_url = "https://openidconnect.googleapis.com/v1/userinfo",
     issuer = "https://accounts.google.com",
+    infer_oidc_from_issuer = TRUE,
 
     use_nonce = TRUE,
 
@@ -164,47 +185,26 @@ oauth_provider_google <- function(name = "google") {
 #' Create a Microsoft (Entra ID) [OAuthProvider]
 #'
 #' @description
-#' Ready-to-use [OAuthProvider] settings for Microsoft Entra ID (formerly Azure
-#' AD) using the v2.0 endpoints. Accepts a tenant identifier and configures the
-#' authorization, token, and userinfo endpoints directly.
+#' Create provider settings for Microsoft Entra ID. Choose which accounts may
+#' sign in with `tenant`, then pass the provider and your own registered app's
+#' credentials to [oauth_client()].
 #'
 #' @details
-#' Most users only need to choose the tenant and decide whether to keep ID
-#' token validation enabled. The remaining details below explain how the helper
-#' behaves for Microsoft's different tenant styles.
+#' Use a directory (tenant) ID to target one organization. `"organizations"`
+#' allows work or school accounts, `"consumers"` allows personal Microsoft
+#' accounts, and `"common"` allows both. Your app registration and app access
+#' rules must also permit the intended accounts.
 #'
-#' The `tenant` can be one of the special values "common", "organizations",
-#' or "consumers", or a specific directory (tenant) ID GUID
-#' (e.g., "00000000-0000-0000-0000-000000000000").
+#' ID token validation is enabled for these tenant choices. For a directory ID,
+#' the issuer must match that directory. `"common"` and `"organizations"` use
+#' Microsoft's tenant-independent issuer template and signing-key issuer rules.
+#' `"consumers"` uses the consumer tenant issuer. The helper restricts ID token
+#' algorithms to RS256 and fetches userinfo from Microsoft Graph.
 #'
-#' When `tenant` is a specific GUID, the provider enables strict ID token
-#' validation with the tenant-specific issuer.
-#'
-#' For `tenant = "common"` or `tenant = "organizations"`, the helper enables
-#' Microsoft Entra's tenant-independent validation mode by default: ID tokens
-#' are checked against Microsoft's `{tenantid}` issuer template and the signing
-#' key's own `issuer` scope, as documented by Microsoft for multi-tenant
-#' metadata. Runtime JWKS discovery for these aliases also uses host-only
-#' discovery issuer matching because Microsoft's tenant-independent metadata
-#' publishes a templated issuer rather than echoing the alias URL exactly.
-#'
-#' For `tenant = "consumers"`, the helper resolves the stable consumer tenant
-#' issuer (`9188040d-6c67-4c5b-b112-36a304b66dad`) and performs normal exact-
-#' issuer validation.
-#'
-#' Set `id_token_validation = FALSE` to opt out of ID token and nonce
-#' validation for these aliases, which falls back to OAuth 2.0 plus userinfo
-#' identity only.
-#'
-#' Microsoft issues RS256 ID tokens; `allowed_algs` is restricted accordingly.
-#' The userinfo endpoint is provided by Microsoft Graph
-#' (https://graph.microsoft.com/oidc/userinfo).
-#'
-#' When configuring your [OAuthClient], if you do not have the option to
-#' register an app or simply wish to test during development, you may be able
-#' to use the default Azure CLI public app, with `client_id`
-#' '04b07795-8ddb-461a-bbee-02f9e1bf7b46' (uses `redirect_uri`
-#' 'http://localhost:8100').
+#' Setting `id_token_validation = FALSE` disables ID token and nonce checks and
+#' leaves OAuth plus profile retrieval. Keep the default for OIDC sign-in.
+#' Tenant domains and other unrecognized tenant identifiers require this
+#' explicit opt-out; otherwise use the directory GUID to retain OIDC validation.
 #'
 #' @param name Optional friendly name for the provider. Defaults to "microsoft"
 #' @param tenant Tenant identifier ("common", "organizations", "consumers",
@@ -230,10 +230,30 @@ oauth_provider_microsoft <- function(
   if (!is_valid_string(tenant)) {
     err_input("tenant must be a non-empty string")
   }
+  if (
+    !is.null(id_token_validation) &&
+      !(is.logical(id_token_validation) &&
+        length(id_token_validation) == 1L &&
+        !is.na(id_token_validation))
+  ) {
+    err_input(
+      "id_token_validation must be NULL or a single non-missing logical"
+    )
+  }
   consumer_tenant_guid <- "9188040d-6c67-4c5b-b112-36a304b66dad"
   tenant_independent_alias <- tenant %in% c("common", "organizations")
   consumer_alias <- identical(tenant, "consumers")
   is_guid <- is_guid_like(tenant)
+  if (
+    !(is_guid || tenant_independent_alias || consumer_alias) &&
+      !identical(id_token_validation, FALSE)
+  ) {
+    err_input(paste(
+      "Unrecognized Microsoft tenant: use a directory GUID or",
+      "common, organizations, or consumers for OIDC sign-in.",
+      "OAuth-only operation requires explicit id_token_validation = FALSE."
+    ))
+  }
   if (is.null(id_token_validation)) {
     id_token_validation <- is_guid || tenant_independent_alias || consumer_alias
   }
@@ -268,6 +288,7 @@ oauth_provider_microsoft <- function(
     introspection_url = NA_character_,
 
     issuer = issuer,
+    infer_oidc_from_issuer = TRUE,
     issuer_match = issuer_match,
 
     use_nonce = isTRUE(id_token_validation),
@@ -279,11 +300,13 @@ oauth_provider_microsoft <- function(
     extra_token_params = list(),
     extra_token_headers = character(),
 
-    allowed_algs = c("RS256"),
+    id_token_allowed_algs = c("RS256"),
 
     userinfo_required = TRUE,
     userinfo_id_token_match = isTRUE(id_token_validation),
-    userinfo_id_selector = function(userinfo) userinfo$sub,
+    userinfo_id_selector = function(userinfo) {
+      userinfo[["sub"]]
+    },
 
     id_token_required = isTRUE(id_token_validation),
     id_token_validation = isTRUE(id_token_validation)
@@ -293,25 +316,44 @@ oauth_provider_microsoft <- function(
 #' Create a Spotify [OAuthProvider]
 #'
 #' @description
-#' Ready-to-use OAuth 2.0 provider settings for Spotify.
-#' It uses `/v1/me` as the user profile endpoint and does not expect ID tokens.
+#' Connect your app to a user's Spotify account. Pass this provider to
+#' [oauth_client()] and request the scopes needed by the Spotify API calls you
+#' plan to make. The helper configures profile retrieval through Spotify's API
+#' and does not expect an ID token.
 #'
 #' @param name Optional provider name (default "spotify")
+#' @param allow_legacy_id Whether to fall back to Spotify's mutable `id` when
+#'   `account_id` is absent. Default `FALSE`; enable only during migration.
 #' @details
 #' Spotify requires scopes to be included in the authorization request.
 #' Set requested scopes on the client with `oauth_client(..., scopes = ...)`.
+#' Identity uses Spotify's immutable `account_id`. Existing installations must
+#' migrate stored account mappings and audit digests from `id` before upgrading.
+#' Link the old and new identifiers only from a successfully authenticated
+#' profile; do not use display names or email to merge accounts. To temporarily
+#' preserve old mappings, explicitly replace `provider@userinfo_id_selector`
+#' with `function(userinfo) userinfo[["id"]]` while completing the migration.
 #'
 #' @return [OAuthProvider] object for use with a Spotify OAuth 2.0 app
 #'
-#' @example inst/examples/oauth_provider.R
+#' @examples
+#' oauth_provider_spotify()
 #' @seealso
-#' For an example application which using Spotify OAuth 2.0 login to
-#' display the user's listening data, see `vignette("example-spotify")`.
+#' For a Shiny app that connects to Spotify to
+#' display the user's listening data, see the [Spotify example](https://lukakoning.github.io/shinyOAuth/articles/example-spotify.html).
 #'
 #' @export
 oauth_provider_spotify <- function(
-  name = "spotify"
+  name = "spotify",
+  allow_legacy_id = FALSE
 ) {
+  if (
+    !is.logical(allow_legacy_id) ||
+      length(allow_legacy_id) != 1L ||
+      is.na(allow_legacy_id)
+  ) {
+    err_input("allow_legacy_id must be a single non-NA logical")
+  }
   oauth_provider(
     name = name,
 
@@ -330,7 +372,20 @@ oauth_provider_spotify <- function(
     extra_token_headers = character(),
     token_auth_style = "header",
 
-    userinfo_id_selector = function(userinfo) as.character(userinfo$id),
+    userinfo_id_selector = function(userinfo) {
+      account_id <- userinfo[["account_id"]]
+      if (is_valid_string(account_id)) {
+        return(account_id)
+      }
+      if (
+        isTRUE(allow_legacy_id) &&
+          is.null(account_id) &&
+          is_valid_string(userinfo[["id"]])
+      ) {
+        return(userinfo[["id"]])
+      }
+      NA_character_
+    },
     userinfo_required = TRUE,
     userinfo_id_token_match = FALSE,
 
@@ -344,21 +399,56 @@ oauth_provider_spotify <- function(
 
 #' Create a Slack [OAuthProvider] (via OIDC discovery)
 #'
+#' @description
+#' Look up Slack's OpenID Connect settings for Sign in with Slack. This
+#' helper contacts the discovery service during setup; pass its result to
+#' [oauth_client()] with your Slack app credentials.
+#'
 #' @param name Optional provider name (default "slack")
+#' @param profile Slack app registration profile: `"confidential"` (default)
+#'   uses HTTP Basic and OIDC nonce validation without PKCE; `"public_pkce"`
+#'   uses S256 PKCE and sends no client secret. Select the public profile only
+#'   after enabling PKCE for that Slack app. Slack marks the app public, and
+#'   reversing that registration setting requires contacting Slack support.
+#'   See <https://docs.slack.dev/authentication/using-pkce/>.
 #'
 #' @return [OAuthProvider] object configured for Slack
 #'
-#' @example inst/examples/oauth_provider.R
+#' @examples
+#' \dontrun{
+#' oauth_provider_slack()
+#' }
 #'
 #' @export
-oauth_provider_slack <- function(name = "slack") {
-  oauth_provider_oidc_discover(issuer = "https://slack.com", name = name)
+oauth_provider_slack <- function(
+  name = "slack",
+  profile = c("confidential", "public_pkce")
+) {
+  profile <- match.arg(profile)
+  provider <- oauth_provider_oidc_discover(
+    issuer = "https://slack.com",
+    name = name,
+    token_auth_style = "header",
+    use_pkce = identical(profile, "public_pkce")
+  )
+  if (identical(profile, "public_pkce")) {
+    # Slack's global discovery omits `none`; the explicit app registration
+    # profile is the authority for this app-specific public-client setting.
+    provider@token_auth_style <- "public"
+  }
+  provider
 }
 
 #' Create a Keycloak [OAuthProvider] (via OIDC discovery)
 #'
+#' @description
+#' Look up login settings for a Keycloak realm. Supply your server URL
+#' and realm name, then pass the result to [oauth_client()]. This helper
+#' contacts the Keycloak server during setup.
+#'
 #' @param base_url Base URL of the Keycloak server, e.g.,
-#'  "http://localhost:8080"
+#'  "http://localhost:8080". Local HTTP development also requires
+#'  `options(shinyOAuth.allow_insecure_oidc_loopback = TRUE)`.
 #' @param realm Keycloak realm name, e.g., "myrealm"
 #' @param name Optional provider name. Defaults to `paste0('keycloak-', realm)`
 #' @param token_auth_style Optional override for token endpoint authentication
@@ -369,17 +459,26 @@ oauth_provider_slack <- function(name = "slack") {
 #'  if you need to suppress `client_secret` even when it is set in the
 #'  environment. If you pass `NULL`, discovery will infer the method from the
 #'  provider's `token_endpoint_auth_methods_supported` metadata.
+#' @param jarm_tolerate_duplicate_top_level_iss Logical. Defaults to `TRUE`
+#'  for Keycloak because current Keycloak JARM responses may repeat an
+#'  identical top-level `iss` claim. Set `FALSE` to fail closed on duplicate
+#'  top-level `iss` members instead of applying this interoperability
+#'  workaround.
 #'
 #' @return [OAuthProvider] object configured for the specified Keycloak realm
 #'
-#' @example inst/examples/oauth_provider.R
+#' @examples
+#' \dontrun{
+#' oauth_provider_keycloak("https://login.example.com", realm = "myrealm")
+#' }
 #'
 #' @export
 oauth_provider_keycloak <- function(
   base_url,
   realm,
   name = paste0("keycloak-", realm),
-  token_auth_style = "body"
+  token_auth_style = "body",
+  jarm_tolerate_duplicate_top_level_iss = TRUE
 ) {
   if (!is_valid_string(base_url)) {
     err_input("base_url must be a non-empty string")
@@ -393,19 +492,30 @@ oauth_provider_keycloak <- function(
   oauth_provider_oidc_discover(
     issuer = issuer,
     name = name,
-    token_auth_style = token_auth_style
+    token_auth_style = token_auth_style,
+    jarm_tolerate_duplicate_top_level_iss = jarm_tolerate_duplicate_top_level_iss
   )
 }
 
 #' Create an Okta [OAuthProvider] (via OIDC discovery)
 #'
+#' @description
+#' Look up login settings for your Okta domain and authorization server.
+#' Pass the result to [oauth_client()] with your registered app credentials.
+#' This helper makes a discovery request during setup.
+#'
 #' @param domain Your Okta domain, e.g., "dev-123456.okta.com"
-#' @param auth_server Authorization server ID (default "default")
+#' @param auth_server Authorization server ID for a custom authorization
+#'   server (default "default"). Use `NULL` to target the org authorization
+#'   server at `https://{yourOktaDomain}`.
 #' @param name Optional provider name (default "okta")
 #'
 #' @return [OAuthProvider] object configured for the specified Okta domain
 #'
-#' @example inst/examples/oauth_provider.R
+#' @examples
+#' \dontrun{
+#' oauth_provider_okta("dev-123456.okta.com")
+#' }
 #'
 #' @export
 oauth_provider_okta <- function(
@@ -417,13 +527,21 @@ oauth_provider_okta <- function(
     err_input("domain must be a non-empty string")
   }
 
+  if (!(is.null(auth_server) || is_valid_string(auth_server))) {
+    err_input("auth_server must be NULL or a non-empty string")
+  }
+
   base <- if (grepl("^https?://", domain)) {
     domain
   } else {
     paste0("https://", domain)
   }
 
-  issuer <- paste0(rtrim_slash(base), "/oauth2/", auth_server)
+  issuer <- if (is.null(auth_server)) {
+    rtrim_slash(base)
+  } else {
+    paste0(rtrim_slash(base), "/oauth2/", auth_server)
+  }
 
   oauth_provider_oidc_discover(
     issuer = issuer,
@@ -433,13 +551,21 @@ oauth_provider_okta <- function(
 
 #' Create an Auth0 [OAuthProvider] (via OIDC discovery)
 #'
+#' @description
+#' Look up login settings for your Auth0 domain. Pass the result to
+#' [oauth_client()] with your registered app credentials. This helper makes
+#' a discovery request during setup.
+#'
 #' @param domain Your Auth0 domain, e.g., "your-domain.auth0.com"
 #' @param name Optional provider name (default "auth0")
 #' @param audience Optional audience value to send in authorization requests.
 #'
 #' @return [OAuthProvider] object configured for the specified Auth0 domain
 #'
-#' @example inst/examples/oauth_provider.R
+#' @examples
+#' \dontrun{
+#' oauth_provider_auth0("your-domain.auth0.com")
+#' }
 #'
 #' @export
 oauth_provider_auth0 <- function(domain, name = "auth0", audience = NULL) {
@@ -453,7 +579,9 @@ oauth_provider_auth0 <- function(domain, name = "auth0", audience = NULL) {
     paste0("https://", domain)
   }
 
-  issuer <- rtrim_slash(base)
+  # Auth0's issuer identifier includes a trailing slash. Preserve it for the
+  # exact Discovery and ID-token issuer comparisons required by OIDC.
+  issuer <- paste0(rtrim_slash(base), "/")
 
   extra_auth <- if (!is.null(audience)) list(audience = audience) else list()
 
@@ -507,8 +635,12 @@ microsoft_tenant_independent_issuer <- function(issuer) {
     return(NULL)
   }
 
-  host <- tolower(parsed$hostname %||% "")
-  path <- tolower(gsub("^/+|/+$", "", parsed$path %||% ""))
+  host <- tolower(parsed[["hostname"]] %||% "")
+  path <- tolower(gsub(
+    "^/+|/+$",
+    "",
+    parsed[["path"]] %||% ""
+  ))
 
   if (!identical(host, "login.microsoftonline.com")) {
     return(NULL)
@@ -541,7 +673,7 @@ resolve_expected_id_token_issuer <- function(provider_issuer, token_payload) {
     ))
   }
 
-  token_tid <- token_payload$tid %||% NULL
+  token_tid <- token_payload[["tid"]] %||% NULL
   if (!is_guid_like(token_tid)) {
     err_id_token(c(
       "x" = "Microsoft ID token missing or invalid tid claim",
@@ -591,7 +723,7 @@ filter_microsoft_jwks_for_token_issuer <- function(
   keep <- vapply(
     keys,
     function(key) {
-      key_issuer <- key$issuer %||% NULL
+      key_issuer <- key[["issuer"]] %||% NULL
       if (!is_valid_string(key_issuer)) {
         return(FALSE)
       }

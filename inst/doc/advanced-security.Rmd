@@ -1,0 +1,723 @@
+---
+title: "Advanced security configuration"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Advanced security configuration}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+## Overview
+
+This vignette documents the configuration of OAuth 2.0 and OpenID Connect
+extensions supported by shinyOAuth: JWT client authentication, mutual TLS
+(mTLS), signed authorization requests (JAR), pushed authorization requests
+(PAR), Form Post responses, signed authorization responses (JARM), and tokens
+bound to a private key (DPoP).
+
+These features require corresponding support and configuration at the provider.
+The examples extend the provider and client setup in the [usage vignette](usage.html).
+Replace placeholder domains, credentials, and key paths with your registered
+values. Each example shows the settings for the feature being discussed.
+
+## Browser binding and deployment boundary
+
+Use HTTPS and treat every service on the same hostname as trusted, including
+services on other ports. Cookie scope does not include the port, as specified
+in [RFC 6265 section 8.5](https://www.rfc-editor.org/rfc/rfc6265.html#section-8.5).
+The `__Host-` prefix prevents sibling-domain cookie injection; it does not
+isolate ports. Signed or `HttpOnly` cookies still reach same-host services in
+HTTP requests. Use a dedicated hostname when those services are untrusted.
+
+shinyOAuth keeps the actual browser-binding token in origin- and tab-scoped session
+storage, accompanied by an independent random cookie marker. It restores the
+binding only when the cookie matches an unexpired local record. Reading or
+planting a cookie on another port cannot establish that record. Cookie
+disruption can still abort login; pages and scripts on the same origin can
+access session storage, so XSS prevention remains necessary. Cookies, session
+storage, and Web Crypto must be available, and pending logins from older
+cookie-only or local-storage versions must be restarted after upgrading.
+
+Each new authorization request gets a fresh server-selected binding and a distinct
+marker cookie. Idle predecessor markers are removed when the new binding is
+ready. Predecessors associated with pending transactions (or older records whose
+transaction status is unknown) remain until their original TTL expires, so a
+cloned tab cannot invalidate the original tab's pending login. Application
+callback routes and tabs have independent records; complete login in the tab
+that started it. Private
+module inputs are excluded from both URL and disk bookmarks. Avoid copying
+browser tokens into custom bookmark values or logs. The acknowledgment is a
+delivery check, not independent server verification of HTTP cookie possession.
+The standalone `prepare_call()` and `handle_callback()` APIs still require
+the caller to establish and protect their own browser binding.
+
+## Provider metadata and OIDC discovery
+
+`oauth_provider_oidc_discover()` reads provider metadata used by these
+features, including PAR support, JARM and DPoP algorithms, and mTLS endpoint
+aliases:
+
+```{r, eval = FALSE}
+provider <- oauth_provider_oidc_discover(
+  issuer = "https://id.example.com"
+)
+```
+
+The sections below show the extra settings you usually add on top of your normal
+`oauth_client()` setup.
+
+## JWT client authentication
+
+Some providers require your app to sign a short statement proving its
+identity when requesting tokens. This **client assertion** is a JWT (JSON
+Web Token). It identifies the app, rather than the user signing in.
+
+For a registered private key, select the method during provider setup and
+supply the key when creating your client:
+
+```{r, eval = FALSE}
+provider <- oauth_provider_oidc_discover(
+  "https://id.example.com", token_auth_style = "private_key_jwt"
+)
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  redirect_uri = "https://app.example.com",
+  scopes = c("openid", "profile"),
+  client_assertion_private_key = openssl::read_key("keys/client-key.pem"),
+  client_assertion_private_key_kid = "registered-key-id"
+)
+```
+
+Register the corresponding public key with your provider. For
+`client_secret_jwt`, select that method and supply a sufficiently strong
+`client_secret` instead. `client_assertion_alg` has a key-compatible default;
+`client_assertion_audience` overrides the expected recipient if your provider
+requires a value other than the token request URL.
+
+For the client assertion profile referenced by OAuth 2.1 draft 16, select the
+trusted authorization-server issuer as the sole audience and optionally use
+the recommended explicit type:
+
+```{r, eval = FALSE}
+client@client_assertion_audience <- provider@issuer
+client@client_assertion_typ <- "client-authentication+jwt"
+```
+
+[RFC7523bis draft 11 section 4](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-rfc7523bis-11#section-4)
+requires the issuer audience and recommends this type. The package preserves
+the existing `JWT` type and request-endpoint audience defaults, including PAR's
+existing issuer handling. The checker treats audience mismatches as mandatory
+findings and legacy typing as an advisory. These settings affect client
+authentication assertions, including retries, and do not change JAR, JARM or ID
+token headers. The same settings can be selected in `endpoint_auth` overrides.
+
+Authentication can differ at PAR, introspection, and revocation endpoints.
+Discovery preserves their independent method and algorithm metadata; configure
+credentials and audiences to match each endpoint's registration agreement:
+
+```{r, eval = FALSE}
+client@endpoint_auth <- list(
+  introspection = list(
+    token_auth_style = "header",
+    client_id = "registered-inspector",
+    client_secret = Sys.getenv("INTROSPECTION_SECRET"),
+    extra_headers = c("X-App" = "registered-app")
+  ),
+  revocation = list(
+    token_auth_style = "private_key_jwt",
+    client_assertion_private_key = openssl::read_key("keys/revocation-key.pem"),
+    client_assertion_alg = "RS256",
+    client_assertion_audience = "https://id.example.com/revocation"
+  )
+)
+```
+
+Unspecified credentials inherit the client's settings. Advertised methods and
+JWT algorithms are checked per endpoint. Discovery defaults omitted revocation
+methods to Basic authentication; omitted introspection methods have no standard
+default, so confirm the configured method with your provider. PAR inherits the
+token authentication settings unless explicitly overridden. `extra_token_headers`
+now applies only to exchange and refresh: opt in through `extra_headers` at
+each other endpoint that should receive those headers, even on the same origin.
+
+## Issuer comparison and transport policy
+
+`compare_callback_issuer = TRUE` compares a supplied callback `iss` exactly
+against `provider@issuer`. Pair it with `enforce_callback_issuer = FALSE` when
+absence is permitted for your older provider. Required presence always implies
+comparison. An explicitly supplied legacy `enforce_callback_issuer = FALSE`
+retains complete opt-out unless comparison is explicitly enabled. Otherwise,
+issuer-configured clients enable comparison automatically.
+
+Participating clients require `iss` when the provider advertises RFC 9207
+support. Validated JARM supplies its own issuer and does not require a redundant
+outer value. Multi-server applications must retain their selected issuer or
+distinct-route defense. The expected issuer comes from trusted configuration;
+it is not inferred from a token URL or normalized before comparison.
+See [RFC 9207 section 2.4](https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4).
+
+`options(shinyOAuth.tls_min_version = "1.2")` requires TLS 1.2 or later on
+package HTTPS requests; `"1.3"` selects a higher minimum and `NULL` preserves
+runtime defaults. Configure it before discovery or login. The policy preserves
+stronger supplied minima, compatible maxima and custom CA roots. It also
+applies in async workers and participates in pending-login policy checks.
+An absent option is insufficient evidence about an actual handshake; the
+checker reports older unresolved backend defaults as unknown. Browser/proxy
+hops and future resource requests need separate validation. Details and
+constraints are in [package options](package-options.html#http-settings-timeout-retries-user-agent).
+
+## Callback pages and application scripts
+
+Use `oauth_ui(ui, id = "auth", client = client)` for query and query-JARM
+responses. The ID and client must match `oauth_module_server()`. The wrapper
+validates callbacks and stores sealed, short-lived responses, then redirects
+to a one-time bridge URL before invoking the application UI. State remains
+single-use and browser-bound. Missing bridge configuration rejects raw
+callbacks; existing `oauth_ui(ui)` setups must add `id` and `client`.
+
+Callback and HTML responses send `Cache-Control: no-store`, `Pragma: no-cache`,
+and `Referrer-Policy: no-referrer`. These do not remove upstream access logs:
+configure proxies and hosting logs to omit callback queries. Keep third-party
+scripts off any unsanitized callback page, including when using
+`use_shinyOAuth()` with a custom HTTP integration. Register fixed tenant or
+routing query parameters in the redirect URI; unregistered inbound parameters
+are discarded on continuation. For trusted HTTPS-terminating proxies, use
+`request_uri_resolver` with the same trust checks as `oauth_form_post_ui()`.
+
+## Provider key-set validation
+
+shinyOAuth validates the whole fetched JWKS before selecting a key by `kid`,
+usage, operations, or algorithm. A malformed RSA, EC, or OKP public entry can
+therefore reject the set even when another entry would validate the token.
+This is a deliberately stricter availability policy than the recommendation
+to ignore individual unusable keys in [RFC 7517 section 5](https://www.rfc-editor.org/rfc/rfc7517.html#section-5).
+Providers must publish structurally valid public entries throughout key rotation;
+an unrelated broken entry can interrupt login, signed UserInfo, JARM, or Request
+Object encryption until the provider repairs its JWKS.
+
+Unknown key types are ignored for selection after common structural checks.
+Malformed set structure, duplicate JSON members, and secret key material are
+rejected. With pinning mode `"any"`, at least one supported public key must match
+a configured thumbprint, and selected keys must be pinned. Mode `"all"` requires
+every RSA, EC, and OKP entry in the set to have a computable, configured thumbprint,
+including entries that would later be filtered out. Neither mode skips the
+whole-set structural checks or the selected key's strength checks.
+
+## Trusted ID-token audiences
+
+ID tokens with multiple audiences remain rejected by default. If an issuer
+legitimately includes another trusted audience, configure
+`trusted_id_token_audiences = c("trusted-service")` on `oauth_client()`.
+The token must still include this client's ID in `aud`, and `azp` must equal
+this client's ID when present. Trusted multiple audiences do not require an
+`azp` claim under [OIDC Core section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation).
+Other audiences, incorrect authorized parties, and invalid signatures are rejected.
+
+## Mutual TLS (mTLS)
+
+With mutual TLS (mTLS), the client presents a certificate during the TLS
+connection. OAuth 2.0 uses this for certificate-based client authentication
+and for certificate-bound access tokens (RFC 8705). With certificate-bound
+tokens, the API requires the matching certificate when accepting a token.
+The provider must support the selected use of mTLS.
+
+```{r mtls-provider, eval = FALSE}
+provider <- oauth_provider(
+  name = "example-mtls",
+  # Exact OIDC issuer; enables nonce and ID-token validation
+  issuer = "https://id.example.com",
+  auth_url = "https://id.example.com/authorize",
+  token_url = "https://id.example.com/token",
+  jwks_uri = "https://id.example.com/jwks",
+  userinfo_url = "https://id.example.com/userinfo",
+  # Use RFC 8705 client-certificate auth at the token endpoint
+  token_auth_style = "tls_client_auth",
+  # Use mTLS-specific endpoints when the provider publishes them
+  mtls_endpoint_aliases = list(
+    token_endpoint = "https://mtls.id.example.com/token",
+    userinfo_endpoint = "https://mtls.id.example.com/userinfo"
+  ),
+  # Expect certificate-bound access tokens from the provider
+  mtls_client_certificate_bound_access_tokens = TRUE
+)
+```
+
+```{r, eval = FALSE}
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  redirect_uri = "https://app.example.com/auth/callback",
+  scopes = c("openid", "profile"),
+  # Certificate and key sent on mTLS requests
+  mtls_client_cert_file = "certs/client.pem",
+  mtls_client_key_file = "certs/client-key.pem",
+  mtls_client_ca_file = "certs/ca.pem",
+  # Require the matching certificate when access tokens are used
+  mtls_certificate_bound_access_tokens = TRUE
+)
+```
+
+`mtls_certificate_bound_access_tokens = TRUE` enables certificate presentation
+and mTLS endpoint-alias selection independently of the OAuth client
+authentication method. Configuring certificate files alone does not enable
+certificate-bound token requests.
+
+The separate `mtls_require_observed_cnf` policy defaults to `TRUE`, preserving
+strict local assurance: shinyOAuth must observe `cnf[["x5t#S256"]]` in the token
+response, a JWT access token, or introspection and match it to the configured
+certificate. An opaque bound token without observable binding fails this policy.
+
+RFC 8705 also permits opaque tokens whose binding is known only to the
+authorization and resource servers. For that deployment, configure the
+certificate/key and provider capability as above, then use both settings:
+
+```{r, eval = FALSE}
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  redirect_uri = "https://app.example.com/auth/callback",
+  mtls_client_cert_file = "certs/client.pem",
+  mtls_client_key_file = "certs/client-key.pem",
+  mtls_certificate_bound_access_tokens = TRUE,
+  mtls_require_observed_cnf = FALSE
+)
+```
+
+This mode still presents the certificate on token, refresh, UserInfo, and
+protected-resource requests, including with body authentication, public
+clients, or `private_key_jwt`. It prefers configured mTLS aliases and falls
+back to the configured endpoint URL when no alias is available. The servers
+must enforce binding; shinyOAuth allows missing confirmation but still
+rejects any observed mismatch or conflicting confirmation claims. See
+[RFC 8705, Section 3](https://www.rfc-editor.org/rfc/rfc8705.html#section-3).
+
+On Windows, separate PEM certificate/key files require curl's OpenSSL backend.
+Set `CURL_SSL_BACKEND=openssl` in `.Renviron` and restart R, or run
+`Sys.setenv(CURL_SSL_BACKEND = "openssl")` before loading curl, httr2, or shinyOAuth
+in a fresh session. Check `curl::curl_version()[["ssl_version"]]`: parenthesized
+backends are inactive alternatives. If OpenSSL is unavailable, install a curl
+build that provides it. shinyOAuth rejects an active Schannel backend for this
+PEM configuration before sending the request. See the
+[libcurl certificate documentation](https://curl.se/libcurl/c/CURLOPT_SSLCERT.html).
+
+If your provider uses dynamic client registration, `oauth_client_mtls_registration()`
+can build the RFC 8705 registration metadata from the configured client.
+
+## JWT-secured authorization request (JAR)
+
+JAR protects authorization request parameters with a signature. The client
+sends them in a JWT called a Request Object, which the provider verifies
+before processing the request. Optional Request Object encryption also protects
+the request contents. Both settings must match the provider registration.
+
+For enforced request integrity, configure the authorization server to require
+signed Request Objects for this client, for example with the RFC 9101 client
+registration field `require_signed_request_object = true`, and register its
+signing key and allowed algorithm. Confirm the server actually enforces this
+policy. Setting `signed_request_object_required = TRUE` below describes that
+server policy and enforces local construction; it does not register or change
+the client at the server. If unsigned requests remain accepted, signing is
+optional and cannot prevent a downgrade to unsigned authorization requests
+([RFC 9101 section 10.5](https://www.rfc-editor.org/rfc/rfc9101.html#section-10.5)).
+
+```{r, eval = FALSE}
+provider <- oauth_provider(
+  name = "example-jar",
+  issuer = "https://id.example.com",
+  auth_url = "https://id.example.com/authorize",
+  token_url = "https://id.example.com/token",
+  # The server registration must already require signed Request Objects
+  signed_request_object_required = TRUE,
+  request_parameter_supported = TRUE,
+  request_object_signing_alg_values_supported = c("RS256")
+)
+
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  client_secret = "client-secret",
+  redirect_uri = "https://app.example.com/auth/callback",
+  scopes = c("openid", "profile"),
+  # Signing key for the Request Object
+  client_assertion_private_key = openssl::read_key("keys/client-key.pem"),
+  # Send the authorization request as a JWT in the request parameter
+  request_object_mode = "request",
+  request_object_signing_alg = "RS256"
+)
+```
+
+Test the server policy before deployment: send an otherwise valid authorization
+request for this same client without `request` or `request_uri`. For example:
+
+```{r, eval = FALSE}
+unsigned <- httr2::request(provider@auth_url) |>
+  httr2::req_url_query(
+    client_id = client@client_id,
+    redirect_uri = client@redirect_uri,
+    response_type = "code", scope = "openid profile",
+    state = "unsigned-policy-probe",
+    code_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+    code_challenge_method = "S256"
+  ) |>
+  httr2::req_options(followlocation = FALSE) |>
+  httr2::req_error(is_error = function(resp) FALSE) |>
+  httr2::req_perform()
+httr2::resp_status(unsigned)
+httr2::resp_headers(unsigned)
+httr2::resp_body_string(unsigned)
+```
+
+The negative test passes only when the server explicitly rejects the request
+because the required signed Request Object is missing. Check its documented
+error response or server audit event for that reason; a generic HTTP error is
+insufficient. A login/consent page, authorization code, or `login_required`
+response does not establish enforcement. Repeat this probe in deployment tests
+alongside a successful signed request.
+
+Register the signing key with your provider. To encrypt the signed request
+too, configure `request_object_encryption_alg = "RSA-OAEP"` and
+`request_object_encryption_enc` to a supported AES-CBC-HMAC value such as
+`"A128CBC-HS256"`. The provider must publish a suitable encryption key or
+you must supply `request_object_encryption_jwk` to [`oauth_provider()`](https://lukakoning.github.io/shinyOAuth/reference/oauth_provider.html).
+See [`oauth_client()`](https://lukakoning.github.io/shinyOAuth/reference/oauth_client.html)
+for supported algorithms and the provider reference for encryption key selection.
+
+PAR, described below, keeps most request details out of the browser URL.
+It can also carry a signed Request Object, combining PAR with JAR.
+
+### Request Objects published by the Shiny app
+
+If you set `request_object_mode = "request_uri"`, shinyOAuth still builds a
+signed Request Object, but instead of putting that JWT directly on the browser
+redirect as `request=...`, it publishes the Request Object at a URL and sends
+the provider `request_uri=<that URL>`. The provider then fetches that published
+Request Object itself.
+
+`oauth_module_server()` serves the Request Object at a short-lived URL
+under the Shiny app. The provider must be able to request that URL directly.
+
+This mode is separate from PAR and cannot be used when the provider requires
+PAR. With PAR, the provider issues the reference; with this mode, the provider
+fetches a URL published by your app.
+
+Deployment requirements:
+
+- the published URL must use HTTPS and be reachable from the provider, not just from the
+  user's browser
+- if the provider requires pre-registered `request_uri` values, the public URL
+  or wildcard prefix must already be registered there
+
+```{r, eval = FALSE}
+request_uri_provider <- oauth_provider(
+  name = "example-request-uri",
+  issuer = "https://id.example.com",
+  auth_url = "https://id.example.com/authorize",
+  token_url = "https://id.example.com/token",
+  request_uri_parameter_supported = TRUE,
+  request_object_signing_alg_values_supported = "RS256"
+)
+
+client <- oauth_client(
+  provider = request_uri_provider,
+  client_id = "client-id",
+  client_secret = "client-secret",
+  redirect_uri = "https://app.example.com/auth/callback",
+  scopes = c("openid", "profile"),
+  client_assertion_private_key = openssl::read_key("keys/client-key.pem"),
+  # Publish the Request Object by reference instead of sending it inline
+  request_object_mode = "request_uri",
+  request_object_signing_alg = "RS256"
+)
+
+# Inside server()
+auth <- oauth_module_server(
+  "auth",
+  client,
+  auto_redirect = TRUE,
+  # Public HTTPS base URL of this Shiny app as seen by the provider
+  request_uri_base_url = "https://shiny.yourdomain.com/myapp"
+)
+```
+
+Wrap the app UI in `oauth_ui(ui, id = "auth", client = client)` (or
+`oauth_form_post_ui()` for POST callbacks). The app root serves Request Objects
+using a random, single-purpose `shinyOAuth_request_object` query handle. Only
+its digest is stored alongside the object in `client@state_store`. GET consumes
+it atomically; HEAD does not consume it. Retrieval expires at the earlier of the
+object expiry and 120 seconds after publication. Cache eviction can shorten
+availability; the store's retention policy controls physical cleanup.
+If the provider requires `request_uri` registration, update its permitted URLs
+to cover this app-root endpoint when migrating from the old `/session/` paths.
+For multiple workers, use a shared state store with atomic `take()`; a memory
+store works only when publication and retrieval reach the same R process.
+
+The hosted JWT and its expiry occupy a separate store record, outside the
+pending-login record's `state_key` sealing. Signing leaves JWT claims readable;
+enable Request Object JWE encryption for claim confidentiality. See the
+[`custom_cache()` shared-store contract](https://lukakoning.github.io/shinyOAuth/reference/custom_cache.html)
+for record protection and expiry requirements.
+
+Earlier versions used Shiny's raw live session token in `registerDataObj()`
+URLs. Those URLs could disclose a capability also used by other session
+resources through browser, provider, or proxy logs. The new handles contain no
+session token. Still redact request URLs in logs and limit log retention:
+disclosing a live handle allows its holder to consume the pending object.
+Prefer PAR when supported to use a provider-issued reference and avoid a
+public app retrieval endpoint. OIDC signed requests retain outer `client_id`,
+`response_type`, and `scope` parameters. `authorization_request_front_channel_mode =
+"minimal"` is available for compatible PAR providers, but is rejected for
+OIDC inline or client-published signed requests.
+
+## Pushed authorization requests (PAR)
+
+PAR sends the authorization request from your server to the provider first. The
+browser then gets redirected with a short `request_uri` handle instead of the
+full request details.
+
+PAR allows the provider to validate the request before the browser redirect
+and avoids placing large requests in a URL. It also keeps most request details
+out of browser history and logs of browser requests. Set `par_required = TRUE`
+when the provider requires PAR.
+
+```{r, eval = FALSE}
+provider <- oauth_provider(
+  name = "example-par",
+  issuer = "https://id.example.com",
+  auth_url = "https://id.example.com/authorize",
+  token_url = "https://id.example.com/token",
+  # Enable pushed authorization requests
+  par_url = "https://id.example.com/par",
+  par_required = TRUE,
+  # Keep the browser redirect down to client_id + PAR request_uri
+  authorization_request_front_channel_mode = "minimal"
+)
+
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  client_secret = "client-secret",
+  redirect_uri = "https://app.example.com/auth/callback",
+  scopes = c("openid", "profile")
+)
+```
+
+## Form Post response mode
+
+`response_mode = "form_post"` tells the provider to send the authorization
+response back as an HTTP POST body instead of query parameters on the URL. The
+body still contains normal OAuth fields such as `code`, `state`, `error`, and
+`iss`.
+
+Use `form_post` when required by the provider or to keep callback values out
+of the browser URL, history, and logs of browser requests. It changes the
+callback transport; it does not sign or encrypt the response.
+
+Keep your existing provider and credentials, set `response_mode = "form_post"`
+on the client, then use this UI setup. Here `client` has a registered
+`redirect_uri` such as `https://app.example.com/callback`.
+
+```{r, eval = FALSE}
+base_ui <- shiny::fluidPage(shiny::textOutput("status"))
+ui <- oauth_form_post_ui(base_ui, id = "auth", client = client)
+
+server <- function(input, output, session) {
+  auth <- oauth_module_server("auth", client)
+  output[["status"]] <- shiny::renderText({
+    if (isTRUE(auth[["authenticated"]])) "Signed in" else "Waiting for login"
+  })
+}
+
+app <- shiny::shinyApp(ui, server, uiPattern = ".*")
+```
+
+The wrapper includes `oauth_ui()` setup. Its module ID and client must match
+the server's. For a callback path such as `/callback`, `uiPattern = ".*"`
+lets Shiny send the POST to the wrapper. A callback at the app root also works.
+`callback_path` defaults to the path in `redirect_uri`; keep both aligned.
+
+### Deployment behind an HTTPS proxy
+
+If your web server accepts HTTPS but forwards HTTP to Shiny, the wrapper
+needs a trusted way to recover the public request address. Configure
+`request_uri_resolver` for your own proxy. This example accepts one proxy IP
+and a fixed public origin, including a mounted app path:
+
+```{r, eval = FALSE}
+trusted_proxy_uri <- function(req) {
+  if (!identical(req[["REMOTE_ADDR"]], "10.0.0.10") ||
+      !identical(req[["HTTP_X_FORWARDED_PROTO"]], "https")) {
+    return(NULL)
+  }
+  paste0("https://app.example.com", req[["SCRIPT_NAME"]], req[["PATH_INFO"]])
+}
+
+ui <- oauth_form_post_ui(
+  base_ui, id = "auth", client = client,
+  request_uri_resolver = trusted_proxy_uri
+)
+```
+
+Use your deployment's verified proxy address and public origin. The result
+must still match the configured redirect origin and callback path. Do not
+trust forwarded headers from arbitrary clients.
+
+## JWT-secured authorization response mode (JARM)
+
+JARM protects the authorization response with a signature. The provider
+returns a JWT, and shinyOAuth verifies its signature, issuer, audience, and
+expiry before processing the callback fields. If encryption is configured,
+shinyOAuth decrypts the response before validating the signed contents.
+
+```{r, eval = FALSE}
+provider <- oauth_provider(
+  name = "example-jarm",
+  issuer = "https://id.example.com",
+  auth_url = "https://id.example.com/authorize",
+  token_url = "https://id.example.com/token",
+  # Advertise the JARM response modes and algorithms this provider supports
+  response_modes_supported = c("query", "query.jwt", "form_post.jwt"),
+  jarm_signing_alg_values_supported = c("RS256"),
+  jarm_encryption_alg_values_supported = c("RSA-OAEP"),
+  jarm_encryption_enc_values_supported = c("A128CBC-HS256")
+)
+
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  client_secret = "client-secret",
+  redirect_uri = "https://app.example.com/auth/callback",
+  scopes = c("openid", "profile"),
+  # Ask for a JWT-wrapped authorization response
+  response_mode = "query.jwt",
+  jarm_signed_response_alg = "RS256"
+)
+```
+
+For encrypted JARM, add the decryption settings:
+
+```{r, eval = FALSE}
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  client_secret = "client-secret",
+  redirect_uri = "https://app.example.com/auth/callback",
+  scopes = c("openid", "profile"),
+  response_mode = "query.jwt",
+  jarm_signed_response_alg = "RS256",
+  # Optional: decrypt JARM before validating the signed payload
+  jarm_encrypted_response_alg = "RSA-OAEP",
+  jarm_encrypted_response_enc = "A128CBC-HS256",
+  jarm_decryption_private_key = openssl::read_key("keys/jarm-decrypt.pem")
+)
+```
+
+JARM is currently intended for `oauth_module_server()`. If you use
+`response_mode = "form_post.jwt"`, wrap your UI with `oauth_form_post_ui()`.
+
+## Demonstrating proof-of-possession (DPoP)
+
+DPoP binds tokens to a client key. The client signs a proof for each token
+or API request, and the receiving server verifies it against the token binding.
+An API enforcing DPoP requires both the access token and a proof from the
+matching private key. Configure it when supported by the authorization server
+and the API.
+
+```{r, eval = FALSE}
+provider <- oauth_provider(
+  name = "example-dpop",
+  issuer = "https://id.example.com",
+  auth_url = "https://id.example.com/authorize",
+  token_url = "https://id.example.com/token",
+  # Optional metadata check for acceptable DPoP signing algorithms
+  dpop_signing_alg_values_supported = c("ES256")
+)
+
+client <- oauth_client(
+  provider = provider,
+  client_id = "client-id",
+  client_secret = "client-secret",
+  redirect_uri = "https://app.example.com/auth/callback",
+  scopes = c("openid", "profile", "api.read"),
+  # Private key used to sign DPoP proofs
+  dpop_private_key = openssl::read_key("keys/dpop-key.pem"),
+  dpop_signing_alg = "ES256"
+)
+```
+
+After login, keep using the request helpers instead of adding `Authorization`
+or `DPoP` headers manually:
+
+```{r, eval = FALSE}
+resp <- perform_resource_req(
+  auth[["token"]],
+  "https://api.example.com/me",
+  # Lets shinyOAuth attach the DPoP proof and handle nonce challenges
+  client = client
+)
+```
+
+### Token binding requirements and validation
+
+Supplying a DPoP key makes `dpop_require_access_token` default to `TRUE`:
+the provider must return a DPoP access token. If binding data is visible,
+its `cnf[["jkt"]]` key thumbprint must match. For opaque tokens with no visible
+binding, enable `dpop_require_observed_cnf = TRUE` and arrange introspection
+if your deployment needs to confirm that binding locally.
+
+For certificate-bound tokens, the corresponding field is `cnf[["x5t#S256"]]`.
+The package checks it against the configured certificate before protected
+API and userinfo calls. A refreshed token needs fresh binding data from the
+new token or its introspection response; the old certificate thumbprint is
+not carried forward when the response omits it.
+
+Binding data read from a JWT access token is observed payload data; shinyOAuth
+does not independently verify that access token's signature. Introspection
+can provide confirmation from the provider. The API must enforce the binding
+too for a stolen token to be unusable without its key or certificate.
+
+### DPoP in API requests
+
+`perform_resource_req()` and `get_userinfo()` handle a DPoP nonce challenge
+with one fresh-proof retry. Later requests to the same resource server can
+reuse its nonce; token-server and resource-server nonces are kept separate.
+Retries of eligible API requests generate fresh proofs.
+
+DPoP nonces must follow RFC 9449's visible ASCII syntax. The package also
+applies a local 4096-byte limit to bound proof and cache sizes; the RFC itself
+sets no maximum length. Configure `options(shinyOAuth.dpop_nonce_max_bytes = 8192L)`
+for a provider issuing larger nonces (supported range: 1–65536 bytes). A response
+above the configured limit raises an explicit error without logging its nonce.
+
+`resource_req()` only builds the request. A DPoP proof is tied to its HTTP
+method and base URL, so do not change those after construction. Supply query
+parameters through the helper's `query` argument; external URL modifiers can
+decode reserved path characters and invalidate the proof. Use
+`perform_resource_req()` to manage nonce retries.
+
+## Signature and encryption support
+
+For outgoing private-key client assertions, JAR, and DPoP, signing supports
+`RS256`, `RS384`, `ES256`, `ES384`, `ES512`, and both `EdDSA` and `Ed25519` with Ed25519 keys. Ed25519
+accepts an OpenSSL private key or PEM; DPoP embeds only its public OKP JWK.
+Algorithm inference and explicit choices remain constrained by provider metadata.
+Secret-based assertions and JAR support `HS256`, `HS384`, and `HS512`.
+RSA continues to default to RS256; choose `client_assertion_alg = "RS384"`
+explicitly for a registration requiring it. RS384 uses SHA-384 with
+RSASSA-PKCS1-v1_5 and requires an RSA key of at least 2048 bits, as specified in
+[RFC 7518 section 3.3](https://www.rfc-editor.org/rfc/rfc7518.html#section-3.3).
+RSA-PSS and Ed448 are not supported for outgoing signatures.
+Incoming signature policies are separate; see [`oauth_provider()`](https://lukakoning.github.io/shinyOAuth/reference/oauth_provider.html)
+and the `jarm_*` arguments in [`oauth_client()`](https://lukakoning.github.io/shinyOAuth/reference/oauth_client.html).
+
+Request Object encryption and JARM decryption support `RSA-OAEP` with
+`A128CBC-HS256`, `A192CBC-HS384`, or `A256CBC-HS512`. This does not imply
+support for encrypted ID tokens or encrypted userinfo, which are rejected.
+
+The R `openssl` API currently exposes neither OAEP digest selection nor RSA-PSS
+padding options. Its GCM functions do not accept the additional authenticated
+data needed to authenticate JWE protected headers. Consequently, `RSA-OAEP-256`,
+`PS256/384/512`, and `A128/192/256GCM` JWE modes remain unsupported and fail
+closed; provider metadata never causes a fallback to another algorithm. These
+are backend interoperability limits, not interchangeable names for the supported
+modes. See the [OpenSSL R API](https://jeroen.r-universe.dev/openssl/doc/manual.html).

@@ -6,12 +6,12 @@ test_that("JWK selection filters use=sig and prefers alg match", {
 
   # Generate RSA key pair and public JWK
   rsa <- openssl::rsa_keygen(bits = 2048)
-  priv_jwk_json <- jose::write_jwk(rsa)
+  priv_jwk_json <- write_test_jwk(rsa)
   priv_jwk <- jsonlite::fromJSON(priv_jwk_json, simplifyVector = TRUE)
   pub_jwk_sig_rs256 <- list(
-    kty = priv_jwk$kty,
-    n = priv_jwk$n,
-    e = priv_jwk$e,
+    kty = priv_jwk[["kty"]],
+    n = priv_jwk[["n"]],
+    e = priv_jwk[["e"]],
     kid = "k-rs256",
     use = "sig",
     alg = "RS256"
@@ -19,12 +19,12 @@ test_that("JWK selection filters use=sig and prefers alg match", {
 
   # Another RSA key with use=enc (should be filtered out)
   rsa2 <- openssl::rsa_keygen(bits = 2048)
-  priv_jwk_json2 <- jose::write_jwk(rsa2)
+  priv_jwk_json2 <- write_test_jwk(rsa2)
   priv_jwk2 <- jsonlite::fromJSON(priv_jwk_json2, simplifyVector = TRUE)
   pub_jwk_enc_rs256 <- list(
-    kty = priv_jwk2$kty,
-    n = priv_jwk2$n,
-    e = priv_jwk2$e,
+    kty = priv_jwk2[["kty"]],
+    n = priv_jwk2[["n"]],
+    e = priv_jwk2[["e"]],
     kid = "k-enc",
     use = "enc",
     alg = "RS256"
@@ -32,12 +32,12 @@ test_that("JWK selection filters use=sig and prefers alg match", {
 
   # A third RSA key with use=sig but different alg advertised (RS384)
   rsa3 <- openssl::rsa_keygen(bits = 2048)
-  priv_jwk_json3 <- jose::write_jwk(rsa3)
+  priv_jwk_json3 <- write_test_jwk(rsa3)
   priv_jwk3 <- jsonlite::fromJSON(priv_jwk_json3, simplifyVector = TRUE)
   pub_jwk_sig_rs384 <- list(
-    kty = priv_jwk3$kty,
-    n = priv_jwk3$n,
-    e = priv_jwk3$e,
+    kty = priv_jwk3[["kty"]],
+    n = priv_jwk3[["n"]],
+    e = priv_jwk3[["e"]],
     kid = "k-rs384",
     use = "sig",
     alg = "RS384"
@@ -48,7 +48,7 @@ test_that("JWK selection filters use=sig and prefers alg match", {
     auth_url = paste0(base, "/auth"),
     token_url = paste0(base, "/token"),
     issuer = base,
-    allowed_algs = c("RS256", "RS384")
+    id_token_allowed_algs = c("RS256", "RS384")
   )
   cli <- oauth_client(
     provider = prov,
@@ -67,7 +67,7 @@ test_that("JWK selection filters use=sig and prefers alg match", {
       iat = now - 1
     ),
     key = rsa,
-    header = list(alg = "RS256", kid = pub_jwk_sig_rs256$kid, typ = "JWT")
+    header = list(alg = "RS256", kid = pub_jwk_sig_rs256[["kid"]], typ = "JWT")
   )
 
   # JWKS contains three keys: one enc-only, two sig (one matching alg)
@@ -91,7 +91,7 @@ test_that("JWK selection filters use=sig and prefers alg match", {
     {
       # Should verify using the RS256 key; the 'enc' key must be ignored
       dec <- shinyOAuth:::validate_id_token(cli, id_token)
-      expect_identical(dec$aud, "c1")
+      expect_identical(dec[["aud"]], "c1")
     }
   ))
 
@@ -107,7 +107,7 @@ test_that("JWK selection filters use=sig and prefers alg match", {
       iat = now - 1
     ),
     key = rsa,
-    header = list(alg = "RS256", kid = pub_jwk_sig_rs384$kid, typ = "JWT")
+    header = list(alg = "RS256", kid = pub_jwk_sig_rs384[["kid"]], typ = "JWT")
   )
   expect_error(
     testthat::with_mocked_bindings(
@@ -178,6 +178,35 @@ test_that("JWK selection treats malformed key_ops as unusable", {
     select_one(modifyList(
       key_template,
       list(kid = "missing-verify", key_ops = c("sign", "encrypt"))
+    )),
+    0L
+  )
+
+  expect_length(
+    select_one(modifyList(
+      key_template,
+      list(kid = "parsed-array", key_ops = list("sign", "verify"))
+    )),
+    1L
+  )
+  expect_length(
+    select_one(modifyList(
+      key_template,
+      list(kid = "parsed-mixed", key_ops = list("verify", 1))
+    )),
+    0L
+  )
+  expect_length(
+    select_one(modifyList(
+      key_template,
+      list(kid = "parsed-duplicate", key_ops = list("verify", "verify"))
+    )),
+    0L
+  )
+  expect_length(
+    select_one(modifyList(
+      key_template,
+      list(kid = "parsed-empty", key_ops = list())
     )),
     0L
   )

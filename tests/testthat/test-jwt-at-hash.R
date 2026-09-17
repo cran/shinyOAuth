@@ -27,7 +27,7 @@ mk_client <- function() {
     issuer = "https://issuer.example.com",
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("RS256", "ES256")
+    id_token_allowed_algs = c("RS256", "ES256")
   )
   shinyOAuth::oauth_client(
     prov,
@@ -65,23 +65,8 @@ compute_expected_at_hash <- function(access_token, alg, eddsa_curve = NULL) {
 make_ed25519_keypair <- function() {
   testthat::skip_if_not_installed("sodium")
 
-  exports <- getNamespaceExports("sodium")
-  kp <- if ("signature_keygen" %in% exports) {
-    try(sodium::signature_keygen(), silent = TRUE)
-  } else if ("signature_keypair" %in% exports) {
-    try(sodium::signature_keypair(), silent = TRUE)
-  } else {
-    NULL
-  }
-
-  if (inherits(kp, "try-error") || is.null(kp)) {
-    testthat::skip("Ed25519 key generation not supported on this platform")
-  }
-
-  list(
-    pubkey = kp$pubkey,
-    secret = if (!is.null(kp$key)) kp$key else kp$secretkey
-  )
+  secret <- sodium::sig_keygen()
+  list(pubkey = sodium::sig_pubkey(secret), secret = secret)
 }
 
 sign_ed25519_jwt <- function(header, claims, secret) {
@@ -92,7 +77,7 @@ sign_ed25519_jwt <- function(header, claims, secret) {
     ".",
     shinyOAuth:::base64url_encode(charToRaw(as.character(claims_json)))
   )
-  sig <- sodium::signature(charToRaw(signing_input), secret)
+  sig <- sodium::sig_sign(charToRaw(signing_input), secret)
 
   paste0(signing_input, ".", shinyOAuth:::base64url_encode(sig))
 }
@@ -311,7 +296,7 @@ test_that("compute_at_hash rejects unsupported Ed448 mapping", {
   )
 })
 
-test_that("at_hash validation skips optional Ed448 claims after verified curve resolution", {
+test_that("at_hash validation rejects present optional Ed448 claims", {
   client <- mk_client()
   client@provider@allowed_algs <- c("EdDSA")
   now <- floor(as.numeric(Sys.time()))
@@ -324,7 +309,7 @@ test_that("at_hash validation skips optional Ed448 claims after verified curve r
   )
 
   jwt <- build_jwt(
-    list(alg = "EdDSA", kid = pub_jwk$kid, typ = "JWT"),
+    list(alg = "EdDSA", kid = pub_jwk[["kid"]], typ = "JWT"),
     list(
       iss = client@provider@issuer,
       aud = client@client_id,
@@ -335,30 +320,34 @@ test_that("at_hash validation skips optional Ed448 claims after verified curve r
     )
   )
 
-  expect_silent(testthat::with_mocked_bindings(
-    fetch_jwks = function(
-      issuer,
-      jwks_cache,
-      force_refresh = FALSE,
-      pins = NULL,
-      pin_mode = c("any", "all"),
-      provider = NULL
-    ) {
-      list(keys = list(pub_jwk))
-    },
-    jwk_to_pubkey = function(jwk) {
-      structure(list(), class = "ed448")
-    },
-    verify_jws_signature_no_time = function(id_token, pub, alg) {
-      TRUE
-    },
-    .package = "shinyOAuth",
-    shinyOAuth:::validate_id_token(
-      client,
-      jwt,
-      expected_access_token = access_token
-    )
-  ))
+  expect_error(
+    testthat::with_mocked_bindings(
+      fetch_jwks = function(
+        issuer,
+        jwks_cache,
+        force_refresh = FALSE,
+        pins = NULL,
+        pin_mode = c("any", "all"),
+        provider = NULL
+      ) {
+        list(keys = list(pub_jwk))
+      },
+      jwk_to_pubkey = function(jwk) {
+        structure(list(), class = "ed448")
+      },
+      verify_jws_signature_no_time = function(id_token, pub, alg) {
+        TRUE
+      },
+      .package = "shinyOAuth",
+      shinyOAuth:::validate_id_token(
+        client,
+        jwt,
+        expected_access_token = access_token
+      )
+    ),
+    class = "shinyOAuth_id_token_error",
+    regexp = "Cannot validate Ed448 at_hash"
+  )
 })
 
 test_that("at_hash validation rejects required Ed448 claims when mapping is unavailable", {
@@ -375,7 +364,7 @@ test_that("at_hash validation rejects required Ed448 claims when mapping is unav
   )
 
   jwt <- build_jwt(
-    list(alg = "EdDSA", kid = pub_jwk$kid, typ = "JWT"),
+    list(alg = "EdDSA", kid = pub_jwk[["kid"]], typ = "JWT"),
     list(
       iss = client@provider@issuer,
       aud = client@client_id,
@@ -460,12 +449,12 @@ test_that("at_hash validation accepts Ed25519 tokens after verified curve resolu
   pub_jwk <- list(
     kty = "OKP",
     crv = "Ed25519",
-    x = shinyOAuth:::base64url_encode(keypair$pubkey),
+    x = shinyOAuth:::base64url_encode(keypair[["pubkey"]]),
     kid = "ed25519-at-hash"
   )
 
   jwt <- sign_ed25519_jwt(
-    list(alg = "EdDSA", kid = pub_jwk$kid, typ = "JWT"),
+    list(alg = "EdDSA", kid = pub_jwk[["kid"]], typ = "JWT"),
     list(
       iss = client@provider@issuer,
       aud = client@client_id,
@@ -478,7 +467,7 @@ test_that("at_hash validation accepts Ed25519 tokens after verified curve resolu
         eddsa_curve = "Ed25519"
       )
     ),
-    secret = keypair$secret
+    secret = keypair[["secret"]]
   )
 
   expect_silent(testthat::with_mocked_bindings(
@@ -514,7 +503,7 @@ mk_client_at_hash_required <- function() {
     issuer = "https://issuer.example.com",
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("RS256", "ES256"),
+    id_token_allowed_algs = c("RS256", "ES256"),
     id_token_at_hash_required = TRUE
   )
   shinyOAuth::oauth_client(

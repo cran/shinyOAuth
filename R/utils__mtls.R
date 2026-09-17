@@ -19,8 +19,13 @@ MTLS_TOKEN_AUTH_STYLES <- c(
 )
 
 # Cache mTLS certificate thumbprints so repeated requests avoid rereading the
-# same certificate files.
-mtls_thumbprint_cache_env <- new.env(parent = emptyenv())
+# same certificate files. Bound rotations and changing paths in long-lived
+# workers; recently used certificates remain cached.
+mtls_thumbprint_cache <- cachem::cache_mem(
+  max_n = 128L,
+  max_size = Inf,
+  max_age = Inf
+)
 
 #' Build a file signature for the mTLS thumbprint cache
 #'
@@ -40,9 +45,9 @@ mtls_thumbprint_cache_file_signature <- function(path) {
 
   paste(
     normalized,
-    as.character(info$size[[1]]),
-    as.character(as.numeric(info$mtime[[1]])),
-    as.character(as.numeric(info$ctime[[1]])),
+    as.character(info[["size"]][[1]]),
+    as.character(as.numeric(info[["mtime"]][[1]])),
+    as.character(as.numeric(info[["ctime"]][[1]])),
     sep = "::"
   )
 }
@@ -62,11 +67,14 @@ mtls_thumbprint_cache_key <- function(
   key_file = NULL,
   key_password = NULL
 ) {
-  paste(
-    mtls_thumbprint_cache_file_signature(cert_file),
-    mtls_thumbprint_cache_file_signature(key_file),
-    string_digest(key_password %||% NA_character_, key = NULL),
-    sep = "::"
+  string_digest(
+    paste(
+      mtls_thumbprint_cache_file_signature(cert_file),
+      mtls_thumbprint_cache_file_signature(key_file),
+      string_digest(key_password %||% NA_character_, key = NULL),
+      sep = "::"
+    ),
+    key = NULL
   )
 }
 
@@ -82,11 +90,7 @@ mtls_thumbprint_cache_get <- function(cache_key) {
   if (!is_valid_string(cache_key)) {
     return(NULL)
   }
-  if (!exists(cache_key, envir = mtls_thumbprint_cache_env, inherits = FALSE)) {
-    return(NULL)
-  }
-
-  get(cache_key, envir = mtls_thumbprint_cache_env, inherits = FALSE)
+  mtls_thumbprint_cache[["get"]](cache_key, missing = NULL)
 }
 
 #' Store an mTLS thumbprint in the cache
@@ -103,7 +107,7 @@ mtls_thumbprint_cache_set <- function(cache_key, thumbprint) {
     return(invisible(thumbprint))
   }
 
-  assign(cache_key, thumbprint, envir = mtls_thumbprint_cache_env)
+  mtls_thumbprint_cache[["set"]](cache_key, thumbprint)
   invisible(thumbprint)
 }
 
@@ -123,8 +127,8 @@ client_has_mtls_certificate <- function(oauth_client) {
     return(FALSE)
   }
 
-  is_valid_string(oauth_client@tls_client_cert_file) &&
-    is_valid_string(oauth_client@tls_client_key_file)
+  is_valid_string(oauth_client@mtls_client_cert_file) &&
+    is_valid_string(oauth_client@mtls_client_key_file)
 }
 
 #' Check whether a client uses mTLS client authentication
@@ -162,9 +166,23 @@ client_requests_certificate_bound_tokens <- function(oauth_client) {
     return(FALSE)
   }
 
-  isTRUE(oauth_client@mtls_request_certificate_bound_access_tokens) &&
-    isTRUE(oauth_client@provider@tls_client_certificate_bound_access_tokens) &&
+  isTRUE(oauth_client@mtls_certificate_bound_access_tokens) &&
+    isTRUE(oauth_client@provider@mtls_client_certificate_bound_access_tokens) &&
     client_has_mtls_certificate(oauth_client)
+}
+
+#' Check whether certificate binding must be locally observable
+#'
+#' Presentation and alias selection depend on certificate-bound intent. This
+#' separate policy only controls whether missing confirmation is rejected.
+#' Observed confirmation must always match, even when this policy is disabled.
+#' @param oauth_client OAuthClient-like object.
+#' @return `TRUE` when local confirmation is required; otherwise `FALSE`.
+#' @keywords internal
+#' @noRd
+client_requires_observed_mtls_cnf <- function(oauth_client) {
+  client_requests_certificate_bound_tokens(oauth_client) &&
+    isTRUE(oauth_client@mtls_require_observed_cnf)
 }
 
 #' Check whether a call should use mTLS endpoints
@@ -244,14 +262,19 @@ req_apply_mtls_client_certificate <- function(req, oauth_client) {
     return(req)
   }
 
-  cert_file <- oauth_client@tls_client_cert_file %||% NA_character_
-  key_file <- oauth_client@tls_client_key_file %||% NA_character_
-  key_password <- oauth_client@tls_client_key_password %||% NA_character_
-  ca_file <- oauth_client@tls_client_ca_file %||% NA_character_
+  cert_file <- oauth_client@mtls_client_cert_file %||% NA_character_
+  key_file <- oauth_client@mtls_client_key_file %||% NA_character_
+  key_password <- oauth_client@mtls_client_key_password %||% NA_character_
+  ca_file <- oauth_client@mtls_client_ca_file %||% NA_character_
 
   if (!(is_valid_string(cert_file) && is_valid_string(key_file))) {
     return(req)
   }
+
+  validate_mtls_tls_backend()
+  # Revalidate after certificate rotation, using the same leaf as binding and
+  # registration. curl presents the first certificate in the configured file.
+  read_keyed_client_certificate(cert_file, key_file, key_password)
 
   options <- compact_list(list(
     sslcert = cert_file,
@@ -261,6 +284,30 @@ req_apply_mtls_client_certificate <- function(req, oauth_client) {
   ))
 
   do.call(httr2::req_options, c(list(req), options))
+}
+
+# curl reports inactive alternatives in parentheses, e.g.
+# "(OpenSSL/3.5.0) Schannel". Only the active backend determines PEM support.
+validate_mtls_tls_backend <- function(
+  ssl_version = curl::curl_version()[["ssl_version"]]
+) {
+  if (!mtls_pem_backend_supported(ssl_version)) {
+    err_config(c(
+      "PEM mTLS certificate/key files require the OpenSSL curl backend on Windows",
+      "i" = paste(
+        "Set CURL_SSL_BACKEND=openssl before loading curl, httr2, or shinyOAuth.",
+        "Restart R if curl is already loaded; install an OpenSSL-enabled curl build if needed."
+      )
+    ))
+  }
+  invisible(TRUE)
+}
+
+mtls_pem_backend_supported <- function(
+  ssl_version = curl::curl_version()[["ssl_version"]]
+) {
+  active <- gsub("\\([^)]*\\)", "", ssl_version)
+  !grepl("Schannel", active, ignore.case = TRUE)
 }
 
 #' Attach mTLS client authentication to authorization-server requests
@@ -292,7 +339,7 @@ req_apply_authorization_server_mtls <- function(
   if (!client_has_mtls_certificate(oauth_client)) {
     err_input(
       paste(
-        "oauth_client must include tls_client_cert_file and tls_client_key_file",
+        "oauth_client must include mtls_client_cert_file and mtls_client_key_file",
         "when an authorization-server request requires mTLS"
       )
     )
@@ -334,8 +381,7 @@ token_cnf_x5t_s256 <- function(token = NULL, access_token = NULL, cnf = NULL) {
   thumbprint
 }
 
-#' Normalize a cnf claim for mTLS binding
-#'
+#' Normalize observable token confirmation thumbprints
 #' @param cnf cnf-like value from a token or introspection payload.
 #' @return Normalized list.
 #' @keywords internal
@@ -348,6 +394,22 @@ normalize_token_cnf <- function(cnf) {
     return(list())
   }
 
+  # SHA-256 thumbprints contain 32 bytes in canonical unpadded base64url.
+  # Reject malformed observed bindings rather than treating them as omitted.
+  for (field in intersect(c("x5t#S256", "jkt"), names(cnf))) {
+    value <- cnf[[field]]
+    if (
+      !is_valid_string(value) ||
+        nchar(value, type = "bytes") != 43L ||
+        !grepl("^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$", value)
+    ) {
+      err_token(paste0(
+        "Invalid token cnf.",
+        field,
+        " thumbprint: expected a canonical base64url-encoded SHA-256 value"
+      ))
+    }
+  }
   thumbprint <- cnf[["x5t#S256"]] %||% NA_character_
   dpop_jkt <- cnf[["jkt"]] %||% NA_character_
 
@@ -374,6 +436,20 @@ normalize_token_cnf <- function(cnf) {
 #' @keywords internal
 #' @noRd
 token_cnf_from_access_token <- function(access_token) {
+  # Keep legacy JWT inspection available; opt into opacity for providers whose
+  # access-token representation is not part of the client agreement.
+  format <- getOption("shinyOAuth.access_token_cnf", "jwt")
+  if (
+    !is.character(format) ||
+      length(format) != 1L ||
+      is.na(format) ||
+      !format %in% c("jwt", "opaque")
+  ) {
+    err_config("shinyOAuth.access_token_cnf must be 'jwt' or 'opaque'")
+  }
+  if (identical(format, "opaque")) {
+    return(list())
+  }
   if (!is_valid_string(access_token)) {
     return(list())
   }
@@ -383,7 +459,7 @@ token_cnf_from_access_token <- function(access_token) {
     return(list())
   }
 
-  normalize_token_cnf(payload$cnf %||% NULL)
+  normalize_token_cnf(payload[["cnf"]] %||% NULL)
 }
 
 #' Parse cnf data from an introspection result
@@ -397,7 +473,7 @@ token_cnf_from_introspection <- function(introspection_result) {
     return(list())
   }
 
-  raw <- introspection_result$raw %||% introspection_result
+  raw <- introspection_result[["raw"]] %||% introspection_result
   if (is.data.frame(raw)) {
     raw <- as.list(raw)
   }
@@ -405,7 +481,7 @@ token_cnf_from_introspection <- function(introspection_result) {
     return(list())
   }
 
-  normalize_token_cnf(raw$cnf %||% NULL)
+  normalize_token_cnf(raw[["cnf"]] %||% NULL)
 }
 
 #' Collect observable cnf data by token surface
@@ -481,7 +557,15 @@ token_cnf_conflict_summary <- function(conflicts) {
           vapply(
             names(observed),
             function(source_name) {
-              paste0(source_name, "=", observed[[source_name]])
+              if (allow_expose_error_body()) {
+                paste0(
+                  source_name,
+                  "=",
+                  sanitize_diagnostic_text(observed[[source_name]])
+                )
+              } else {
+                source_name
+              }
             },
             character(1)
           ),
@@ -573,13 +657,13 @@ resolve_token_cnf <- function(
   )
 
   compact_list(list(
-    `x5t#S256` = sources$introspection[["x5t#S256"]] %||%
-      sources$token_response[["x5t#S256"]] %||%
-      sources$access_token[["x5t#S256"]] %||%
+    `x5t#S256` = sources[["introspection"]][["x5t#S256"]] %||%
+      sources[["token_response"]][["x5t#S256"]] %||%
+      sources[["access_token"]][["x5t#S256"]] %||%
       NULL,
-    jkt = sources$introspection[["jkt"]] %||%
-      sources$token_response[["jkt"]] %||%
-      sources$access_token[["jkt"]] %||%
+    jkt = sources[["introspection"]][["jkt"]] %||%
+      sources[["token_response"]][["jkt"]] %||%
+      sources[["access_token"]][["jkt"]] %||%
       NULL
   ))
 }
@@ -649,8 +733,8 @@ read_client_certificates <- function(cert_file) {
   }
 
   err_config(
-    "Failed to parse tls_client_cert_file as a PEM certificate",
-    context = list(tls_client_cert_file = cert_file)
+    "Failed to parse mtls_client_cert_file as a PEM certificate",
+    context = list(mtls_client_cert_file = cert_file)
   )
 }
 
@@ -674,8 +758,8 @@ read_client_private_key <- function(key_file, key_password = NULL) {
   }
 
   err_config(
-    "Failed to parse tls_client_key_file as a PEM private key",
-    context = list(tls_client_key_file = key_file)
+    "Failed to parse mtls_client_key_file as a PEM private key",
+    context = list(mtls_client_key_file = key_file)
   )
 }
 
@@ -698,25 +782,43 @@ read_keyed_client_certificate <- function(
   }
 
   key <- read_client_private_key(key_file, key_password = key_password)
-  key_fingerprint <- as.list(key)$pubkey$fingerprint %||% NULL
+  key_fingerprint <- tryCatch(
+    {
+      key_pubkey <- as.list(key)[["pubkey"]]
+      as.list(key_pubkey)[["fingerprint"]] %||% NULL
+    },
+    error = function(...) NULL
+  )
 
-  for (cert in certs) {
-    cert_fingerprint <- as.list(cert)$pubkey$fingerprint %||% NULL
+  for (i in seq_along(certs)) {
+    cert <- certs[[i]]
+    cert_fingerprint <- tryCatch(
+      {
+        cert_pubkey <- as.list(cert)[["pubkey"]]
+        as.list(cert_pubkey)[["fingerprint"]] %||% NULL
+      },
+      error = function(...) NULL
+    )
     if (
       !is.null(cert_fingerprint) && identical(cert_fingerprint, key_fingerprint)
     ) {
+      if (i != 1L) {
+        err_config(
+          "mtls_client_cert_file must put the client certificate matching mtls_client_key_file first, followed by its issuer chain"
+        )
+      }
       return(cert)
     }
   }
 
   err_config(
     paste(
-      "tls_client_cert_file does not contain a certificate matching",
-      "tls_client_key_file"
+      "mtls_client_cert_file does not contain a certificate matching",
+      "mtls_client_key_file"
     ),
     context = list(
-      tls_client_cert_file = cert_file,
-      tls_client_key_file = key_file
+      mtls_client_cert_file = cert_file,
+      mtls_client_key_file = key_file
     )
   )
 }
@@ -749,8 +851,7 @@ tls_client_cert_thumbprint_s256 <- function(
     }
   }
 
-  # PEM bundles may contain a full chain; hash the certificate bound to the
-  # configured private key instead of assuming bundle order.
+  # Validate the leaf-first transport contract before hashing the certificate.
   cert <- read_keyed_client_certificate(
     cert_file,
     key_file = key_file,
@@ -759,8 +860,8 @@ tls_client_cert_thumbprint_s256 <- function(
   der <- try(openssl::write_der(cert), silent = TRUE)
   if (inherits(der, "try-error")) {
     err_config(
-      "Failed to serialize tls_client_cert_file for thumbprint calculation",
-      context = list(tls_client_cert_file = cert_file)
+      "Failed to serialize mtls_client_cert_file for thumbprint calculation",
+      context = list(mtls_client_cert_file = cert_file)
     )
   }
 
@@ -817,9 +918,9 @@ validate_token_certificate_binding <- function(
     cnf = cnf
   )
   if (!is_valid_string(expected_thumbprint)) {
-    # If the client explicitly requests certificate-bound tokens, accepting a
-    # token without cnf.x5t#S256 would silently downgrade that contract.
-    if (client_requests_certificate_bound_tokens(oauth_client)) {
+    # Only the strict local policy requires client-visible confirmation.
+    # Server-enforced opaque bindings still require certificate presentation.
+    if (client_requires_observed_mtls_cnf(oauth_client)) {
       fail(
         paste(
           "oauth_client requires certificate-bound access tokens, but the token",
@@ -837,21 +938,21 @@ validate_token_certificate_binding <- function(
   }
 
   if (
-    !(is_valid_string(oauth_client@tls_client_cert_file) &&
-      is_valid_string(oauth_client@tls_client_key_file))
+    !(is_valid_string(oauth_client@mtls_client_cert_file) &&
+      is_valid_string(oauth_client@mtls_client_key_file))
   ) {
     fail(
       paste(
-        "oauth_client must include tls_client_cert_file and tls_client_key_file",
+        "oauth_client must include mtls_client_cert_file and mtls_client_key_file",
         "when using certificate-bound access tokens"
       )
     )
   }
 
   actual_thumbprint <- tls_client_cert_thumbprint_s256(
-    oauth_client@tls_client_cert_file,
-    key_file = oauth_client@tls_client_key_file,
-    key_password = oauth_client@tls_client_key_password
+    oauth_client@mtls_client_cert_file,
+    key_file = oauth_client@mtls_client_key_file,
+    key_password = oauth_client@mtls_client_key_password
   )
   if (!identical(actual_thumbprint, expected_thumbprint)) {
     fail(

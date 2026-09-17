@@ -6,30 +6,29 @@
 [![CRAN status](https://www.r-pkg.org/badges/version/shinyOAuth)](https://CRAN.R-project.org/package=shinyOAuth)
 <!-- badges: end -->
 
-'[shinyOAuth](https://lukakoning.github.io/shinyOAuth/)' is an R package implementing provider‑agnostic OAuth 2.0 and OpenID Connect (OIDC)
-authorization and authentication for [Shiny](https://github.com/rstudio/shiny) apps. It is built
+'[shinyOAuth](https://lukakoning.github.io/shinyOAuth/)' is an R package implementing provider‑agnostic OpenID Connect (OIDC) authentication and OAuth 2.0
+authorization for [Shiny](https://github.com/rstudio/shiny) apps. It is built
 with modern S7 classes and security in mind.
 
-OAuth 2.0/OIDC lets users sign in to your app using accounts they already have (e.g., Google, Microsoft, GitHub,
-and many more), or via your self-hosted identity provider (e.g., Keycloak), or
-via an identity-as-a-service provider (e.g., Auth0, Okta).
-
-To achieve this, your app redirects unauthenticated users to the identity provider, they authenticate there,
-and are redirected back to your app with an authorization code. Your app exchanges this code for tokens
-which prove the user's identity, and optionally allow your app to call the provider's APIs on the user's behalf
-(e.g., to fetch data associated with the user's account).
+OAuth 2.0 and OIDC let users log in to your app with accounts they already have (for
+example, Google or Microsoft), with a self-hosted identity provider such as Keycloak,
+or with an identity service such as Auth0 or Okta. 
+To achieve this, your app redirects your users to the identity provider, they authenticate there,
+and are redirected back to your app with an authorization code. 
+Your app then exchanges this code for tokens.
+In OAuth flows, an access token is obtained to authorize API calls, and you may get the user's profile information from the provider's userinfo endpoint.
+In OIDC flows, a validated ID token authenticates the user.
 
 This package streamlines this flow for Shiny applications,
-enabling developers to add OAuth 2.0/OIDC authorization/authentication to their apps with
+enabling developers to add OAuth 2.0 and OIDC authorization/authentication to their apps with
 minimal code. The provided Shiny module handles redirecting unauthenticated users,
 managing state/PKCE/nonce for secure code-token exchange,
 verifying OIDC tokens, automatically fetching user info and performing token refresh,
-using asynchronous execution, and more. The package is highly configurable
-and works with various OAuth 2.0/OIDC providers and protocol features.
+using asynchronous execution, and more. The package is highly configurable and works with various providers and protocol features.
 
 ## Features
 
-- Shiny module: `oauth_module_server()` gives you a ready‑to‑use OAuth 2.0/OIDC authentication flow
+- Shiny module: `oauth_module_server()` gives you a ready‑to‑use OIDC authentication and OAuth authorization flow
   with secure defaults. Easily read authentication status, token details, & user info as reactive values
   in your Shiny server logic
 
@@ -44,8 +43,8 @@ and works with various OAuth 2.0/OIDC providers and protocol features.
   contains built-in configurations for popular providers (e.g., GitHub, Google, Microsoft, Keycloak, Auth0).
 
 - Security best practices: AES-GCM–sealed state payloads (AEAD), server-side state validation coupled with
-  local cookie verification, HTTPS enforcement, PKCE (S256), ID token signature/claims validation (including nonce),
-  userinfo subject match, support for DPoP, mTLS, JAR, PAR, and more 
+  origin-scoped browser binding, HTTPS enforcement, PKCE (S256), ID token signature/claims validation (including nonce),
+  userinfo subject match, support for DPoP, mTLS, JAR, PAR, and more
   (see `vignette("authentication-flow", package = "shinyOAuth")` ([link](https://lukakoning.github.io/shinyOAuth/articles/authentication-flow.html)))
 
 - Provides hooks for auditing & logging key events,
@@ -100,12 +99,10 @@ client <- oauth_client(
 )
 
 # Simple UI
-ui <- fluidPage(
-  # Include JavaScript dependency:
-  use_shinyOAuth(),
+ui <- oauth_ui(fluidPage(
   # Show login information:
   uiOutput("login_information")
-)
+), id = "auth", client = client)
 
 # Server which obtains authentication
 server <- function(input, output, session) {
@@ -116,15 +113,15 @@ server <- function(input, output, session) {
   auth <- oauth_module_server("auth", client)
 
   # Render login information:
-  output$login_information <- renderUI({
-    if (auth$authenticated) {
-      user_info <- auth$token@userinfo
+  output[["login_information"]] <- renderUI({
+    if (auth[["authenticated"]]) {
+      user_info <- auth[["token"]]@userinfo
       tagList(
-        tags$p("You are logged in! Your details:"),
-        tags$pre(paste(capture.output(str(user_info)), collapse = "\n"))
+        tags[["p"]]("You are logged in! Your details:"),
+        tags[["pre"]](paste(capture.output(str(user_info)), collapse = "\n"))
       )
     } else {
-      tags$p("You are not logged in.")
+      tags[["p"]]("You are not logged in.")
     }
   })
 }
@@ -164,4 +161,4 @@ For a checklist of security considerations and best practices for production use
 The package has a standard 'testthat' test suite under `tests/testthat/`.
 An additional set of integration tests against a local Keycloak instance (in Docker/Podman) is provided under `integration/keycloak/`.
 These integration tests also include browser-driven end-to-end tests using 'shinytest2' and 'chromote'.
-Finally, a minimal demo app deployment is provided under `integration/gcp/` for Google Cloud Run using a GitHub OAuth 2.0 app.
+Finally, minimal demo app deployments are provided under `integration/gcp/` for Google Cloud Run and `integration/posit/` for Posit Connect Cloud.

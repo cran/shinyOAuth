@@ -14,7 +14,12 @@ OAuthToken(
   cnf = list(),
   granted_scopes = character(0),
   granted_scopes_verified = FALSE,
-  id_token_validated = FALSE
+  id_token_validated = FALSE,
+  original_id_token = NA_character_,
+  extra_fields = list(),
+  initial_extra_fields = list(),
+  smart_context = list(),
+  original_granted_scopes = character(0)
 )
 }
 \arguments{
@@ -27,7 +32,8 @@ OAuthToken(
 \item{id_token}{ID token (if provided by the provider; OpenID Connect)}
 
 \item{expires_at}{Numeric timestamp (seconds since epoch) when the access
-token expires. \code{Inf} for non-expiring tokens}
+token expires, \code{NA_real_} when the expiry is unknown, or \code{Inf} for a
+non-expiring token}
 
 \item{userinfo}{List containing user information fetched from the provider's
 userinfo endpoint (if fetched)}
@@ -49,14 +55,47 @@ shinyOAuth carries forward the best-known scope set instead of dropping it.}
 \item{granted_scopes_verified}{Logical flag indicating whether the current
 token response explicitly proved \code{granted_scopes}. \code{FALSE} means the scope
 set was assumed or carried forward because the provider omitted \code{scope}.
-For stronger proof, configure \code{introspect_elements = "scope"}.}
+For stronger proof, configure \code{introspection_checks = "scope"}.}
 
 \item{id_token_validated}{Logical flag indicating whether the ID token was
 cryptographically validated (signature verified and standard claims checked)
 during the OAuth flow. Defaults to \code{FALSE}.}
+
+\item{original_id_token}{Initial login ID token retained as the refresh
+continuity baseline. Refresh never replaces it with a newer ID token.
+For manually constructed tokens, the first refresh initializes this from
+\code{id_token} if omitted. Treat this property as credential material.}
+
+\item{extra_fields}{List of additional parameters from the latest successful
+token endpoint response. Excludes \code{access_token}, \code{token_type}, \code{refresh_token},
+\code{id_token}, \code{expires_in}, \code{scope}, and \code{cnf}, which have dedicated token
+properties. Defaults to an empty list. Successful refresh replaces this
+list, including when the response contains no extra fields.}
+
+\item{initial_extra_fields}{List of additional parameters from the initial
+successful authorization-code exchange. Preserved across refreshes and
+replaced on a new login. Defaults to an empty list for manually constructed
+tokens; refresh does not infer an initial response from \code{extra_fields}.}
+
+\item{smart_context}{Internal interpreted SMART context. Empty for ordinary
+tokens; populated only by SMART token processing. Use \code{\link[=smart_context]{smart_context()}} on
+a connection to read it. Includes sensitive patient and identity references.}
+
+\item{original_granted_scopes}{Initial accepted SMART grant, preserved across
+refreshes to distinguish unchanged grants from strict scope reductions.
+Empty for ordinary OAuth tokens. Set by SMART token processing.}
+}
+\value{
+Calling the constructor creates an \code{OAuthToken} object.
 }
 \description{
-S7 class representing OAuth tokens and (optionally) user information.
+An \code{OAuthToken} holds credentials and user information returned after login.
+The Shiny module supplies it as \code{auth[["token"]]}, and \code{\link[=handle_callback]{handle_callback()}} returns
+it for custom integrations. Pass it to \code{\link[=perform_resource_req]{perform_resource_req()}} to call an
+API, or to the token helpers for refresh, introspection, and revocation.
+
+Read properties with \code{@}, for example \code{auth[["token"]]@userinfo}. Profile fields
+depend on the provider. Keep access and refresh tokens out of the UI and logs.
 }
 \details{
 The \code{id_token_claims} property is a read-only computed property that returns
@@ -70,36 +109,26 @@ Note: \code{id_token_claims} always decodes the JWT payload regardless
 of whether the ID token's signature was verified.
 Check the \code{id_token_validated} property to determine whether the claims
 were cryptographically validated.
+For validated Apple ID tokens, exact \code{"true"}/\code{"false"} strings in
+\code{email_verified} are returned as logical values, as during validation.
+The original signed \code{id_token} is retained unchanged.
+
+Additional response parameters retain their parsed names and values,
+including nested lists and explicit JSON \code{null} values (R \code{NULL}). Use
+\code{"custom_field" \%in\% names(token@extra_fields)} to distinguish an absent field
+from a field explicitly returned as \code{null}. These parameters are not ID
+token claims and are not covered by \code{id_token_validated}. The initial
+snapshot records the initial response data, not current access permissions.
+No automatic merging, resource fetching, or interpretation is performed.
+Both lists can contain sensitive data; keep them out of the UI and logs.
 }
 \examples{
-# Please note: `get_userinfo()`, `introspect_token()`, and `refresh_token()`
-# are typically not called by users of this package directly, but are called
-# internally by `oauth_module_server()`. These functions are exported
-# nonetheless for advanced use cases. Most users will not need to
-# call these functions directly
+# Inside reactive server code, after a successful login:
+# auth[["token"]]@userinfo
+# auth[["token"]]@expires_at
+# auth[["token"]]@id_token_validated
+# auth[["token"]]@id_token_claims[["sub"]]
+# auth[["token"]]@extra_fields[["custom_field"]]
+# auth[["token"]]@initial_extra_fields[["custom_field"]]
 
-# Example requires a real token from a completed OAuth flow
-# (code is therefore not run; would error with placeholder values below)
-if (interactive()) {
-  # Define client
-  client <- oauth_client(
-    provider = oauth_provider_github(),
-    client_id = Sys.getenv("GITHUB_OAUTH_CLIENT_ID"),
-    client_secret = Sys.getenv("GITHUB_OAUTH_CLIENT_SECRET"),
-    redirect_uri = "http://127.0.0.1:8100"
-  )
-
-  # Have a valid OAuthToken object; fake example below
-  # (typically provided by `oauth_module_server()` or `handle_callback()`)
-  token <- handle_callback(client, "<code>", "<payload>", "<browser_token>")
-
-  # Get userinfo
-  user_info <- get_userinfo(client, token)
-
-  # Introspect token (if supported by provider)
-  introspection <- introspect_token(client, token)
-
-  # Refresh token
-  new_token <- refresh_token(client, token, introspect = TRUE)
-}
 }

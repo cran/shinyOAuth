@@ -12,7 +12,6 @@ make_oidc_provider <- function(issuer = "https://issuer.example.com") {
     auth_url = "https://example.com/auth",
     token_url = "https://example.com/token",
     issuer = issuer,
-    use_nonce = !is.na(issuer),
     use_pkce = TRUE,
     pkce_method = "S256",
     # Explicitly disable flags that auto-enable with issuer, so make_test_client
@@ -28,7 +27,7 @@ make_oidc_provider <- function(issuer = "https://issuer.example.com") {
     jwks_cache = cachem::cache_mem(max_age = 60),
     jwks_pins = character(),
     jwks_pin_mode = "any",
-    allowed_algs = c("RS256", "ES256"),
+    id_token_allowed_algs = c("RS256", "ES256"),
     allowed_token_types = character(),
     leeway = 60
   )
@@ -80,6 +79,69 @@ test_that("ensure_openid_scope is no-op for non-OIDC provider (no issuer)", {
   prov <- make_oidc_provider(issuer = NA_character_)
   result <- shinyOAuth:::ensure_openid_scope(c("profile", "email"), prov)
   expect_equal(result, c("profile", "email"))
+})
+
+test_that("issuer-driven OIDC can be disabled for generic OAuth metadata", {
+  prov <- oauth_provider(
+    name = "oauth-metadata",
+    auth_url = "https://as.example/authorize",
+    token_url = "https://as.example/token",
+    issuer = "https://as.example",
+    infer_oidc_from_issuer = FALSE,
+    token_auth_style = "body"
+  )
+  client <- oauth_client(
+    provider = prov,
+    client_id = "client",
+    client_secret = "secret",
+    redirect_uri = "https://client.example/callback",
+    scopes = "read"
+  )
+
+  expect_false(prov@infer_oidc_from_issuer)
+  expect_false(prov@use_nonce)
+  expect_false(prov@id_token_required)
+  expect_false(prov@id_token_validation)
+  expect_equal(shinyOAuth:::effective_client_scopes(client), "read")
+})
+
+test_that("issuer enables OIDC by default", {
+  prov <- oauth_provider(
+    name = "default-oidc",
+    auth_url = "https://oidc.example/authorize",
+    token_url = "https://oidc.example/token",
+    issuer = "https://oidc.example"
+  )
+
+  expect_true(prov@infer_oidc_from_issuer)
+  expect_true(prov@use_nonce)
+  expect_true(prov@id_token_required)
+  expect_true(prov@id_token_validation)
+})
+
+test_that("infer_oidc_from_issuer must be a scalar non-NA logical", {
+  expect_error(
+    oauth_provider(
+      name = "invalid-oidc-flag",
+      auth_url = "https://example.com/authorize",
+      token_url = "https://example.com/token",
+      issuer = "https://example.com",
+      infer_oidc_from_issuer = NA
+    ),
+    class = "shinyOAuth_input_error"
+  )
+})
+
+test_that("OIDC constructors preserve issuer-driven OIDC", {
+  prov <- oauth_provider_oidc(
+    name = "oidc",
+    base_url = "https://oidc.example"
+  )
+
+  expect_true(prov@infer_oidc_from_issuer)
+  expect_true(prov@use_nonce)
+  expect_true(prov@id_token_required)
+  expect_true(prov@id_token_validation)
 })
 
 test_that("ensure_openid_scope injects openid when scopes are empty", {
@@ -234,7 +296,7 @@ test_that("prepare_call seals the effective scopes sent in the auth request", {
   enc <- parse_query_param(url, "state")
   payload <- shinyOAuth:::state_decrypt_gcm(enc, key = cli@state_key)
 
-  expect_identical(payload$scopes, c("openid", "profile", "email"))
+  expect_identical(payload[["scopes"]], c("openid", "profile", "email"))
 })
 
 test_that("handle_callback validates scopes against auto-added openid scope in strict mode", {
@@ -265,7 +327,7 @@ test_that("handle_callback validates scopes against auto-added openid scope in s
       shinyOAuth:::handle_callback(
         cli,
         code = "ok",
-        payload = enc,
+        state = enc,
         browser_token = tok
       )
     ),

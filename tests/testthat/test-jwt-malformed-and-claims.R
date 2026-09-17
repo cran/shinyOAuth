@@ -19,6 +19,20 @@ build_jwt <- function(header, claims, sig = "") {
   )
 }
 
+build_signed_raw_jwt <- function(header_json, payload_json, key) {
+  signing_input <- paste(
+    enc_b64url(header_json),
+    enc_b64url(payload_json),
+    sep = "."
+  )
+  signature <- openssl::signature_create(
+    charToRaw(signing_input),
+    hash = openssl::sha256,
+    key = key
+  )
+  paste(signing_input, enc_raw_b64url(signature), sep = ".")
+}
+
 mk_client <- function() {
   prov <- shinyOAuth::oauth_provider(
     name = "test",
@@ -30,7 +44,7 @@ mk_client <- function() {
     issuer = "https://issuer.example.com",
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("RS256", "ES256")
+    id_token_allowed_algs = c("RS256", "ES256")
   )
   shinyOAuth::oauth_client(
     prov,
@@ -62,6 +76,32 @@ test_that("Malformed JWTs are rejected with parse errors", {
     expect_error(
       shinyOAuth:::validate_id_token(client, bad3),
       regexp = "parse|Failed|invalid|missing alg"
+    )
+  })
+})
+
+test_that("OIDC sub is limited to 255 ASCII characters", {
+  expect_true(shinyOAuth:::is_valid_oidc_sub("user-123"))
+  expect_true(shinyOAuth:::is_valid_oidc_sub(strrep("a", 255)))
+  expect_false(shinyOAuth:::is_valid_oidc_sub(strrep("a", 256)))
+  expect_false(shinyOAuth:::is_valid_oidc_sub("usér"))
+
+  client <- mk_client()
+  now <- floor(as.numeric(Sys.time()))
+  claims <- list(
+    iss = client@provider@issuer,
+    aud = client@client_id,
+    sub = strrep("a", 256),
+    iat = now - 1,
+    exp = now + 60
+  )
+  jwt <- build_jwt(list(alg = "RS256"), claims, sig = "c2ln")
+
+  withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
+    expect_error(
+      shinyOAuth:::validate_id_token(client, jwt),
+      class = "shinyOAuth_id_token_error",
+      regexp = "255 ASCII"
     )
   })
 })
@@ -106,9 +146,9 @@ test_that("JWT parsing rejects padded, invalid, and empty compact segments", {
     payload,
     "."
   ))
-  expect_true(is.raw(parts$data))
-  expect_true(is.raw(parts$sig))
-  expect_length(parts$sig, 0)
+  expect_true(is.raw(parts[["data"]]))
+  expect_true(is.raw(parts[["sig"]]))
+  expect_length(parts[["sig"]], 0)
 })
 
 test_that("JWT parsing rejects embedded NUL and invalid UTF-8 JSON text", {
@@ -181,11 +221,146 @@ test_that("JWT parsing rejects non-object payload JSON", {
   })
 })
 
+test_that("JWT parsing preserves heterogeneous audience element types", {
+  client <- mk_client()
+  now <- floor(as.numeric(Sys.time()))
+  jwt <- build_jwt(
+    list(alg = "none"),
+    list(
+      iss = client@provider@issuer,
+      aud = list(123, client@client_id),
+      sub = "u",
+      iat = now - 1,
+      exp = now + 60
+    )
+  )
+
+  parsed <- shinyOAuth:::parse_jwt_payload(jwt)
+  expect_type(parsed[["aud"]], "list")
+  expect_true(is.numeric(parsed[["aud"]][[1]]))
+  expect_identical(parsed[["aud"]][[2]], client@client_id)
+
+  withr::local_options(list(shinyOAuth.skip_id_sig = TRUE))
+  expect_error(
+    shinyOAuth:::validate_id_token(client, jwt),
+    class = "shinyOAuth_id_token_error",
+    regexp = "Audience invalid"
+  )
+  expect_error(
+    shinyOAuth:::validate_signed_userinfo_claims(
+      claims = parsed,
+      expected_issuer = client@provider@issuer,
+      expected_client_id = client@client_id
+    ),
+    class = "shinyOAuth_userinfo_error",
+    regexp = "aud"
+  )
+})
+
+test_that("signed JWT scalar claims cannot be encoded as arrays", {
+  client <- mk_client()
+  now <- floor(as.numeric(Sys.time()))
+  key <- openssl::rsa_keygen(bits = 2048)
+  jwk <- jsonlite::fromJSON(
+    write_test_jwk(key[["pubkey"]]),
+    simplifyVector = TRUE
+  )
+  jwk[["kid"]] <- "raw-json-types"
+  jwk[["use"]] <- "sig"
+  jwk[["alg"]] <- "RS256"
+  jwks <- list(keys = list(jwk))
+  header_json <- '{"alg":"RS256","kid":"raw-json-types"}'
+  values <- c(
+    iss = jsonlite::toJSON(client@provider@issuer, auto_unbox = TRUE),
+    aud = jsonlite::toJSON(client@client_id, auto_unbox = TRUE),
+    sub = '"user-1"',
+    iat = as.character(now - 1),
+    exp = as.character(now + 60)
+  )
+  make_payload <- function(array_claim = NULL) {
+    encoded <- values
+    if (!is.null(array_claim)) {
+      encoded[[array_claim]] <- paste0("[", encoded[[array_claim]], "]")
+    }
+    paste0(
+      "{",
+      paste0('"', names(encoded), '":', encoded, collapse = ","),
+      "}"
+    )
+  }
+  validate_raw <- function(jwt) {
+    testthat::with_mocked_bindings(
+      fetch_jwks = function(...) jwks,
+      shinyOAuth:::validate_id_token(client, jwt),
+      .package = "shinyOAuth"
+    )
+  }
+
+  valid_jwt <- build_signed_raw_jwt(header_json, make_payload(), key)
+  expect_no_error(validate_raw(valid_jwt))
+
+  for (claim in c("iss", "sub", "iat", "exp")) {
+    jwt <- build_signed_raw_jwt(header_json, make_payload(claim), key)
+    parsed <- shinyOAuth:::parse_jwt_payload(jwt)
+    expect_type(parsed[[claim]], "list")
+    expect_error(
+      validate_raw(jwt),
+      class = "shinyOAuth_id_token_error",
+      info = claim
+    )
+  }
+})
+
+test_that("JARM parsing preserves audience element types", {
+  client <- mk_client()
+  now <- floor(as.numeric(Sys.time()))
+  header <- enc_b64url('{"alg":"RS256"}')
+  make_jarm <- function(audience_json) {
+    payload <- paste0(
+      '{"iss":"',
+      client@provider@issuer,
+      '","aud":',
+      audience_json,
+      ',"exp":',
+      now + 60,
+      "}"
+    )
+    paste(header, enc_b64url(payload), "", sep = ".")
+  }
+
+  mixed <- shinyOAuth:::parse_jarm_payload(
+    make_jarm(paste0('[123,"', client@client_id, '"]'))
+  )
+  expect_type(mixed[["aud"]], "list")
+  expect_true(is.numeric(mixed[["aud"]][[1]]))
+  expect_identical(mixed[["aud"]][[2]], client@client_id)
+  expect_error(
+    shinyOAuth:::validate_jarm_pre_signature_claims(client, mixed),
+    class = "shinyOAuth_state_error",
+    regexp = "aud claim is invalid"
+  )
+
+  valid <- shinyOAuth:::parse_jarm_payload(
+    make_jarm(paste0('["', client@client_id, '"]'))
+  )
+  expect_type(valid[["aud"]], "list")
+  checked <- shinyOAuth:::validate_jarm_pre_signature_claims(client, valid)
+  expect_identical(checked[["aud"]], client@client_id)
+})
+
 test_that("exp/iat/nbf boundary conditions respect leeway", {
   client <- mk_client()
   client@provider@leeway <- 5
 
-  now <- floor(as.numeric(Sys.time()))
+  fixed_now <- Sys.time()
+  now <- floor(as.numeric(fixed_now))
+  validate_at_fixed_time <- function(jwt) {
+    testthat::with_mocked_bindings(
+      Sys.time = function() fixed_now,
+      .package = "base",
+      shinyOAuth:::validate_id_token(client, jwt)
+    )
+  }
   base_claims <- list(
     iss = client@provider@issuer,
     aud = client@client_id,
@@ -194,10 +369,10 @@ test_that("exp/iat/nbf boundary conditions respect leeway", {
   )
 
   # exp at just inside the window (now - leeway + 1) should be valid
-  c1 <- modifyList(base_claims, list(exp = now - 5 + 1))
+  c1 <- modifyList(base_claims, list(exp = now - 5 + 1, iat = now - 10))
   jwt1 <- build_jwt(list(alg = "none"), c1)
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
-    expect_silent(shinyOAuth:::validate_id_token(client, jwt1))
+    expect_silent(validate_at_fixed_time(jwt1))
   })
 
   # exp just below window -> expired
@@ -205,7 +380,7 @@ test_that("exp/iat/nbf boundary conditions respect leeway", {
   jwt2 <- build_jwt(list(alg = "none"), c2)
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
     expect_error(
-      shinyOAuth:::validate_id_token(client, jwt2),
+      validate_at_fixed_time(jwt2),
       class = "shinyOAuth_id_token_error",
       regexp = "expired"
     )
@@ -216,7 +391,7 @@ test_that("exp/iat/nbf boundary conditions respect leeway", {
   jwt3 <- build_jwt(list(alg = "none"), c3)
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
     expect_error(
-      shinyOAuth:::validate_id_token(client, jwt3),
+      validate_at_fixed_time(jwt3),
       class = "shinyOAuth_id_token_error",
       regexp = "issued in the future"
     )
@@ -227,7 +402,7 @@ test_that("exp/iat/nbf boundary conditions respect leeway", {
   jwt4 <- build_jwt(list(alg = "none"), c4)
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
     expect_error(
-      shinyOAuth:::validate_id_token(client, jwt4),
+      validate_at_fixed_time(jwt4),
       class = "shinyOAuth_id_token_error",
       regexp = "not yet valid"
     )
@@ -237,15 +412,43 @@ test_that("exp/iat/nbf boundary conditions respect leeway", {
   c5 <- modifyList(base_claims, list(exp = now + 60, iat = now + 5))
   jwt5 <- build_jwt(list(alg = "none"), c5)
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
-    expect_silent(shinyOAuth:::validate_id_token(client, jwt5))
+    expect_silent(validate_at_fixed_time(jwt5))
   })
 
   # nbf exactly at leeway boundary (now + leeway) -> should be accepted
   c6 <- modifyList(base_claims, list(exp = now + 60, nbf = now + 5))
   jwt6 <- build_jwt(list(alg = "none"), c6)
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
-    expect_silent(shinyOAuth:::validate_id_token(client, jwt6))
+    expect_silent(validate_at_fixed_time(jwt6))
   })
+})
+
+test_that("ID tokens expire at the exact exp boundary", {
+  client <- mk_client()
+  client@provider@leeway <- 0
+  fixed_now <- as.POSIXct("2026-01-01 00:00:00", tz = "UTC")
+  now <- floor(as.numeric(fixed_now))
+  jwt <- build_jwt(
+    list(alg = "none"),
+    list(
+      iss = client@provider@issuer,
+      aud = client@client_id,
+      sub = "u",
+      iat = now - 1,
+      exp = now
+    )
+  )
+
+  withr::local_options(list(shinyOAuth.skip_id_sig = TRUE))
+  expect_error(
+    testthat::with_mocked_bindings(
+      Sys.time = function() fixed_now,
+      .package = "base",
+      shinyOAuth:::validate_id_token(client, jwt)
+    ),
+    class = "shinyOAuth_id_token_error",
+    regexp = "expired"
+  )
 })
 
 test_that("signed RS256 temporal boundaries respect package leeway", {
@@ -259,17 +462,17 @@ test_that("signed RS256 temporal boundaries respect package leeway", {
     iss = client@provider@issuer,
     aud = client@client_id,
     sub = "u",
-    iat = now - 1,
-    exp = now + 60
+    iat = now - 300,
+    exp = now + 600
   )
 
   rsa <- openssl::rsa_keygen(bits = 2048)
-  jwk <- jsonlite::fromJSON(jose::write_jwk(rsa), simplifyVector = TRUE)
+  jwk <- jsonlite::fromJSON(write_test_jwk(rsa), simplifyVector = TRUE)
   jwks <- list(
     keys = list(list(
-      kty = jwk$kty,
-      n = jwk$n,
-      e = jwk$e,
+      kty = jwk[["kty"]],
+      n = jwk[["n"]],
+      e = jwk[["e"]],
       kid = "k1",
       use = "sig",
       alg = "RS256"
@@ -336,7 +539,7 @@ test_that("signed HS256 exp boundary respects package leeway", {
     issuer = "https://issuer.example.com",
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("HS256"),
+    id_token_allowed_algs = c("HS256"),
     leeway = 120
   )
   client <- shinyOAuth::oauth_client(
@@ -363,7 +566,10 @@ test_that("signed HS256 exp boundary respects package leeway", {
     )
   }
 
-  jwt1 <- sign_hs256(modifyList(base_claims, list(exp = now - 61)))
+  jwt1 <- sign_hs256(modifyList(
+    base_claims,
+    list(exp = now - 61, iat = now - 300)
+  ))
   testthat::expect_silent(shinyOAuth:::validate_id_token(client, jwt1))
 
   jwt2 <- sign_hs256(modifyList(base_claims, list(exp = now - 121)))
@@ -421,47 +627,50 @@ test_that("verify_jws_signature_no_time enforces exact JOSE ECDSA signature widt
   now <- floor(as.numeric(Sys.time()))
 
   for (case in alg_cases) {
-    key <- try(openssl::ec_keygen(curve = case$curve), silent = TRUE)
+    key <- try(openssl::ec_keygen(curve = case[["curve"]]), silent = TRUE)
     if (inherits(key, "try-error")) {
-      testthat::skip(paste("EC key generation not supported for", case$curve))
+      testthat::skip(paste(
+        "EC key generation not supported for",
+        case[["curve"]]
+      ))
     }
 
     jwt <- jose::jwt_encode_sig(
       jose::jwt_claim(
         iss = "https://issuer.example.com",
         aud = "client-es",
-        sub = paste0("user-", tolower(case$alg)),
+        sub = paste0("user-", tolower(case[["alg"]])),
         iat = now - 1,
         exp = now + 60
       ),
       key = key,
-      header = list(alg = case$alg, typ = "JWT")
+      header = list(alg = case[["alg"]], typ = "JWT")
     )
 
     expect_true(shinyOAuth:::verify_jws_signature_no_time(
       jwt,
-      key$pubkey,
-      case$alg
+      key[["pubkey"]],
+      case[["alg"]]
     ))
 
     parts <- strsplit(jwt, ".", fixed = TRUE)[[1]]
     sig <- shinyOAuth:::base64url_decode_raw(parts[3])
-    expect_length(sig, case$width)
+    expect_length(sig, case[["width"]])
 
     short_sig <- sig[-seq_len(2L)]
     parts[3] <- shinyOAuth:::base64url_encode(short_sig)
     expect_false(shinyOAuth:::verify_jws_signature_no_time(
       paste(parts, collapse = "."),
-      key$pubkey,
-      case$alg
+      key[["pubkey"]],
+      case[["alg"]]
     ))
 
     long_sig <- c(sig, as.raw(c(0L, 0L)))
     parts[3] <- shinyOAuth:::base64url_encode(long_sig)
     expect_false(shinyOAuth:::verify_jws_signature_no_time(
       paste(parts, collapse = "."),
-      key$pubkey,
-      case$alg
+      key[["pubkey"]],
+      case[["alg"]]
     ))
   }
 })
@@ -480,7 +689,7 @@ test_that("validate_id_token accepts HS256 tokens with non-ASCII client_secret",
     issuer = "https://issuer.example.com",
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("HS256")
+    id_token_allowed_algs = c("HS256")
   )
   client <- shinyOAuth::oauth_client(
     prov,

@@ -15,7 +15,7 @@ testthat::test_that("handle_callback warns when expires_in is absent (login)", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw('{"access_token":"tok_no_exp","token_type":"bearer"}')
@@ -34,7 +34,7 @@ testthat::test_that("handle_callback warns when expires_in is absent (login)", {
       tok <- handle_callback(
         cli,
         code = "auth_code_123",
-        payload = enc,
+        state = enc,
         browser_token = bt
       )
     },
@@ -55,7 +55,7 @@ testthat::test_that("handle_callback does NOT warn when expires_in is present (l
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -74,7 +74,7 @@ testthat::test_that("handle_callback does NOT warn when expires_in is present (l
     tok <- handle_callback(
       cli,
       code = "auth_code_456",
-      payload = enc,
+      state = enc,
       browser_token = bt
     )
   })
@@ -94,7 +94,7 @@ testthat::test_that("refresh_token warns when expires_in is absent (refresh)", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -134,7 +134,7 @@ testthat::test_that("refresh_token does NOT warn when expires_in is present (ref
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -286,7 +286,7 @@ testthat::test_that("handle_callback uses default_expires_in option (login)", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw('{"access_token":"tok_opt","token_type":"bearer"}')
@@ -306,7 +306,7 @@ testthat::test_that("handle_callback uses default_expires_in option (login)", {
     tok <- handle_callback(
       cli,
       code = "auth_code_opt",
-      payload = enc,
+      state = enc,
       browser_token = bt
     ),
     class = "shinyOAuth_missing_expires_in"
@@ -325,7 +325,7 @@ testthat::test_that("refresh_token uses default_expires_in option (refresh)", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(

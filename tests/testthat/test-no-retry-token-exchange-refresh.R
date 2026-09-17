@@ -3,11 +3,28 @@
 
 # ---- req_with_retry(idempotent = FALSE) unit tests ----
 
+test_that("bounded transport gives httr2 exactly one attempt", {
+  req <- httr2::request("https://example.com/resource") |>
+    httr2::req_retry(max_tries = 4, retry_on_failure = TRUE)
+  local_mocked_bindings(
+    req_perform = function(req, ...) {
+      expect_identical(req[["policies"]][["retry_max_tries"]], 1L)
+      expect_null(req[["policies"]][["retry_max_wait"]])
+      httr2::response(status_code = 200L, body = charToRaw("{}"))
+    },
+    .package = "httr2"
+  )
+  expect_s3_class(
+    shinyOAuth:::req_with_retry(req, idempotent = FALSE),
+    "httr2_response"
+  )
+})
+
 test_that("req_with_retry(idempotent = FALSE) does not retry on transport error", {
   req <- httr2::request("https://example.com/token")
   attempts <- 0
   testthat::local_mocked_bindings(
-    req_perform = function(request) {
+    req_perform = function(request, ...) {
       attempts <<- attempts + 1
       stop("connection reset")
     },
@@ -26,10 +43,10 @@ test_that("req_with_retry(idempotent = FALSE) returns 500 without retrying", {
   req <- httr2::request("https://example.com/token")
   attempts <- 0
   testthat::local_mocked_bindings(
-    req_perform = function(request) {
+    req_perform = function(request, ...) {
       attempts <<- attempts + 1
       httr2::response(
-        url = request$url,
+        url = request[["url"]],
         status = 500,
         headers = list("content-type" = "application/json"),
         body = charToRaw('{"error":"server_error"}')
@@ -48,10 +65,10 @@ test_that("req_with_retry(idempotent = FALSE) returns success on first attempt",
   req <- httr2::request("https://example.com/token")
   attempts <- 0
   testthat::local_mocked_bindings(
-    req_perform = function(request) {
+    req_perform = function(request, ...) {
       attempts <<- attempts + 1
       httr2::response(
-        url = request$url,
+        url = request[["url"]],
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw('{"access_token":"tok"}')
@@ -70,13 +87,13 @@ test_that("req_with_retry(idempotent = TRUE) still retries (default behavior)", 
   attempts <- 0
   sleeps <- numeric()
   testthat::local_mocked_bindings(
-    req_perform = function(request) {
+    req_perform = function(request, ...) {
       attempts <<- attempts + 1
       if (attempts < 2) {
         stop("timeout")
       }
       httr2::response(
-        url = request$url,
+        url = request[["url"]],
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw('{"sub":"user1"}')
@@ -132,7 +149,7 @@ test_that("swap_code_for_token_set does not retry: server committed, response lo
     }
   )
   expect_equal(attempts, 1)
-  expect_equal(result$access_token, "at_123")
+  expect_equal(result[["access_token"]], "at_123")
 })
 
 # ---- Regression: refresh_token does not retry ----
@@ -169,7 +186,7 @@ test_that("refresh_token does not retry: server rotated token, response lost", {
     .package = "shinyOAuth",
     {
       result <- shinyOAuth::refresh_token(
-        oauth_client = client,
+        client = client,
         token = token
       )
     }
@@ -186,26 +203,29 @@ test_that("token exchange hits server exactly once (webfakes)", {
   testthat::skip_on_cran()
 
   app <- webfakes::new_app()
-  app$locals$attempts <- 0
+  app[["locals"]][["attempts"]] <- 0
   # First request succeeds but simulates a slow 500 to show no retry
-  app$post("/token", function(req, res) {
-    req$app$locals$attempts <- req$app$locals$attempts + 1
+  app[["post"]]("/token", function(req, res) {
+    req[["app"]][["locals"]][["attempts"]] <- req[["app"]][["locals"]][[
+      "attempts"
+    ]] +
+      1
     # Always return 500 — a retrying client would hit this twice
-    res$set_status(500)
-    res$set_type("application/json")
-    res$send('{"error":"server_error"}')
+    res[["set_status"]](500)
+    res[["set_type"]]("application/json")
+    res[["send"]]('{"error":"server_error"}')
   })
-  app$get("/attempts", function(req, res) {
-    res$set_type("application/json")
-    res$send(jsonlite::toJSON(
-      list(attempts = req$app$locals$attempts),
+  app[["get"]]("/attempts", function(req, res) {
+    res[["set_type"]]("application/json")
+    res[["send"]](jsonlite::toJSON(
+      list(attempts = req[["app"]][["locals"]][["attempts"]]),
       auto_unbox = TRUE
     ))
   })
 
   srv <- webfakes::local_app_process(app)
-  token_url <- paste0(srv$url(), "/token")
-  attempts_url <- paste0(srv$url(), "/attempts")
+  token_url <- paste0(srv[["url"]](), "/token")
+  attempts_url <- paste0(srv[["url"]](), "/attempts")
 
   withr::local_options(list(
     shinyOAuth.retry_max_tries = 3L,
@@ -226,7 +246,7 @@ test_that("token exchange hits server exactly once (webfakes)", {
 
   # Verify only one attempt was made, even though 500 is normally retried
   att_resp <- httr2::request(attempts_url) |> httr2::req_perform()
-  att <- jsonlite::fromJSON(httr2::resp_body_string(att_resp))$attempts
+  att <- jsonlite::fromJSON(httr2::resp_body_string(att_resp))[["attempts"]]
   expect_equal(att, 1)
 })
 
@@ -235,17 +255,20 @@ test_that("idempotent request retries 500 as before (webfakes control)", {
   testthat::skip_on_cran()
 
   app <- webfakes::new_app()
-  app$locals$attempts <- 0
-  app$get("/flaky", function(req, res) {
-    req$app$locals$attempts <- req$app$locals$attempts + 1
-    res$set_status(500)
-    res$set_type("text/plain")
-    res$send("error")
+  app[["locals"]][["attempts"]] <- 0
+  app[["get"]]("/flaky", function(req, res) {
+    req[["app"]][["locals"]][["attempts"]] <- req[["app"]][["locals"]][[
+      "attempts"
+    ]] +
+      1
+    res[["set_status"]](500)
+    res[["set_type"]]("text/plain")
+    res[["send"]]("error")
   })
-  app$get("/attempts", function(req, res) {
-    res$set_type("application/json")
-    res$send(jsonlite::toJSON(
-      list(attempts = req$app$locals$attempts),
+  app[["get"]]("/attempts", function(req, res) {
+    res[["set_type"]]("application/json")
+    res[["send"]](jsonlite::toJSON(
+      list(attempts = req[["app"]][["locals"]][["attempts"]]),
       auto_unbox = TRUE
     ))
   })
@@ -258,7 +281,7 @@ test_that("idempotent request retries 500 as before (webfakes control)", {
     shinyOAuth.retry_backoff_cap = 0.02
   ))
 
-  req <- httr2::request(paste0(srv$url(), "/flaky")) |>
+  req <- httr2::request(paste0(srv[["url"]](), "/flaky")) |>
     shinyOAuth:::add_req_defaults()
 
   # idempotent = TRUE (default) — should retry
@@ -266,8 +289,8 @@ test_that("idempotent request retries 500 as before (webfakes control)", {
   resp <- shinyOAuth:::req_with_retry(req, idempotent = TRUE)
   expect_equal(httr2::resp_status(resp), 500)
 
-  att_resp <- httr2::request(paste0(srv$url(), "/attempts")) |>
+  att_resp <- httr2::request(paste0(srv[["url"]](), "/attempts")) |>
     httr2::req_perform()
-  att <- jsonlite::fromJSON(httr2::resp_body_string(att_resp))$attempts
+  att <- jsonlite::fromJSON(httr2::resp_body_string(att_resp))[["attempts"]]
   expect_equal(att, 2) # Retried once
 })

@@ -5,53 +5,67 @@
 
 ## 1.1 Build client registration metadata ------------------------------------
 
-#' Build RFC 8705 mTLS registration metadata
+#' Prepare client-certificate registration settings (mTLS)
 #'
 #' @description
-#' Returns a JSON-ready list of client metadata for registering an
-#' [OAuthClient] that uses RFC 8705 mutual TLS or requests
-#' certificate-bound access tokens.
+#' Build a list of settings to register a certificate-based client with your
+#' provider using mutual TLS (mTLS). Use this when preparing metadata for dynamic
+#' client registration or when your provider asks for certificate identifiers,
+#' public keys, or certificate-bound token settings. It derives those settings
+#' from an [oauth_client()] already configured for mTLS.
 #'
-#' For `token_auth_style = "tls_client_auth"`, this helper returns
-#' `token_endpoint_auth_method = "tls_client_auth"` plus exactly one RFC 8705
-#' certificate identifier field:
-#' `tls_client_auth_subject_dn`, `tls_client_auth_san_dns`,
-#' `tls_client_auth_san_uri`, `tls_client_auth_san_ip`, or
-#' `tls_client_auth_san_email`.
+#' The result is a metadata list, ready to include in a registration request.
+#' Submit it through your provider's registration process; this function does
+#' not register the client or upload the certificate.
 #'
-#' For `token_auth_style = "self_signed_tls_client_auth"`, this helper returns
-#' `token_endpoint_auth_method = "self_signed_tls_client_auth"` plus either an
-#' inline `jwks` document built from the configured client certificate and
-#' certificate chain (published via `x5c`), or a caller-supplied `jwks_uri`.
+#' @details
+#' For `tls_client_auth`, the result identifies the client certificate using
+#' one selected subject or alternative-name field. For
+#' `self_signed_tls_client_auth`, it contains an inline `jwks` with the
+#' certificate chain (`x5c`), or the supplied `jwks_uri`.
 #'
-#' For clients that request RFC 8705 certificate-bound access tokens without
-#' mTLS OAuth client authentication, this helper returns the runtime
-#' `token_auth_style` mapped back to the dynamic-registration metadata value
-#' (for example, `public` becomes `none`) and emits
-#' `tls_client_certificate_bound_access_tokens = TRUE`.
+#' For certificate-bound tokens without mTLS client authentication, the result
+#' uses the corresponding registration authentication method (for example,
+#' `public` becomes `none`) and sets
+#' `tls_client_certificate_bound_access_tokens = TRUE`. See
+#' the [advanced security vignette](https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html) for when these configurations are useful.
 #'
-#' This helper prepares metadata only. It does not make a registration HTTP
-#' call.
-#'
-#' @param oauth_client [OAuthClient] configured for RFC 8705 mutual TLS client
+#' @param client [OAuthClient] configured for RFC 8705 mutual TLS client
 #'   authentication or for certificate-bound access tokens.
 #' @param tls_client_auth_type For `tls_client_auth`, which RFC 8705
 #'   certificate identifier field to emit. One of `"subject_dn"`, `"san_dns"`,
 #'   `"san_uri"`, `"san_ip"`, or `"san_email"`.
 #' @param tls_client_auth_value Optional explicit value for the selected
 #'   `tls_client_auth_type`. When omitted, shinyOAuth derives the subject DN
-#'   or, when possible, a unique matching SAN value from the configured client
-#'   certificate. Auto-derived IP SAN values are normalized to dotted-decimal
-#'   IPv4 or RFC 5952 IPv6 text. If the certificate exposes no unambiguous SAN
-#'   for the chosen type, pass the exact registration value explicitly.
+#'   from the configured client certificate. SAN registration requires an
+#'   explicit value because the current certificate extractor does not preserve
+#'   ASN.1 SAN types. Select the type and exact value from the certificate;
+#'   a numeric-looking DNS name is still a DNS SAN, not an IP SAN.
 #' @param jwks_uri Optional absolute URL of a JWKS document to publish for
 #'   `self_signed_tls_client_auth`. When omitted, the helper returns an inline
 #'   `jwks` object with the configured client certificate chain in `x5c`.
 #'
 #' @return A JSON-ready list of RFC 7591/RFC 8705 client metadata.
+#' @param oauth_client Compatibility alias for `client`. Supply only one spelling.
+#' @examplesIf file.exists(Sys.getenv("OAUTH_MTLS_CERT_FILE")) && file.exists(Sys.getenv("OAUTH_MTLS_KEY_FILE"))
+#' # Set these environment variables to your existing certificate and key files.
+#' provider <- oauth_provider(
+#'   name = "Example service",
+#'   auth_url = "https://example.com/authorize",
+#'   token_url = "https://example.com/token",
+#'   token_auth_style = "tls_client_auth"
+#' )
+#' client <- oauth_client(
+#'   provider = provider,
+#'   client_id = "example-client",
+#'   redirect_uri = "http://127.0.0.1:8100/callback",
+#'   mtls_client_cert_file = Sys.getenv("OAUTH_MTLS_CERT_FILE"),
+#'   mtls_client_key_file = Sys.getenv("OAUTH_MTLS_KEY_FILE")
+#' )
+#' oauth_client_mtls_registration(client)
 #' @export
 oauth_client_mtls_registration <- function(
-  oauth_client,
+  client,
   tls_client_auth_type = c(
     "subject_dn",
     "san_dns",
@@ -60,8 +74,17 @@ oauth_client_mtls_registration <- function(
     "san_email"
   ),
   tls_client_auth_value = NULL,
-  jwks_uri = NULL
+  jwks_uri = NULL,
+  oauth_client = NULL
 ) {
+  oauth_client <- resolve_argument_alias(
+    client,
+    oauth_client,
+    missing(client),
+    missing(oauth_client),
+    "client",
+    "oauth_client"
+  )
   S7::check_is_S7(oauth_client, class = OAuthClient)
   tls_client_auth_type <- match.arg(tls_client_auth_type)
   requests_certificate_bound_tokens <- client_requests_certificate_bound_tokens(
@@ -72,12 +95,18 @@ oauth_client_mtls_registration <- function(
     !is.null(tls_client_auth_value) && !is_valid_string(tls_client_auth_value)
   ) {
     err_input(
-      "{.arg tls_client_auth_value} must be NULL or a single non-empty string."
+      "`tls_client_auth_value` must be NULL or a single non-empty string."
+    )
+  }
+  if (!is.null(tls_client_auth_value)) {
+    tls_client_auth_value <- normalize_mtls_registration_alt_name_value(
+      tls_client_auth_type,
+      tls_client_auth_value
     )
   }
   if (!is.null(jwks_uri) && !is_valid_string(jwks_uri)) {
     err_input(
-      "{.arg jwks_uri} must be NULL or a single non-empty string."
+      "`jwks_uri` must be NULL or a single non-empty string."
     )
   }
 
@@ -90,16 +119,16 @@ oauth_client_mtls_registration <- function(
   ) {
     err_input(
       paste(
-        "{.arg oauth_client} must use an RFC 8705 mTLS token_auth_style or",
-        "set mtls_request_certificate_bound_access_tokens = TRUE."
+        "`oauth_client` must use an RFC 8705 mTLS token_auth_style or",
+        "set mtls_certificate_bound_access_tokens = TRUE."
       )
     )
   }
   if (!client_has_mtls_certificate(oauth_client)) {
     err_input(
       paste(
-        "{.arg oauth_client} must include tls_client_cert_file and",
-        "tls_client_key_file to build mTLS registration metadata."
+        "`oauth_client` must include mtls_client_cert_file and",
+        "mtls_client_key_file to build mTLS registration metadata."
       )
     )
   }
@@ -121,26 +150,28 @@ oauth_client_mtls_registration <- function(
     if (!is.null(tls_client_auth_value)) {
       err_input(
         paste(
-          "{.arg tls_client_auth_value} only applies when token_auth_style =",
+          "`tls_client_auth_value` only applies when token_auth_style =",
           "'tls_client_auth'."
         )
       )
     }
 
     if (is.null(jwks_uri)) {
-      metadata$jwks <- build_self_signed_mtls_registration_jwks(oauth_client)
+      metadata[["jwks"]] <- build_self_signed_mtls_registration_jwks(
+        oauth_client
+      )
       return(metadata)
     }
 
     validate_mtls_registration_jwks_uri(jwks_uri)
-    metadata$jwks_uri <- jwks_uri
+    metadata[["jwks_uri"]] <- jwks_uri
     return(metadata)
   }
 
   if (!is.null(jwks_uri)) {
     err_input(
       paste(
-        "{.arg jwks_uri} only applies when token_auth_style =",
+        "`jwks_uri` only applies when token_auth_style =",
         "'self_signed_tls_client_auth'."
       )
     )
@@ -150,7 +181,7 @@ oauth_client_mtls_registration <- function(
     if (!is.null(tls_client_auth_value)) {
       err_input(
         paste(
-          "{.arg tls_client_auth_value} only applies when token_auth_style =",
+          "`tls_client_auth_value` only applies when token_auth_style =",
           "'tls_client_auth'."
         )
       )
@@ -245,15 +276,18 @@ resolve_mtls_registration_identifier_value <- function(
   tls_client_auth_value = NULL
 ) {
   if (is_valid_string(tls_client_auth_value)) {
-    return(trimws(tls_client_auth_value))
+    return(normalize_mtls_registration_alt_name_value(
+      tls_client_auth_type,
+      tls_client_auth_value
+    ))
   }
 
   cert_info <- read_mtls_registration_certificate_info(oauth_client)
   if (identical(tls_client_auth_type, "subject_dn")) {
-    subject <- cert_info$subject %||% NA_character_
+    subject <- cert_info[["subject"]] %||% NA_character_
     if (!is_valid_string(subject)) {
       err_config(
-        "tls_client_cert_file does not expose a subject DN for tls_client_auth registration"
+        "mtls_client_cert_file does not expose a subject DN for tls_client_auth registration"
       )
     }
     return(subject)
@@ -274,17 +308,20 @@ resolve_mtls_registration_identifier_value <- function(
 #' @noRd
 read_mtls_registration_certificate_info <- function(oauth_client) {
   cert <- read_keyed_client_certificate(
-    oauth_client@tls_client_cert_file,
-    key_file = oauth_client@tls_client_key_file,
-    key_password = oauth_client@tls_client_key_password
+    oauth_client@mtls_client_cert_file,
+    key_file = oauth_client@mtls_client_key_file,
+    key_password = oauth_client@mtls_client_key_password
   )
   info <- as.list(cert)
   if (!is.list(info)) {
     err_config(
-      "Failed to inspect tls_client_cert_file for mTLS registration metadata"
+      "Failed to inspect mtls_client_cert_file for mTLS registration metadata"
     )
   }
 
+  # openssl::as.list(cert)[["alt_names"]] contains untyped strings. Even strings
+  # resembling "DNS:" or IP literals do not prove a GeneralName tag.
+  info[["alt_names_typed"]] <- FALSE
   info
 }
 
@@ -304,18 +341,28 @@ resolve_certificate_alt_name_value <- function(
   cert_info,
   tls_client_auth_type
 ) {
-  alt_names <- cert_info$alt_names %||% character(0)
+  if (!isTRUE(cert_info[["alt_names_typed"]])) {
+    err_input(paste(
+      "Certificate SAN types are unavailable from the certificate extractor;",
+      "pass tls_client_auth_value explicitly for the selected SAN type."
+    ))
+  }
+  alt_names <- cert_info[["alt_names"]] %||% character(0)
   parsed <- Filter(
     Negate(is.null),
     lapply(alt_names, parse_certificate_alt_name)
   )
   matches <- Filter(
     function(entry) {
-      identical(entry$type, tls_client_auth_type)
+      identical(entry[["type"]], tls_client_auth_type)
     },
     parsed
   )
-  values <- unique(vapply(matches, function(entry) entry$value, character(1)))
+  values <- unique(vapply(
+    matches,
+    function(entry) entry[["value"]],
+    character(1)
+  ))
   field_name <- mtls_registration_field_name(tls_client_auth_type)
 
   if (length(values) == 1L) {
@@ -325,12 +372,12 @@ resolve_certificate_alt_name_value <- function(
     err_input(paste(
       "Could not derive",
       field_name,
-      "from tls_client_cert_file; pass tls_client_auth_value explicitly."
+      "from mtls_client_cert_file; pass tls_client_auth_value explicitly."
     ))
   }
 
   err_input(paste(
-    "tls_client_cert_file exposes multiple candidate values for",
+    "mtls_client_cert_file exposes multiple candidate values for",
     field_name,
     "; pass tls_client_auth_value explicitly."
   ))
@@ -382,20 +429,6 @@ parse_certificate_alt_name <- function(alt_name) {
     }
   }
 
-  ip_value <- try(normalize_mtls_registration_ip_literal(value), silent = TRUE)
-  if (!inherits(ip_value, "try-error")) {
-    return(list(type = "san_ip", value = ip_value))
-  }
-  if (grepl("^[A-Za-z][A-Za-z0-9+.-]*:[^[:space:]]+$", value, perl = TRUE)) {
-    return(list(type = "san_uri", value = value))
-  }
-  if (grepl("^[^@[:space:]]+@[^@[:space:]]+$", value, perl = TRUE)) {
-    return(list(type = "san_email", value = value))
-  }
-  if (grepl("^[A-Za-z0-9*.-]+$", value, perl = TRUE)) {
-    return(list(type = "san_dns", value = value))
-  }
-
   NULL
 }
 
@@ -412,6 +445,11 @@ parse_certificate_alt_name <- function(alt_name) {
 #' @keywords internal
 #' @noRd
 normalize_mtls_registration_alt_name_value <- function(type, value) {
+  if (!is_valid_string(value) || grepl("[[:cntrl:]]", value, perl = TRUE)) {
+    err_input(
+      "mTLS registration identifiers must be non-empty strings without control characters"
+    )
+  }
   normalized <- trimws(as.character(value %||% ""))
   if (!nzchar(normalized)) {
     err_input("Certificate SAN values must be non-empty strings")
@@ -458,7 +496,7 @@ normalize_mtls_registration_ip_literal <- function(value) {
 
   err_input(paste(
     "Could not normalize certificate SAN IP value to dotted-decimal IPv4 or",
-    "RFC 5952 IPv6 text; pass tls_client_auth_value explicitly."
+    "RFC 5952 IPv6 text."
   ))
 }
 
@@ -472,6 +510,9 @@ normalize_mtls_registration_ip_literal <- function(value) {
 #' @keywords internal
 #' @noRd
 normalize_mtls_registration_ipv4_literal <- function(value) {
+  if (!grepl("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$", value, perl = TRUE)) {
+    err_input("Invalid IPv4 SAN literal")
+  }
   parts <- strsplit(value, ".", fixed = TRUE)[[1]]
   if (length(parts) != 4L || !all(grepl("^[0-9]{1,3}$", parts, perl = TRUE))) {
     err_input("Invalid IPv4 SAN literal")
@@ -503,18 +544,24 @@ normalize_mtls_registration_ipv6_literal <- function(value) {
 
   normalized <- expand_mtls_registration_ipv6_embedded_ipv4(normalized)
   has_compression <- grepl("::", normalized, fixed = TRUE)
-  if (has_compression && grepl("::.*::", normalized, perl = TRUE)) {
+  if (
+    has_compression &&
+      (grepl(":::", normalized, fixed = TRUE) ||
+        grepl("::.*::", normalized, perl = TRUE))
+  ) {
     err_input("Invalid IPv6 SAN literal")
   }
 
   if (has_compression) {
-    sides <- strsplit(normalized, "::", fixed = TRUE)[[1]]
-    if (length(sides) != 2L) {
-      err_input("Invalid IPv6 SAN literal")
-    }
-
-    left <- parse_mtls_registration_ipv6_hextets(sides[[1]])
-    right <- parse_mtls_registration_ipv6_hextets(sides[[2]])
+    compression_at <- regexpr("::", normalized, fixed = TRUE)[[1]]
+    left_text <- substr(normalized, 1L, compression_at - 1L)
+    right_text <- substr(
+      normalized,
+      compression_at + 2L,
+      nchar(normalized)
+    )
+    left <- parse_mtls_registration_ipv6_hextets(left_text)
+    right <- parse_mtls_registration_ipv6_hextets(right_text)
     zero_count <- 8L - length(left) - length(right)
     if (zero_count < 1L) {
       err_input("Invalid IPv6 SAN literal")
@@ -582,6 +629,12 @@ expand_mtls_registration_ipv6_embedded_ipv4 <- function(value) {
 parse_mtls_registration_ipv6_hextets <- function(value) {
   if (!nzchar(value)) {
     return(integer(0))
+  }
+
+  # These are explicit fields on either side of ::. strsplit() drops a
+  # trailing empty field, so reject boundary colons before splitting.
+  if (startsWith(value, ":") || endsWith(value, ":")) {
+    err_input("Invalid IPv6 SAN literal")
   }
 
   parts <- strsplit(value, ":", fixed = TRUE)[[1]]
@@ -680,13 +733,19 @@ build_mtls_registration_ipv6_literal <- function(hextets, zero_run = NULL) {
     return(paste(hextets, collapse = ":"))
   }
 
-  left <- if (zero_run$start > 1L) {
-    paste(hextets[seq_len(zero_run$start - 1L)], collapse = ":")
+  left <- if (zero_run[["start"]] > 1L) {
+    paste(
+      hextets[seq_len(zero_run[["start"]] - 1L)],
+      collapse = ":"
+    )
   } else {
     ""
   }
-  right <- if (zero_run$end < length(hextets)) {
-    paste(hextets[(zero_run$end + 1L):length(hextets)], collapse = ":")
+  right <- if (zero_run[["end"]] < length(hextets)) {
+    paste(
+      hextets[(zero_run[["end"]] + 1L):length(hextets)],
+      collapse = ":"
+    )
   } else {
     ""
   }
@@ -720,15 +779,18 @@ validate_mtls_registration_jwks_uri <- function(jwks_uri) {
   parsed <- try(httr2::url_parse(jwks_uri), silent = TRUE)
   if (
     inherits(parsed, "try-error") ||
-      !nzchar(parsed$scheme %||% "") ||
-      !nzchar(parsed$hostname %||% "")
+      !nzchar(parsed[["scheme"]] %||% "") ||
+      !nzchar(parsed[["hostname"]] %||% "")
   ) {
     err_input(
-      "{.arg jwks_uri} must be an absolute URL (including scheme and hostname)."
+      "`jwks_uri` must be an absolute URL (including scheme and hostname)."
     )
   }
-  if (nzchar(parsed$fragment %||% "")) {
-    err_input("{.arg jwks_uri} must not contain a URI fragment.")
+  if (nzchar(parsed[["fragment"]] %||% "")) {
+    err_input("`jwks_uri` must not contain a URI fragment.")
+  }
+  if (!identical(tolower(parsed[["scheme"]]), "https")) {
+    err_input("`jwks_uri` must use HTTPS for OIDC registration.")
   }
   if (!is_ok_host(jwks_uri)) {
     err_input(paste0(
@@ -751,29 +813,46 @@ validate_mtls_registration_jwks_uri <- function(jwks_uri) {
 #' @keywords internal
 #' @noRd
 build_self_signed_mtls_registration_jwks <- function(oauth_client) {
-  certs <- read_client_certificates(oauth_client@tls_client_cert_file)
+  certs <- read_client_certificates(oauth_client@mtls_client_cert_file)
   leaf_cert <- read_keyed_client_certificate(
-    oauth_client@tls_client_cert_file,
-    key_file = oauth_client@tls_client_key_file,
-    key_password = oauth_client@tls_client_key_password
+    oauth_client@mtls_client_cert_file,
+    key_file = oauth_client@mtls_client_key_file,
+    key_password = oauth_client@mtls_client_key_password
   )
-  leaf_fingerprint <- as.list(leaf_cert)$pubkey$fingerprint %||% NULL
-  ordered_certs <- c(
-    list(leaf_cert),
-    Filter(
+  # Renewed certificates can share a public key; deduplicate by certificate DER.
+  candidates <- c(list(leaf_cert), certs)
+  identities <- vapply(
+    candidates,
+    function(cert) {
+      as.character(openssl::base64_encode(openssl::write_der(cert)))
+    },
+    character(1)
+  )
+  candidates <- candidates[!duplicated(identities)]
+  ordered_certs <- candidates[1L]
+  remaining <- candidates[-1L]
+  while (length(remaining)) {
+    issuer <- as.list(ordered_certs[[length(ordered_certs)]])[["issuer"]]
+    matches <- which(vapply(
+      remaining,
       function(cert) {
-        cert_fingerprint <- as.list(cert)$pubkey$fingerprint %||% NULL
-        !identical(cert_fingerprint, leaf_fingerprint)
+        identical(as.list(cert)[["subject"]], issuer)
       },
-      certs
-    )
-  )
+      logical(1)
+    ))
+    if (!length(matches)) {
+      err_config("Configured mTLS certificate bundle is not an issuer chain")
+    }
+    next_index <- matches[[1L]]
+    ordered_certs[[length(ordered_certs) + 1L]] <- remaining[[next_index]]
+    remaining <- remaining[-next_index]
+  }
 
   pubkey <- try(openssl::read_pubkey(leaf_cert), silent = TRUE)
   if (inherits(pubkey, "try-error")) {
     err_config(
       paste(
-        "Failed to extract a public key from tls_client_cert_file for",
+        "Failed to extract a public key from mtls_client_cert_file for",
         "self_signed_tls_client_auth registration"
       )
     )
@@ -794,6 +873,7 @@ build_self_signed_mtls_registration_jwks <- function(oauth_client) {
   if (inherits(jwk, "try-error") || !is.list(jwk)) {
     err_parse("Failed to parse serialized self-signed mTLS JWK")
   }
+  jwk <- canonicalize_local_public_jwk(jwk)
 
   private_members <- intersect(
     names(jwk),
@@ -811,7 +891,7 @@ build_self_signed_mtls_registration_jwks <- function(oauth_client) {
       der <- try(openssl::write_der(cert), silent = TRUE)
       if (inherits(der, "try-error")) {
         err_config(
-          "Failed to serialize tls_client_cert_file for self-signed x5c metadata"
+          "Failed to serialize mtls_client_cert_file for self-signed x5c metadata"
         )
       }
 
@@ -819,7 +899,7 @@ build_self_signed_mtls_registration_jwks <- function(oauth_client) {
     },
     character(1)
   )
-  jwk$x5c <- I(unname(x5c))
+  jwk[["x5c"]] <- I(unname(x5c))
 
   jwks <- list(keys = list(jwk))
   validate_jwks(jwks)

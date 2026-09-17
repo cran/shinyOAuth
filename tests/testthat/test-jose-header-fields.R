@@ -59,7 +59,7 @@ get_userinfo_with_jwt <- function(cli, jwt_body) {
   testthat::with_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -96,6 +96,104 @@ expect_userinfo_header_error <- function(
     class = "shinyOAuth_userinfo_error"
   )
 }
+
+test_that("validate_jose_header_fields reads exact JOSE member names", {
+  header <- jsonlite::fromJSON(
+    '{"alg":"RS256","kidx":"kid-1","typx":"JWT","critx":["exp"]}',
+    simplifyVector = FALSE
+  )
+
+  fields <- shinyOAuth:::validate_jose_header_fields(header, stop)
+
+  expect_identical(fields[["alg"]], "RS256")
+  expect_null(fields[["kid"]])
+  expect_null(fields[["typ"]])
+  expect_null(fields[["crit"]])
+})
+
+test_that("ID token and UserInfo alg values are case-sensitive", {
+  expect_id_token_header_error(
+    '{"alg":"rs256"}',
+    "Unsupported JWT alg"
+  )
+  expect_userinfo_header_error(
+    '{"alg":"rs256"}',
+    "not in provider's allowed asymmetric algorithms"
+  )
+})
+
+test_that("shared JWT typ policy accepts the JWT media type", {
+  for (typ in c("JWT", "jwt", "application/jwt", "Application/JWT")) {
+    fields <- list(alg = "RS256", kid = NULL, typ = typ, crit = NULL)
+    expect_invisible(
+      shinyOAuth:::enforce_inbound_jwt_header_policy(fields, stop)
+    )
+  }
+})
+
+test_that("signed JWT profiles reject explicit null crit and b64 headers", {
+  withr::local_options(shinyOAuth.skip_id_sig = FALSE)
+  key <- openssl::rsa_keygen(2048)
+  jwk <- jsonlite::fromJSON(write_test_jwk(key[["pubkey"]]))
+  testthat::local_mocked_bindings(
+    fetch_jwks = function(...) list(keys = list(jwk)),
+    .package = "shinyOAuth"
+  )
+  id_client <- make_id_token_header_client()
+  ui_client <- make_userinfo_header_client()
+  jarm_client <- oauth_client(
+    provider = ui_client@provider,
+    client_id = "abc",
+    redirect_uri = "http://localhost:8100",
+    scopes = "openid",
+    response_mode = "query.jwt",
+    jarm_signed_response_alg = "RS256"
+  )
+  claims <- c(
+    base_id_token_claims(),
+    list(state = "state-value", code = "code-value")
+  )
+  for (header in c(
+    '{"alg":"RS256"}',
+    '{"alg":"RS256","crit":null}',
+    '{"alg":"RS256","b64":null}'
+  )) {
+    unsigned <- make_header_jwt(header, claims)
+    signing_input <- sub("\\.$", "", unsigned)
+    jwt <- paste0(
+      unsigned,
+      shinyOAuth:::base64url_encode(openssl::signature_create(
+        charToRaw(signing_input),
+        hash = openssl::sha256,
+        key = key
+      ))
+    )
+    if (grepl("null", header, fixed = TRUE)) {
+      expect_error(
+        shinyOAuth:::validate_id_token(id_client, jwt),
+        "header must not be null",
+        class = "shinyOAuth_id_token_error"
+      )
+      expect_error(
+        get_userinfo_with_jwt(ui_client, jwt),
+        "header must not be null",
+        class = "shinyOAuth_userinfo_error"
+      )
+      expect_error(
+        shinyOAuth:::validate_jarm_response(jarm_client, jwt),
+        "header must not be null",
+        class = "shinyOAuth_state_error"
+      )
+    } else {
+      expect_silent(shinyOAuth:::validate_id_token(id_client, jwt))
+      expect_identical(get_userinfo_with_jwt(ui_client, jwt)[["sub"]], "user-1")
+      expect_identical(
+        shinyOAuth:::validate_jarm_response(jarm_client, jwt)[["code"]],
+        "code-value"
+      )
+    }
+  }
+})
 
 test_that("validate_id_token rejects malformed JOSE header field shapes", {
   cases <- list(
@@ -162,7 +260,7 @@ test_that("validate_id_token rejects malformed JOSE header field shapes", {
   )
 
   for (case in cases) {
-    expect_id_token_header_error(case$header_json, case$regexp)
+    expect_id_token_header_error(case[["header_json"]], case[["regexp"]])
   }
 })
 
@@ -231,8 +329,20 @@ test_that("get_userinfo rejects malformed JOSE header field shapes", {
   )
 
   for (case in cases) {
-    expect_userinfo_header_error(case$header_json, case$regexp)
+    expect_userinfo_header_error(case[["header_json"]], case[["regexp"]])
   }
+})
+
+test_that("ID token and UserInfo reject partially matched alg header names", {
+  expect_id_token_header_error(
+    '{"algx":"RS256"}',
+    "header missing alg"
+  )
+
+  expect_userinfo_header_error(
+    '{"algx":"RS256"}',
+    "header missing alg"
+  )
 })
 
 test_that("get_userinfo audits malformed JOSE header fields", {
@@ -254,13 +364,13 @@ test_that("get_userinfo audits malformed JOSE header fields", {
 
   types <- vapply(
     events,
-    function(event) event$type %||% NA_character_,
+    function(event) event[["type"]] %||% NA_character_,
     character(1)
   )
   ui_events <- events[types == "audit_userinfo"]
   statuses <- vapply(
     ui_events,
-    function(event) event$status %||% NA_character_,
+    function(event) event[["status"]] %||% NA_character_,
     character(1)
   )
   expect_true("userinfo_jwt_header_invalid" %in% statuses)

@@ -26,28 +26,36 @@
 #'
 #' @keywords internal
 #' @noRd
-parse_token_response <- function(resp) {
+parse_token_response <- function(resp, allow_empty_scope = FALSE) {
   check_resp_body_size(resp, context = "token")
 
-  content_type <- tolower(httr2::resp_header(resp, "content-type") %||% "")
+  content_type <- tolower(trimws(sub(
+    ";.*$",
+    "",
+    httr2::resp_header(resp, "content-type") %||% ""
+  )))
   body <- httr2::resp_body_string(resp)
 
   # Some providers include charset, e.g. application/json; charset=utf-8.
-  if (grepl("application/json", content_type, fixed = TRUE)) {
-    return(parse_token_response_json(body, resp = resp))
+  if (identical(content_type, "application/json")) {
+    return(parse_token_response_json(
+      body,
+      resp = resp,
+      allow_empty_scope = allow_empty_scope
+    ))
   }
 
   # GitHub historically returns form-encoded unless Accept requests JSON.
-  if (grepl("application/x-www-form-urlencoded", content_type, fixed = TRUE)) {
-    return(parse_token_response_form(body))
+  if (identical(content_type, "application/x-www-form-urlencoded")) {
+    return(parse_token_response_form(body, allow_empty_scope))
   }
 
   # Legacy providers may omit the content type or send JSON as text/plain.
   if (
     identical(content_type, "") ||
-      grepl("text/plain", content_type, fixed = TRUE)
+      identical(content_type, "text/plain")
   ) {
-    return(parse_lenient_token_response(body))
+    return(parse_lenient_token_response(body, allow_empty_scope))
   }
 
   err_parse(
@@ -58,6 +66,34 @@ parse_token_response <- function(resp) {
     ),
     context = list(content_type = content_type)
   )
+}
+
+
+#' Extract additional token endpoint response parameters
+#'
+#' Call before adding internal validation metadata to the parsed response.
+#' Keep provider values separate from normalized token properties, preserving
+#' nested values and named NULL entries without merging responses.
+#'
+#' @param token_response Parsed token endpoint response list.
+#' @return List of parameters without dedicated OAuthToken properties.
+#' @keywords internal
+#' @noRd
+token_response_extra_fields <- function(token_response) {
+  represented_fields <- c(
+    "access_token",
+    "token_type",
+    "refresh_token",
+    "id_token",
+    "expires_in",
+    "scope",
+    "cnf"
+  )
+  extra_fields <- token_response[!names(token_response) %in% represented_fields]
+  if (!length(extra_fields)) {
+    return(list())
+  }
+  extra_fields
 }
 
 
@@ -75,16 +111,24 @@ parse_token_response <- function(resp) {
 #' @return Parsed JSON value, normalized by `normalize_token_response_json()`.
 #' @keywords internal
 #' @noRd
-parse_token_response_json <- function(body, resp = NULL) {
-  parsed <- try_parse_token_response_json(body, resp = resp)
-  if (!isTRUE(parsed$ok)) {
+parse_token_response_json <- function(
+  body,
+  resp = NULL,
+  allow_empty_scope = FALSE
+) {
+  parsed <- try_parse_token_response_json(
+    body,
+    resp = resp,
+    allow_empty_scope = allow_empty_scope
+  )
+  if (!isTRUE(parsed[["ok"]])) {
     err_parse(c("x" = "Failed to parse JSON token response"))
   }
-  if (!isTRUE(parsed$is_object)) {
+  if (!isTRUE(parsed[["is_object"]])) {
     err_parse("Token response JSON must be a JSON object")
   }
 
-  parsed$value
+  parsed[["value"]]
 }
 
 #' Try to parse a token response as JSON
@@ -100,18 +144,22 @@ parse_token_response_json <- function(body, resp = NULL) {
 #'   `is_object` indicating whether the payload used a top-level JSON object.
 #' @keywords internal
 #' @noRd
-try_parse_token_response_json <- function(body, resp = NULL) {
+try_parse_token_response_json <- function(
+  body,
+  resp = NULL,
+  allow_empty_scope = FALSE
+) {
   reject_duplicate_json_object_members(body, "Token response JSON")
   is_object <- json_text_is_object(body)
 
   out <- if (inherits(resp, "httr2_response")) {
-    try(httr2::resp_body_json(resp, simplifyVector = TRUE), silent = TRUE)
+    try(httr2::resp_body_json(resp, simplifyVector = FALSE), silent = TRUE)
   } else {
-    try(jsonlite::fromJSON(body, simplifyVector = TRUE), silent = TRUE)
+    try(jsonlite::fromJSON(body, simplifyVector = FALSE), silent = TRUE)
   }
 
   if (inherits(out, "try-error")) {
-    out <- try(jsonlite::fromJSON(body, simplifyVector = TRUE), silent = TRUE)
+    out <- try(jsonlite::fromJSON(body, simplifyVector = FALSE), silent = TRUE)
   }
   if (inherits(out, "try-error")) {
     return(list(ok = FALSE, value = NULL, is_object = is_object))
@@ -120,7 +168,7 @@ try_parse_token_response_json <- function(body, resp = NULL) {
   list(
     ok = TRUE,
     value = if (isTRUE(is_object)) {
-      normalize_token_response_json(out)
+      normalize_token_response_json(out, allow_empty_scope)
     } else {
       out
     },
@@ -138,7 +186,26 @@ try_parse_token_response_json <- function(body, resp = NULL) {
 #' @return `value`, with data frames converted to lists.
 #' @keywords internal
 #' @noRd
-normalize_token_response_json <- function(value) {
+normalize_token_response_json <- function(value, allow_empty_scope = FALSE) {
+  for (field in c(
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token_type",
+    "expires_in",
+    "scope"
+  )) {
+    if (is.list(value[[field]])) {
+      err_parse(paste0(
+        "Token response field '",
+        field,
+        "' must be a JSON scalar"
+      ))
+    }
+  }
+  if ("scope" %in% names(value)) {
+    validate_response_scope(value[["scope"]], allow_empty = allow_empty_scope)
+  }
   if (is.data.frame(value)) {
     return(as.list(value))
   }
@@ -155,9 +222,15 @@ normalize_token_response_json <- function(value) {
 #' @return Named character list parsed from the form body.
 #' @keywords internal
 #' @noRd
-parse_token_response_form <- function(body) {
+parse_token_response_form <- function(body, allow_empty_scope = FALSE) {
   reject_duplicate_form_encoded_members(body, "Token response body")
-  httr2::url_query_parse(body)
+  # httr2's query parser preserves "+", while HTML form encoding uses it for
+  # spaces. Convert only literal plus signs; percent-encoded %2B remains "+".
+  value <- httr2::url_query_parse(gsub("+", "%20", body, fixed = TRUE))
+  if ("scope" %in% names(value)) {
+    validate_response_scope(value[["scope"]], allow_empty = allow_empty_scope)
+  }
+  value
 }
 
 #' Parse a legacy token response with weak or missing Content-Type
@@ -170,16 +243,19 @@ parse_token_response_form <- function(body) {
 #' @return Parsed token response as JSON data or a named character list.
 #' @keywords internal
 #' @noRd
-parse_lenient_token_response <- function(body) {
-  parsed_json <- try_parse_token_response_json(body)
-  if (isTRUE(parsed_json$ok)) {
-    if (!isTRUE(parsed_json$is_object)) {
+parse_lenient_token_response <- function(body, allow_empty_scope = FALSE) {
+  parsed_json <- try_parse_token_response_json(
+    body,
+    allow_empty_scope = allow_empty_scope
+  )
+  if (isTRUE(parsed_json[["ok"]])) {
+    if (!isTRUE(parsed_json[["is_object"]])) {
       err_parse("Token response JSON must be a JSON object")
     }
-    return(parsed_json$value)
+    return(parsed_json[["value"]])
   }
 
-  parse_token_response_form(body)
+  parse_token_response_form(body, allow_empty_scope)
 }
 
 #' Reject duplicate form-encoded parameter names
@@ -218,7 +294,10 @@ reject_duplicate_form_encoded_members <- function(form_text, label) {
     key <- decode_form_member(raw_key, label, "parameter name")
     decode_form_member(raw_value, label, "parameter value")
     if (key %in% seen) {
-      err_parse(paste0(label, " contains duplicate parameter name: ", key))
+      err_parse(protocol_diagnostic_message(
+        paste0(label, " contains duplicate parameter name"),
+        key
+      ))
     }
     seen <- c(seen, key)
   }
@@ -226,31 +305,60 @@ reject_duplicate_form_encoded_members <- function(form_text, label) {
   invisible(NULL)
 }
 
-decode_form_member <- function(value, label, member) {
+decode_form_member <- function(value, label, member, fail = err_parse) {
   if (grepl("(?i)%00|%(?![0-9a-f]{2})", value, perl = TRUE)) {
-    err_parse(paste0(
+    fail(paste0(
       label,
       " contains malformed percent-encoded ",
       member
     ))
   }
   tryCatch(
-    utils::URLdecode(value),
+    utils::URLdecode(gsub("+", " ", value, fixed = TRUE)),
     warning = function(e) {
-      err_parse(paste0(
+      fail(paste0(
         label,
         " contains malformed percent-encoded ",
         member
       ))
     },
     error = function(e) {
-      err_parse(paste0(
+      fail(paste0(
         label,
         " contains malformed percent-encoded ",
         member
       ))
     }
   )
+}
+
+# Decode names and values without collapsing repeated fields. Keep raw query
+# composition separate so unrelated configured query bytes need not be rewritten.
+decode_form_pairs <- function(text, label = "Form/query") {
+  if (is.null(text) || !nzchar(text)) {
+    return(list())
+  }
+  fail <- function(message) stop(message, call. = FALSE)
+  parts <- strsplit(text, "&", fixed = TRUE)[[1]]
+  parts <- parts[nzchar(parts)]
+  keys <- values <- character(length(parts))
+  for (i in seq_along(parts)) {
+    separator <- regexpr("=", parts[[i]], fixed = TRUE)[[1]]
+    key <- if (separator < 0L) {
+      parts[[i]]
+    } else {
+      substr(parts[[i]], 1L, separator - 1L)
+    }
+    value <- if (separator < 0L) "" else substring(parts[[i]], separator + 1L)
+    keys[[i]] <- decode_form_member(key, label, "parameter name", fail = fail)
+    values[[i]] <- decode_form_member(
+      value,
+      label,
+      "parameter value",
+      fail = fail
+    )
+  }
+  stats::setNames(as.list(values), keys)
 }
 
 
@@ -382,6 +490,10 @@ encode_www_form_param <- function(name, value) {
     return(character())
   }
 
-  name <- utils::URLencode(name, reserved = TRUE)
-  paste0(name, "=", utils::URLencode(value, reserved = TRUE))
+  name <- utils::URLencode(name, reserved = TRUE, repeated = TRUE)
+  paste0(
+    name,
+    "=",
+    utils::URLencode(value, reserved = TRUE, repeated = TRUE)
+  )
 }

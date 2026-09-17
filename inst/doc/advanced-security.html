@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Advanced security configuration</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Advanced security configuration</h1>
+
+
+
+<div id="overview" class="section level2">
+<h2>Overview</h2>
+<p>This vignette documents the configuration of OAuth 2.0 and OpenID
+Connect extensions supported by shinyOAuth: JWT client authentication,
+mutual TLS (mTLS), signed authorization requests (JAR), pushed
+authorization requests (PAR), Form Post responses, signed authorization
+responses (JARM), and tokens bound to a private key (DPoP).</p>
+<p>These features require corresponding support and configuration at the
+provider. The examples extend the provider and client setup in the <a href="usage.html">usage vignette</a>. Replace placeholder domains,
+credentials, and key paths with your registered values. Each example
+shows the settings for the feature being discussed.</p>
+</div>
+<div id="browser-binding-and-deployment-boundary" class="section level2">
+<h2>Browser binding and deployment boundary</h2>
+<p>Use HTTPS and treat every service on the same hostname as trusted,
+including services on other ports. Cookie scope does not include the
+port, as specified in <a href="https://www.rfc-editor.org/rfc/rfc6265.html#section-8.5">RFC 6265
+section 8.5</a>. The <code>__Host-</code> prefix prevents sibling-domain
+cookie injection; it does not isolate ports. Signed or
+<code>HttpOnly</code> cookies still reach same-host services in HTTP
+requests. Use a dedicated hostname when those services are
+untrusted.</p>
+<p>shinyOAuth keeps the actual browser-binding token in origin- and
+tab-scoped session storage, accompanied by an independent random cookie
+marker. It restores the binding only when the cookie matches an
+unexpired local record. Reading or planting a cookie on another port
+cannot establish that record. Cookie disruption can still abort login;
+pages and scripts on the same origin can access session storage, so XSS
+prevention remains necessary. Cookies, session storage, and Web Crypto
+must be available, and pending logins from older cookie-only or
+local-storage versions must be restarted after upgrading.</p>
+<p>Each new authorization request gets a fresh server-selected binding
+and a distinct marker cookie. Idle predecessor markers are removed when
+the new binding is ready. Predecessors associated with pending
+transactions (or older records whose transaction status is unknown)
+remain until their original TTL expires, so a cloned tab cannot
+invalidate the original tab’s pending login. Application callback routes
+and tabs have independent records; complete login in the tab that
+started it. Private module inputs are excluded from both URL and disk
+bookmarks. Avoid copying browser tokens into custom bookmark values or
+logs. The acknowledgment is a delivery check, not independent server
+verification of HTTP cookie possession. The standalone
+<code>prepare_call()</code> and <code>handle_callback()</code> APIs
+still require the caller to establish and protect their own browser
+binding.</p>
+</div>
+<div id="provider-metadata-and-oidc-discovery" class="section level2">
+<h2>Provider metadata and OIDC discovery</h2>
+<p><code>oauth_provider_oidc_discover()</code> reads provider metadata
+used by these features, including PAR support, JARM and DPoP algorithms,
+and mTLS endpoint aliases:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider_oidc_discover</span>(</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>  <span class="at">issuer =</span> <span class="st">&quot;https://id.example.com&quot;</span></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>)</span></code></pre></div>
+<p>The sections below show the extra settings you usually add on top of
+your normal <code>oauth_client()</code> setup.</p>
+</div>
+<div id="jwt-client-authentication" class="section level2">
+<h2>JWT client authentication</h2>
+<p>Some providers require your app to sign a short statement proving its
+identity when requesting tokens. This <strong>client assertion</strong>
+is a JWT (JSON Web Token). It identifies the app, rather than the user
+signing in.</p>
+<p>For a registered private key, select the method during provider setup
+and supply the key when creating your client:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider_oidc_discover</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="st">&quot;https://id.example.com&quot;</span>, <span class="at">token_auth_style =</span> <span class="st">&quot;private_key_jwt&quot;</span></span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>)</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com&quot;</span>,</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>),</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  <span class="at">client_assertion_private_key =</span> openssl<span class="sc">::</span><span class="fu">read_key</span>(<span class="st">&quot;keys/client-key.pem&quot;</span>),</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>  <span class="at">client_assertion_private_key_kid =</span> <span class="st">&quot;registered-key-id&quot;</span></span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>)</span></code></pre></div>
+<p>Register the corresponding public key with your provider. For
+<code>client_secret_jwt</code>, select that method and supply a
+sufficiently strong <code>client_secret</code> instead.
+<code>client_assertion_alg</code> has a key-compatible default;
+<code>client_assertion_audience</code> overrides the expected recipient
+if your provider requires a value other than the token request URL.</p>
+<p>For the client assertion profile referenced by OAuth 2.1 draft 16,
+select the trusted authorization-server issuer as the sole audience and
+optionally use the recommended explicit type:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>client<span class="sc">@</span>client_assertion_audience <span class="ot">&lt;-</span> provider<span class="sc">@</span>issuer</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>client<span class="sc">@</span>client_assertion_typ <span class="ot">&lt;-</span> <span class="st">&quot;client-authentication+jwt&quot;</span></span></code></pre></div>
+<p><a href="https://datatracker.ietf.org/doc/html/draft-ietf-oauth-rfc7523bis-11#section-4">RFC7523bis
+draft 11 section 4</a> requires the issuer audience and recommends this
+type. The package preserves the existing <code>JWT</code> type and
+request-endpoint audience defaults, including PAR’s existing issuer
+handling. The checker treats audience mismatches as mandatory findings
+and legacy typing as an advisory. These settings affect client
+authentication assertions, including retries, and do not change JAR,
+JARM or ID token headers. The same settings can be selected in
+<code>endpoint_auth</code> overrides.</p>
+<p>Authentication can differ at PAR, introspection, and revocation
+endpoints. Discovery preserves their independent method and algorithm
+metadata; configure credentials and audiences to match each endpoint’s
+registration agreement:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>client<span class="sc">@</span>endpoint_auth <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  <span class="at">introspection =</span> <span class="fu">list</span>(</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>    <span class="at">token_auth_style =</span> <span class="st">&quot;header&quot;</span>,</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>    <span class="at">client_id =</span> <span class="st">&quot;registered-inspector&quot;</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>    <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;INTROSPECTION_SECRET&quot;</span>),</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>    <span class="at">extra_headers =</span> <span class="fu">c</span>(<span class="st">&quot;X-App&quot;</span> <span class="ot">=</span> <span class="st">&quot;registered-app&quot;</span>)</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  ),</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>  <span class="at">revocation =</span> <span class="fu">list</span>(</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>    <span class="at">token_auth_style =</span> <span class="st">&quot;private_key_jwt&quot;</span>,</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>    <span class="at">client_assertion_private_key =</span> openssl<span class="sc">::</span><span class="fu">read_key</span>(<span class="st">&quot;keys/revocation-key.pem&quot;</span>),</span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>    <span class="at">client_assertion_alg =</span> <span class="st">&quot;RS256&quot;</span>,</span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a>    <span class="at">client_assertion_audience =</span> <span class="st">&quot;https://id.example.com/revocation&quot;</span></span>
+<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a>  )</span>
+<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a>)</span></code></pre></div>
+<p>Unspecified credentials inherit the client’s settings. Advertised
+methods and JWT algorithms are checked per endpoint. Discovery defaults
+omitted revocation methods to Basic authentication; omitted
+introspection methods have no standard default, so confirm the
+configured method with your provider. PAR inherits the token
+authentication settings unless explicitly overridden.
+<code>extra_token_headers</code> now applies only to exchange and
+refresh: opt in through <code>extra_headers</code> at each other
+endpoint that should receive those headers, even on the same origin.</p>
+</div>
+<div id="issuer-comparison-and-transport-policy" class="section level2">
+<h2>Issuer comparison and transport policy</h2>
+<p><code>compare_callback_issuer = TRUE</code> compares a supplied
+callback <code>iss</code> exactly against <code>provider@issuer</code>.
+Pair it with <code>enforce_callback_issuer = FALSE</code> when absence
+is permitted for your older provider. Required presence always implies
+comparison. An explicitly supplied legacy
+<code>enforce_callback_issuer = FALSE</code> retains complete opt-out
+unless comparison is explicitly enabled. Otherwise, issuer-configured
+clients enable comparison automatically.</p>
+<p>Participating clients require <code>iss</code> when the provider
+advertises RFC 9207 support. Validated JARM supplies its own issuer and
+does not require a redundant outer value. Multi-server applications must
+retain their selected issuer or distinct-route defense. The expected
+issuer comes from trusted configuration; it is not inferred from a token
+URL or normalized before comparison. See <a href="https://www.rfc-editor.org/rfc/rfc9207.html#section-2.4">RFC 9207
+section 2.4</a>.</p>
+<p><code>options(shinyOAuth.tls_min_version = &quot;1.2&quot;)</code> requires TLS
+1.2 or later on package HTTPS requests; <code>&quot;1.3&quot;</code> selects a
+higher minimum and <code>NULL</code> preserves runtime defaults.
+Configure it before discovery or login. The policy preserves stronger
+supplied minima, compatible maxima and custom CA roots. It also applies
+in async workers and participates in pending-login policy checks. An
+absent option is insufficient evidence about an actual handshake; the
+checker reports older unresolved backend defaults as unknown.
+Browser/proxy hops and future resource requests need separate
+validation. Details and constraints are in <a href="package-options.html#http-settings-timeout-retries-user-agent">package
+options</a>.</p>
+</div>
+<div id="callback-pages-and-application-scripts" class="section level2">
+<h2>Callback pages and application scripts</h2>
+<p>Use <code>oauth_ui(ui, id = &quot;auth&quot;, client = client)</code> for query
+and query-JARM responses. The ID and client must match
+<code>oauth_module_server()</code>. The wrapper validates callbacks and
+stores sealed, short-lived responses, then redirects to a one-time
+bridge URL before invoking the application UI. State remains single-use
+and browser-bound. Missing bridge configuration rejects raw callbacks;
+existing <code>oauth_ui(ui)</code> setups must add <code>id</code> and
+<code>client</code>.</p>
+<p>Callback and HTML responses send
+<code>Cache-Control: no-store</code>, <code>Pragma: no-cache</code>, and
+<code>Referrer-Policy: no-referrer</code>. These do not remove upstream
+access logs: configure proxies and hosting logs to omit callback
+queries. Keep third-party scripts off any unsanitized callback page,
+including when using <code>use_shinyOAuth()</code> with a custom HTTP
+integration. Register fixed tenant or routing query parameters in the
+redirect URI; unregistered inbound parameters are discarded on
+continuation. For trusted HTTPS-terminating proxies, use
+<code>request_uri_resolver</code> with the same trust checks as
+<code>oauth_form_post_ui()</code>.</p>
+</div>
+<div id="provider-key-set-validation" class="section level2">
+<h2>Provider key-set validation</h2>
+<p>shinyOAuth validates the whole fetched JWKS before selecting a key by
+<code>kid</code>, usage, operations, or algorithm. A malformed RSA, EC,
+or OKP public entry can therefore reject the set even when another entry
+would validate the token. This is a deliberately stricter availability
+policy than the recommendation to ignore individual unusable keys in <a href="https://www.rfc-editor.org/rfc/rfc7517.html#section-5">RFC 7517
+section 5</a>. Providers must publish structurally valid public entries
+throughout key rotation; an unrelated broken entry can interrupt login,
+signed UserInfo, JARM, or Request Object encryption until the provider
+repairs its JWKS.</p>
+<p>Unknown key types are ignored for selection after common structural
+checks. Malformed set structure, duplicate JSON members, and secret key
+material are rejected. With pinning mode <code>&quot;any&quot;</code>, at least
+one supported public key must match a configured thumbprint, and
+selected keys must be pinned. Mode <code>&quot;all&quot;</code> requires every
+RSA, EC, and OKP entry in the set to have a computable, configured
+thumbprint, including entries that would later be filtered out. Neither
+mode skips the whole-set structural checks or the selected key’s
+strength checks.</p>
+</div>
+<div id="trusted-id-token-audiences" class="section level2">
+<h2>Trusted ID-token audiences</h2>
+<p>ID tokens with multiple audiences remain rejected by default. If an
+issuer legitimately includes another trusted audience, configure
+<code>trusted_id_token_audiences = c(&quot;trusted-service&quot;)</code> on
+<code>oauth_client()</code>. The token must still include this client’s
+ID in <code>aud</code>, and <code>azp</code> must equal this client’s ID
+when present. Trusted multiple audiences do not require an
+<code>azp</code> claim under <a href="https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation">OIDC
+Core section 3.1.3.7</a>. Other audiences, incorrect authorized parties,
+and invalid signatures are rejected.</p>
+</div>
+<div id="mutual-tls-mtls" class="section level2">
+<h2>Mutual TLS (mTLS)</h2>
+<p>With mutual TLS (mTLS), the client presents a certificate during the
+TLS connection. OAuth 2.0 uses this for certificate-based client
+authentication and for certificate-bound access tokens (RFC 8705). With
+certificate-bound tokens, the API requires the matching certificate when
+accepting a token. The provider must support the selected use of
+mTLS.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;example-mtls&quot;</span>,</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="co"># Exact OIDC issuer; enables nonce and ID-token validation</span></span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">issuer =</span> <span class="st">&quot;https://id.example.com&quot;</span>,</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://id.example.com/authorize&quot;</span>,</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://id.example.com/token&quot;</span>,</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>  <span class="at">jwks_uri =</span> <span class="st">&quot;https://id.example.com/jwks&quot;</span>,</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>  <span class="at">userinfo_url =</span> <span class="st">&quot;https://id.example.com/userinfo&quot;</span>,</span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>  <span class="co"># Use RFC 8705 client-certificate auth at the token endpoint</span></span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a>  <span class="at">token_auth_style =</span> <span class="st">&quot;tls_client_auth&quot;</span>,</span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a>  <span class="co"># Use mTLS-specific endpoints when the provider publishes them</span></span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>  <span class="at">mtls_endpoint_aliases =</span> <span class="fu">list</span>(</span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a>    <span class="at">token_endpoint =</span> <span class="st">&quot;https://mtls.id.example.com/token&quot;</span>,</span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a>    <span class="at">userinfo_endpoint =</span> <span class="st">&quot;https://mtls.id.example.com/userinfo&quot;</span></span>
+<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a>  ),</span>
+<span id="cb5-16"><a href="#cb5-16" tabindex="-1"></a>  <span class="co"># Expect certificate-bound access tokens from the provider</span></span>
+<span id="cb5-17"><a href="#cb5-17" tabindex="-1"></a>  <span class="at">mtls_client_certificate_bound_access_tokens =</span> <span class="cn">TRUE</span></span>
+<span id="cb5-18"><a href="#cb5-18" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>),</span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="co"># Certificate and key sent on mTLS requests</span></span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>  <span class="at">mtls_client_cert_file =</span> <span class="st">&quot;certs/client.pem&quot;</span>,</span>
+<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>  <span class="at">mtls_client_key_file =</span> <span class="st">&quot;certs/client-key.pem&quot;</span>,</span>
+<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a>  <span class="at">mtls_client_ca_file =</span> <span class="st">&quot;certs/ca.pem&quot;</span>,</span>
+<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>  <span class="co"># Require the matching certificate when access tokens are used</span></span>
+<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>  <span class="at">mtls_certificate_bound_access_tokens =</span> <span class="cn">TRUE</span></span>
+<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a>)</span></code></pre></div>
+<p><code>mtls_certificate_bound_access_tokens = TRUE</code> enables
+certificate presentation and mTLS endpoint-alias selection independently
+of the OAuth client authentication method. Configuring certificate files
+alone does not enable certificate-bound token requests.</p>
+<p>The separate <code>mtls_require_observed_cnf</code> policy defaults
+to <code>TRUE</code>, preserving strict local assurance: shinyOAuth must
+observe <code>cnf[[&quot;x5t#S256&quot;]]</code> in the token response, a JWT
+access token, or introspection and match it to the configured
+certificate. An opaque bound token without observable binding fails this
+policy.</p>
+<p>RFC 8705 also permits opaque tokens whose binding is known only to
+the authorization and resource servers. For that deployment, configure
+the certificate/key and provider capability as above, then use both
+settings:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  <span class="at">mtls_client_cert_file =</span> <span class="st">&quot;certs/client.pem&quot;</span>,</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  <span class="at">mtls_client_key_file =</span> <span class="st">&quot;certs/client-key.pem&quot;</span>,</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  <span class="at">mtls_certificate_bound_access_tokens =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>  <span class="at">mtls_require_observed_cnf =</span> <span class="cn">FALSE</span></span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a>)</span></code></pre></div>
+<p>This mode still presents the certificate on token, refresh, UserInfo,
+and protected-resource requests, including with body authentication,
+public clients, or <code>private_key_jwt</code>. It prefers configured
+mTLS aliases and falls back to the configured endpoint URL when no alias
+is available. The servers must enforce binding; shinyOAuth allows
+missing confirmation but still rejects any observed mismatch or
+conflicting confirmation claims. See <a href="https://www.rfc-editor.org/rfc/rfc8705.html#section-3">RFC 8705,
+Section 3</a>.</p>
+<p>On Windows, separate PEM certificate/key files require curl’s OpenSSL
+backend. Set <code>CURL_SSL_BACKEND=openssl</code> in
+<code>.Renviron</code> and restart R, or run
+<code>Sys.setenv(CURL_SSL_BACKEND = &quot;openssl&quot;)</code> before loading
+curl, httr2, or shinyOAuth in a fresh session. Check
+<code>curl::curl_version()[[&quot;ssl_version&quot;]]</code>: parenthesized
+backends are inactive alternatives. If OpenSSL is unavailable, install a
+curl build that provides it. shinyOAuth rejects an active Schannel
+backend for this PEM configuration before sending the request. See the
+<a href="https://curl.se/libcurl/c/CURLOPT_SSLCERT.html">libcurl
+certificate documentation</a>.</p>
+<p>If your provider uses dynamic client registration,
+<code>oauth_client_mtls_registration()</code> can build the RFC 8705
+registration metadata from the configured client.</p>
+</div>
+<div id="jwt-secured-authorization-request-jar" class="section level2">
+<h2>JWT-secured authorization request (JAR)</h2>
+<p>JAR protects authorization request parameters with a signature. The
+client sends them in a JWT called a Request Object, which the provider
+verifies before processing the request. Optional Request Object
+encryption also protects the request contents. Both settings must match
+the provider registration.</p>
+<p>For enforced request integrity, configure the authorization server to
+require signed Request Objects for this client, for example with the RFC
+9101 client registration field
+<code>require_signed_request_object = true</code>, and register its
+signing key and allowed algorithm. Confirm the server actually enforces
+this policy. Setting <code>signed_request_object_required = TRUE</code>
+below describes that server policy and enforces local construction; it
+does not register or change the client at the server. If unsigned
+requests remain accepted, signing is optional and cannot prevent a
+downgrade to unsigned authorization requests (<a href="https://www.rfc-editor.org/rfc/rfc9101.html#section-10.5">RFC 9101
+section 10.5</a>).</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;example-jar&quot;</span>,</span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a>  <span class="at">issuer =</span> <span class="st">&quot;https://id.example.com&quot;</span>,</span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://id.example.com/authorize&quot;</span>,</span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://id.example.com/token&quot;</span>,</span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a>  <span class="co"># The server registration must already require signed Request Objects</span></span>
+<span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a>  <span class="at">signed_request_object_required =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a>  <span class="at">request_parameter_supported =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a>  <span class="at">request_object_signing_alg_values_supported =</span> <span class="fu">c</span>(<span class="st">&quot;RS256&quot;</span>)</span>
+<span id="cb8-10"><a href="#cb8-10" tabindex="-1"></a>)</span>
+<span id="cb8-11"><a href="#cb8-11" tabindex="-1"></a></span>
+<span id="cb8-12"><a href="#cb8-12" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb8-13"><a href="#cb8-13" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb8-14"><a href="#cb8-14" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb8-15"><a href="#cb8-15" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="st">&quot;client-secret&quot;</span>,</span>
+<span id="cb8-16"><a href="#cb8-16" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb8-17"><a href="#cb8-17" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>),</span>
+<span id="cb8-18"><a href="#cb8-18" tabindex="-1"></a>  <span class="co"># Signing key for the Request Object</span></span>
+<span id="cb8-19"><a href="#cb8-19" tabindex="-1"></a>  <span class="at">client_assertion_private_key =</span> openssl<span class="sc">::</span><span class="fu">read_key</span>(<span class="st">&quot;keys/client-key.pem&quot;</span>),</span>
+<span id="cb8-20"><a href="#cb8-20" tabindex="-1"></a>  <span class="co"># Send the authorization request as a JWT in the request parameter</span></span>
+<span id="cb8-21"><a href="#cb8-21" tabindex="-1"></a>  <span class="at">request_object_mode =</span> <span class="st">&quot;request&quot;</span>,</span>
+<span id="cb8-22"><a href="#cb8-22" tabindex="-1"></a>  <span class="at">request_object_signing_alg =</span> <span class="st">&quot;RS256&quot;</span></span>
+<span id="cb8-23"><a href="#cb8-23" tabindex="-1"></a>)</span></code></pre></div>
+<p>Test the server policy before deployment: send an otherwise valid
+authorization request for this same client without <code>request</code>
+or <code>request_uri</code>. For example:</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>unsigned <span class="ot">&lt;-</span> httr2<span class="sc">::</span><span class="fu">request</span>(provider<span class="sc">@</span>auth_url) <span class="sc">|&gt;</span></span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>  httr2<span class="sc">::</span><span class="fu">req_url_query</span>(</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>    <span class="at">client_id =</span> client<span class="sc">@</span>client_id,</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>    <span class="at">redirect_uri =</span> client<span class="sc">@</span>redirect_uri,</span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>    <span class="at">response_type =</span> <span class="st">&quot;code&quot;</span>, <span class="at">scope =</span> <span class="st">&quot;openid profile&quot;</span>,</span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>    <span class="at">state =</span> <span class="st">&quot;unsigned-policy-probe&quot;</span>,</span>
+<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a>    <span class="at">code_challenge =</span> <span class="st">&quot;E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&quot;</span>,</span>
+<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a>    <span class="at">code_challenge_method =</span> <span class="st">&quot;S256&quot;</span></span>
+<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a>  ) <span class="sc">|&gt;</span></span>
+<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>  httr2<span class="sc">::</span><span class="fu">req_options</span>(<span class="at">followlocation =</span> <span class="cn">FALSE</span>) <span class="sc">|&gt;</span></span>
+<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a>  httr2<span class="sc">::</span><span class="fu">req_error</span>(<span class="at">is_error =</span> <span class="cf">function</span>(resp) <span class="cn">FALSE</span>) <span class="sc">|&gt;</span></span>
+<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a>  httr2<span class="sc">::</span><span class="fu">req_perform</span>()</span>
+<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a>httr2<span class="sc">::</span><span class="fu">resp_status</span>(unsigned)</span>
+<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a>httr2<span class="sc">::</span><span class="fu">resp_headers</span>(unsigned)</span>
+<span id="cb9-15"><a href="#cb9-15" tabindex="-1"></a>httr2<span class="sc">::</span><span class="fu">resp_body_string</span>(unsigned)</span></code></pre></div>
+<p>The negative test passes only when the server explicitly rejects the
+request because the required signed Request Object is missing. Check its
+documented error response or server audit event for that reason; a
+generic HTTP error is insufficient. A login/consent page, authorization
+code, or <code>login_required</code> response does not establish
+enforcement. Repeat this probe in deployment tests alongside a
+successful signed request.</p>
+<p>Register the signing key with your provider. To encrypt the signed
+request too, configure
+<code>request_object_encryption_alg = &quot;RSA-OAEP&quot;</code> and
+<code>request_object_encryption_enc</code> to a supported AES-CBC-HMAC
+value such as <code>&quot;A128CBC-HS256&quot;</code>. The provider must publish a
+suitable encryption key or you must supply
+<code>request_object_encryption_jwk</code> to <a href="https://lukakoning.github.io/shinyOAuth/reference/oauth_provider.html"><code>oauth_provider()</code></a>.
+See <a href="https://lukakoning.github.io/shinyOAuth/reference/oauth_client.html"><code>oauth_client()</code></a>
+for supported algorithms and the provider reference for encryption key
+selection.</p>
+<p>PAR, described below, keeps most request details out of the browser
+URL. It can also carry a signed Request Object, combining PAR with
+JAR.</p>
+<div id="request-objects-published-by-the-shiny-app" class="section level3">
+<h3>Request Objects published by the Shiny app</h3>
+<p>If you set <code>request_object_mode = &quot;request_uri&quot;</code>,
+shinyOAuth still builds a signed Request Object, but instead of putting
+that JWT directly on the browser redirect as <code>request=...</code>,
+it publishes the Request Object at a URL and sends the provider
+<code>request_uri=&lt;that URL&gt;</code>. The provider then fetches
+that published Request Object itself.</p>
+<p><code>oauth_module_server()</code> serves the Request Object at a
+short-lived URL under the Shiny app. The provider must be able to
+request that URL directly.</p>
+<p>This mode is separate from PAR and cannot be used when the provider
+requires PAR. With PAR, the provider issues the reference; with this
+mode, the provider fetches a URL published by your app.</p>
+<p>Deployment requirements:</p>
+<ul>
+<li>the published URL must use HTTPS and be reachable from the provider,
+not just from the user’s browser</li>
+<li>if the provider requires pre-registered <code>request_uri</code>
+values, the public URL or wildcard prefix must already be registered
+there</li>
+</ul>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>request_uri_provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;example-request-uri&quot;</span>,</span>
+<span id="cb10-3"><a href="#cb10-3" tabindex="-1"></a>  <span class="at">issuer =</span> <span class="st">&quot;https://id.example.com&quot;</span>,</span>
+<span id="cb10-4"><a href="#cb10-4" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://id.example.com/authorize&quot;</span>,</span>
+<span id="cb10-5"><a href="#cb10-5" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://id.example.com/token&quot;</span>,</span>
+<span id="cb10-6"><a href="#cb10-6" tabindex="-1"></a>  <span class="at">request_uri_parameter_supported =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb10-7"><a href="#cb10-7" tabindex="-1"></a>  <span class="at">request_object_signing_alg_values_supported =</span> <span class="st">&quot;RS256&quot;</span></span>
+<span id="cb10-8"><a href="#cb10-8" tabindex="-1"></a>)</span>
+<span id="cb10-9"><a href="#cb10-9" tabindex="-1"></a></span>
+<span id="cb10-10"><a href="#cb10-10" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb10-11"><a href="#cb10-11" tabindex="-1"></a>  <span class="at">provider =</span> request_uri_provider,</span>
+<span id="cb10-12"><a href="#cb10-12" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb10-13"><a href="#cb10-13" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="st">&quot;client-secret&quot;</span>,</span>
+<span id="cb10-14"><a href="#cb10-14" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb10-15"><a href="#cb10-15" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>),</span>
+<span id="cb10-16"><a href="#cb10-16" tabindex="-1"></a>  <span class="at">client_assertion_private_key =</span> openssl<span class="sc">::</span><span class="fu">read_key</span>(<span class="st">&quot;keys/client-key.pem&quot;</span>),</span>
+<span id="cb10-17"><a href="#cb10-17" tabindex="-1"></a>  <span class="co"># Publish the Request Object by reference instead of sending it inline</span></span>
+<span id="cb10-18"><a href="#cb10-18" tabindex="-1"></a>  <span class="at">request_object_mode =</span> <span class="st">&quot;request_uri&quot;</span>,</span>
+<span id="cb10-19"><a href="#cb10-19" tabindex="-1"></a>  <span class="at">request_object_signing_alg =</span> <span class="st">&quot;RS256&quot;</span></span>
+<span id="cb10-20"><a href="#cb10-20" tabindex="-1"></a>)</span>
+<span id="cb10-21"><a href="#cb10-21" tabindex="-1"></a></span>
+<span id="cb10-22"><a href="#cb10-22" tabindex="-1"></a><span class="co"># Inside server()</span></span>
+<span id="cb10-23"><a href="#cb10-23" tabindex="-1"></a>auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb10-24"><a href="#cb10-24" tabindex="-1"></a>  <span class="st">&quot;auth&quot;</span>,</span>
+<span id="cb10-25"><a href="#cb10-25" tabindex="-1"></a>  client,</span>
+<span id="cb10-26"><a href="#cb10-26" tabindex="-1"></a>  <span class="at">auto_redirect =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb10-27"><a href="#cb10-27" tabindex="-1"></a>  <span class="co"># Public HTTPS base URL of this Shiny app as seen by the provider</span></span>
+<span id="cb10-28"><a href="#cb10-28" tabindex="-1"></a>  <span class="at">request_uri_base_url =</span> <span class="st">&quot;https://shiny.yourdomain.com/myapp&quot;</span></span>
+<span id="cb10-29"><a href="#cb10-29" tabindex="-1"></a>)</span></code></pre></div>
+<p>Wrap the app UI in
+<code>oauth_ui(ui, id = &quot;auth&quot;, client = client)</code> (or
+<code>oauth_form_post_ui()</code> for POST callbacks). The app root
+serves Request Objects using a random, single-purpose
+<code>shinyOAuth_request_object</code> query handle. Only its digest is
+stored alongside the object in <code>client@state_store</code>. GET
+consumes it atomically; HEAD does not consume it. Retrieval expires at
+the earlier of the object expiry and 120 seconds after publication.
+Cache eviction can shorten availability; the store’s retention policy
+controls physical cleanup. If the provider requires
+<code>request_uri</code> registration, update its permitted URLs to
+cover this app-root endpoint when migrating from the old
+<code>/session/</code> paths. For multiple workers, use a shared state
+store with atomic <code>take()</code>; a memory store works only when
+publication and retrieval reach the same R process.</p>
+<p>The hosted JWT and its expiry occupy a separate store record, outside
+the pending-login record’s <code>state_key</code> sealing. Signing
+leaves JWT claims readable; enable Request Object JWE encryption for
+claim confidentiality. See the <a href="https://lukakoning.github.io/shinyOAuth/reference/custom_cache.html"><code>custom_cache()</code>
+shared-store contract</a> for record protection and expiry
+requirements.</p>
+<p>Earlier versions used Shiny’s raw live session token in
+<code>registerDataObj()</code> URLs. Those URLs could disclose a
+capability also used by other session resources through browser,
+provider, or proxy logs. The new handles contain no session token. Still
+redact request URLs in logs and limit log retention: disclosing a live
+handle allows its holder to consume the pending object. Prefer PAR when
+supported to use a provider-issued reference and avoid a public app
+retrieval endpoint. OIDC signed requests retain outer
+<code>client_id</code>, <code>response_type</code>, and
+<code>scope</code> parameters.
+<code>authorization_request_front_channel_mode = &quot;minimal&quot;</code> is
+available for compatible PAR providers, but is rejected for OIDC inline
+or client-published signed requests.</p>
+</div>
+</div>
+<div id="pushed-authorization-requests-par" class="section level2">
+<h2>Pushed authorization requests (PAR)</h2>
+<p>PAR sends the authorization request from your server to the provider
+first. The browser then gets redirected with a short
+<code>request_uri</code> handle instead of the full request details.</p>
+<p>PAR allows the provider to validate the request before the browser
+redirect and avoids placing large requests in a URL. It also keeps most
+request details out of browser history and logs of browser requests. Set
+<code>par_required = TRUE</code> when the provider requires PAR.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb11-2"><a href="#cb11-2" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;example-par&quot;</span>,</span>
+<span id="cb11-3"><a href="#cb11-3" tabindex="-1"></a>  <span class="at">issuer =</span> <span class="st">&quot;https://id.example.com&quot;</span>,</span>
+<span id="cb11-4"><a href="#cb11-4" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://id.example.com/authorize&quot;</span>,</span>
+<span id="cb11-5"><a href="#cb11-5" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://id.example.com/token&quot;</span>,</span>
+<span id="cb11-6"><a href="#cb11-6" tabindex="-1"></a>  <span class="co"># Enable pushed authorization requests</span></span>
+<span id="cb11-7"><a href="#cb11-7" tabindex="-1"></a>  <span class="at">par_url =</span> <span class="st">&quot;https://id.example.com/par&quot;</span>,</span>
+<span id="cb11-8"><a href="#cb11-8" tabindex="-1"></a>  <span class="at">par_required =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb11-9"><a href="#cb11-9" tabindex="-1"></a>  <span class="co"># Keep the browser redirect down to client_id + PAR request_uri</span></span>
+<span id="cb11-10"><a href="#cb11-10" tabindex="-1"></a>  <span class="at">authorization_request_front_channel_mode =</span> <span class="st">&quot;minimal&quot;</span></span>
+<span id="cb11-11"><a href="#cb11-11" tabindex="-1"></a>)</span>
+<span id="cb11-12"><a href="#cb11-12" tabindex="-1"></a></span>
+<span id="cb11-13"><a href="#cb11-13" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb11-14"><a href="#cb11-14" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb11-15"><a href="#cb11-15" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb11-16"><a href="#cb11-16" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="st">&quot;client-secret&quot;</span>,</span>
+<span id="cb11-17"><a href="#cb11-17" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb11-18"><a href="#cb11-18" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>)</span>
+<span id="cb11-19"><a href="#cb11-19" tabindex="-1"></a>)</span></code></pre></div>
+</div>
+<div id="form-post-response-mode" class="section level2">
+<h2>Form Post response mode</h2>
+<p><code>response_mode = &quot;form_post&quot;</code> tells the provider to send
+the authorization response back as an HTTP POST body instead of query
+parameters on the URL. The body still contains normal OAuth fields such
+as <code>code</code>, <code>state</code>, <code>error</code>, and
+<code>iss</code>.</p>
+<p>Use <code>form_post</code> when required by the provider or to keep
+callback values out of the browser URL, history, and logs of browser
+requests. It changes the callback transport; it does not sign or encrypt
+the response.</p>
+<p>Keep your existing provider and credentials, set
+<code>response_mode = &quot;form_post&quot;</code> on the client, then use this UI
+setup. Here <code>client</code> has a registered
+<code>redirect_uri</code> such as
+<code>https://app.example.com/callback</code>.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>base_ui <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">fluidPage</span>(shiny<span class="sc">::</span><span class="fu">textOutput</span>(<span class="st">&quot;status&quot;</span>))</span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">oauth_form_post_ui</span>(base_ui, <span class="at">id =</span> <span class="st">&quot;auth&quot;</span>, <span class="at">client =</span> client)</span>
+<span id="cb12-3"><a href="#cb12-3" tabindex="-1"></a></span>
+<span id="cb12-4"><a href="#cb12-4" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb12-5"><a href="#cb12-5" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(<span class="st">&quot;auth&quot;</span>, client)</span>
+<span id="cb12-6"><a href="#cb12-6" tabindex="-1"></a>  output[[<span class="st">&quot;status&quot;</span>]] <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">renderText</span>({</span>
+<span id="cb12-7"><a href="#cb12-7" tabindex="-1"></a>    <span class="cf">if</span> (<span class="fu">isTRUE</span>(auth[[<span class="st">&quot;authenticated&quot;</span>]])) <span class="st">&quot;Signed in&quot;</span> <span class="cf">else</span> <span class="st">&quot;Waiting for login&quot;</span></span>
+<span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a>  })</span>
+<span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a>}</span>
+<span id="cb12-10"><a href="#cb12-10" tabindex="-1"></a></span>
+<span id="cb12-11"><a href="#cb12-11" tabindex="-1"></a>app <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">shinyApp</span>(ui, server, <span class="at">uiPattern =</span> <span class="st">&quot;.*&quot;</span>)</span></code></pre></div>
+<p>The wrapper includes <code>oauth_ui()</code> setup. Its module ID and
+client must match the server’s. For a callback path such as
+<code>/callback</code>, <code>uiPattern = &quot;.*&quot;</code> lets Shiny send
+the POST to the wrapper. A callback at the app root also works.
+<code>callback_path</code> defaults to the path in
+<code>redirect_uri</code>; keep both aligned.</p>
+<div id="deployment-behind-an-https-proxy" class="section level3">
+<h3>Deployment behind an HTTPS proxy</h3>
+<p>If your web server accepts HTTPS but forwards HTTP to Shiny, the
+wrapper needs a trusted way to recover the public request address.
+Configure <code>request_uri_resolver</code> for your own proxy. This
+example accepts one proxy IP and a fixed public origin, including a
+mounted app path:</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>trusted_proxy_uri <span class="ot">&lt;-</span> <span class="cf">function</span>(req) {</span>
+<span id="cb13-2"><a href="#cb13-2" tabindex="-1"></a>  <span class="cf">if</span> (<span class="sc">!</span><span class="fu">identical</span>(req[[<span class="st">&quot;REMOTE_ADDR&quot;</span>]], <span class="st">&quot;10.0.0.10&quot;</span>) <span class="sc">||</span></span>
+<span id="cb13-3"><a href="#cb13-3" tabindex="-1"></a>      <span class="sc">!</span><span class="fu">identical</span>(req[[<span class="st">&quot;HTTP_X_FORWARDED_PROTO&quot;</span>]], <span class="st">&quot;https&quot;</span>)) {</span>
+<span id="cb13-4"><a href="#cb13-4" tabindex="-1"></a>    <span class="fu">return</span>(<span class="cn">NULL</span>)</span>
+<span id="cb13-5"><a href="#cb13-5" tabindex="-1"></a>  }</span>
+<span id="cb13-6"><a href="#cb13-6" tabindex="-1"></a>  <span class="fu">paste0</span>(<span class="st">&quot;https://app.example.com&quot;</span>, req[[<span class="st">&quot;SCRIPT_NAME&quot;</span>]], req[[<span class="st">&quot;PATH_INFO&quot;</span>]])</span>
+<span id="cb13-7"><a href="#cb13-7" tabindex="-1"></a>}</span>
+<span id="cb13-8"><a href="#cb13-8" tabindex="-1"></a></span>
+<span id="cb13-9"><a href="#cb13-9" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">oauth_form_post_ui</span>(</span>
+<span id="cb13-10"><a href="#cb13-10" tabindex="-1"></a>  base_ui, <span class="at">id =</span> <span class="st">&quot;auth&quot;</span>, <span class="at">client =</span> client,</span>
+<span id="cb13-11"><a href="#cb13-11" tabindex="-1"></a>  <span class="at">request_uri_resolver =</span> trusted_proxy_uri</span>
+<span id="cb13-12"><a href="#cb13-12" tabindex="-1"></a>)</span></code></pre></div>
+<p>Use your deployment’s verified proxy address and public origin. The
+result must still match the configured redirect origin and callback
+path. Do not trust forwarded headers from arbitrary clients.</p>
+</div>
+</div>
+<div id="jwt-secured-authorization-response-mode-jarm" class="section level2">
+<h2>JWT-secured authorization response mode (JARM)</h2>
+<p>JARM protects the authorization response with a signature. The
+provider returns a JWT, and shinyOAuth verifies its signature, issuer,
+audience, and expiry before processing the callback fields. If
+encryption is configured, shinyOAuth decrypts the response before
+validating the signed contents.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;example-jarm&quot;</span>,</span>
+<span id="cb14-3"><a href="#cb14-3" tabindex="-1"></a>  <span class="at">issuer =</span> <span class="st">&quot;https://id.example.com&quot;</span>,</span>
+<span id="cb14-4"><a href="#cb14-4" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://id.example.com/authorize&quot;</span>,</span>
+<span id="cb14-5"><a href="#cb14-5" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://id.example.com/token&quot;</span>,</span>
+<span id="cb14-6"><a href="#cb14-6" tabindex="-1"></a>  <span class="co"># Advertise the JARM response modes and algorithms this provider supports</span></span>
+<span id="cb14-7"><a href="#cb14-7" tabindex="-1"></a>  <span class="at">response_modes_supported =</span> <span class="fu">c</span>(<span class="st">&quot;query&quot;</span>, <span class="st">&quot;query.jwt&quot;</span>, <span class="st">&quot;form_post.jwt&quot;</span>),</span>
+<span id="cb14-8"><a href="#cb14-8" tabindex="-1"></a>  <span class="at">jarm_signing_alg_values_supported =</span> <span class="fu">c</span>(<span class="st">&quot;RS256&quot;</span>),</span>
+<span id="cb14-9"><a href="#cb14-9" tabindex="-1"></a>  <span class="at">jarm_encryption_alg_values_supported =</span> <span class="fu">c</span>(<span class="st">&quot;RSA-OAEP&quot;</span>),</span>
+<span id="cb14-10"><a href="#cb14-10" tabindex="-1"></a>  <span class="at">jarm_encryption_enc_values_supported =</span> <span class="fu">c</span>(<span class="st">&quot;A128CBC-HS256&quot;</span>)</span>
+<span id="cb14-11"><a href="#cb14-11" tabindex="-1"></a>)</span>
+<span id="cb14-12"><a href="#cb14-12" tabindex="-1"></a></span>
+<span id="cb14-13"><a href="#cb14-13" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb14-14"><a href="#cb14-14" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb14-15"><a href="#cb14-15" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb14-16"><a href="#cb14-16" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="st">&quot;client-secret&quot;</span>,</span>
+<span id="cb14-17"><a href="#cb14-17" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb14-18"><a href="#cb14-18" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>),</span>
+<span id="cb14-19"><a href="#cb14-19" tabindex="-1"></a>  <span class="co"># Ask for a JWT-wrapped authorization response</span></span>
+<span id="cb14-20"><a href="#cb14-20" tabindex="-1"></a>  <span class="at">response_mode =</span> <span class="st">&quot;query.jwt&quot;</span>,</span>
+<span id="cb14-21"><a href="#cb14-21" tabindex="-1"></a>  <span class="at">jarm_signed_response_alg =</span> <span class="st">&quot;RS256&quot;</span></span>
+<span id="cb14-22"><a href="#cb14-22" tabindex="-1"></a>)</span></code></pre></div>
+<p>For encrypted JARM, add the decryption settings:</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="st">&quot;client-secret&quot;</span>,</span>
+<span id="cb15-5"><a href="#cb15-5" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb15-6"><a href="#cb15-6" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>),</span>
+<span id="cb15-7"><a href="#cb15-7" tabindex="-1"></a>  <span class="at">response_mode =</span> <span class="st">&quot;query.jwt&quot;</span>,</span>
+<span id="cb15-8"><a href="#cb15-8" tabindex="-1"></a>  <span class="at">jarm_signed_response_alg =</span> <span class="st">&quot;RS256&quot;</span>,</span>
+<span id="cb15-9"><a href="#cb15-9" tabindex="-1"></a>  <span class="co"># Optional: decrypt JARM before validating the signed payload</span></span>
+<span id="cb15-10"><a href="#cb15-10" tabindex="-1"></a>  <span class="at">jarm_encrypted_response_alg =</span> <span class="st">&quot;RSA-OAEP&quot;</span>,</span>
+<span id="cb15-11"><a href="#cb15-11" tabindex="-1"></a>  <span class="at">jarm_encrypted_response_enc =</span> <span class="st">&quot;A128CBC-HS256&quot;</span>,</span>
+<span id="cb15-12"><a href="#cb15-12" tabindex="-1"></a>  <span class="at">jarm_decryption_private_key =</span> openssl<span class="sc">::</span><span class="fu">read_key</span>(<span class="st">&quot;keys/jarm-decrypt.pem&quot;</span>)</span>
+<span id="cb15-13"><a href="#cb15-13" tabindex="-1"></a>)</span></code></pre></div>
+<p>JARM is currently intended for <code>oauth_module_server()</code>. If
+you use <code>response_mode = &quot;form_post.jwt&quot;</code>, wrap your UI with
+<code>oauth_form_post_ui()</code>.</p>
+</div>
+<div id="demonstrating-proof-of-possession-dpop" class="section level2">
+<h2>Demonstrating proof-of-possession (DPoP)</h2>
+<p>DPoP binds tokens to a client key. The client signs a proof for each
+token or API request, and the receiving server verifies it against the
+token binding. An API enforcing DPoP requires both the access token and
+a proof from the matching private key. Configure it when supported by
+the authorization server and the API.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;example-dpop&quot;</span>,</span>
+<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>  <span class="at">issuer =</span> <span class="st">&quot;https://id.example.com&quot;</span>,</span>
+<span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://id.example.com/authorize&quot;</span>,</span>
+<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://id.example.com/token&quot;</span>,</span>
+<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a>  <span class="co"># Optional metadata check for acceptable DPoP signing algorithms</span></span>
+<span id="cb16-7"><a href="#cb16-7" tabindex="-1"></a>  <span class="at">dpop_signing_alg_values_supported =</span> <span class="fu">c</span>(<span class="st">&quot;ES256&quot;</span>)</span>
+<span id="cb16-8"><a href="#cb16-8" tabindex="-1"></a>)</span>
+<span id="cb16-9"><a href="#cb16-9" tabindex="-1"></a></span>
+<span id="cb16-10"><a href="#cb16-10" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb16-11"><a href="#cb16-11" tabindex="-1"></a>  <span class="at">provider =</span> provider,</span>
+<span id="cb16-12"><a href="#cb16-12" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="st">&quot;client-id&quot;</span>,</span>
+<span id="cb16-13"><a href="#cb16-13" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="st">&quot;client-secret&quot;</span>,</span>
+<span id="cb16-14"><a href="#cb16-14" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example.com/auth/callback&quot;</span>,</span>
+<span id="cb16-15"><a href="#cb16-15" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;openid&quot;</span>, <span class="st">&quot;profile&quot;</span>, <span class="st">&quot;api.read&quot;</span>),</span>
+<span id="cb16-16"><a href="#cb16-16" tabindex="-1"></a>  <span class="co"># Private key used to sign DPoP proofs</span></span>
+<span id="cb16-17"><a href="#cb16-17" tabindex="-1"></a>  <span class="at">dpop_private_key =</span> openssl<span class="sc">::</span><span class="fu">read_key</span>(<span class="st">&quot;keys/dpop-key.pem&quot;</span>),</span>
+<span id="cb16-18"><a href="#cb16-18" tabindex="-1"></a>  <span class="at">dpop_signing_alg =</span> <span class="st">&quot;ES256&quot;</span></span>
+<span id="cb16-19"><a href="#cb16-19" tabindex="-1"></a>)</span></code></pre></div>
+<p>After login, keep using the request helpers instead of adding
+<code>Authorization</code> or <code>DPoP</code> headers manually:</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a>resp <span class="ot">&lt;-</span> <span class="fu">perform_resource_req</span>(</span>
+<span id="cb17-2"><a href="#cb17-2" tabindex="-1"></a>  auth[[<span class="st">&quot;token&quot;</span>]],</span>
+<span id="cb17-3"><a href="#cb17-3" tabindex="-1"></a>  <span class="st">&quot;https://api.example.com/me&quot;</span>,</span>
+<span id="cb17-4"><a href="#cb17-4" tabindex="-1"></a>  <span class="co"># Lets shinyOAuth attach the DPoP proof and handle nonce challenges</span></span>
+<span id="cb17-5"><a href="#cb17-5" tabindex="-1"></a>  <span class="at">client =</span> client</span>
+<span id="cb17-6"><a href="#cb17-6" tabindex="-1"></a>)</span></code></pre></div>
+<div id="token-binding-requirements-and-validation" class="section level3">
+<h3>Token binding requirements and validation</h3>
+<p>Supplying a DPoP key makes <code>dpop_require_access_token</code>
+default to <code>TRUE</code>: the provider must return a DPoP access
+token. If binding data is visible, its <code>cnf[[&quot;jkt&quot;]]</code> key
+thumbprint must match. For opaque tokens with no visible binding, enable
+<code>dpop_require_observed_cnf = TRUE</code> and arrange introspection
+if your deployment needs to confirm that binding locally.</p>
+<p>For certificate-bound tokens, the corresponding field is
+<code>cnf[[&quot;x5t#S256&quot;]]</code>. The package checks it against the
+configured certificate before protected API and userinfo calls. A
+refreshed token needs fresh binding data from the new token or its
+introspection response; the old certificate thumbprint is not carried
+forward when the response omits it.</p>
+<p>Binding data read from a JWT access token is observed payload data;
+shinyOAuth does not independently verify that access token’s signature.
+Introspection can provide confirmation from the provider. The API must
+enforce the binding too for a stolen token to be unusable without its
+key or certificate.</p>
+</div>
+<div id="dpop-in-api-requests" class="section level3">
+<h3>DPoP in API requests</h3>
+<p><code>perform_resource_req()</code> and <code>get_userinfo()</code>
+handle a DPoP nonce challenge with one fresh-proof retry. Later requests
+to the same resource server can reuse its nonce; token-server and
+resource-server nonces are kept separate. Retries of eligible API
+requests generate fresh proofs.</p>
+<p>DPoP nonces must follow RFC 9449’s visible ASCII syntax. The package
+also applies a local 4096-byte limit to bound proof and cache sizes; the
+RFC itself sets no maximum length. Configure
+<code>options(shinyOAuth.dpop_nonce_max_bytes = 8192L)</code> for a
+provider issuing larger nonces (supported range: 1–65536 bytes). A
+response above the configured limit raises an explicit error without
+logging its nonce.</p>
+<p><code>resource_req()</code> only builds the request. A DPoP proof is
+tied to its HTTP method and base URL, so do not change those after
+construction. Supply query parameters through the helper’s
+<code>query</code> argument; external URL modifiers can decode reserved
+path characters and invalidate the proof. Use
+<code>perform_resource_req()</code> to manage nonce retries.</p>
+</div>
+</div>
+<div id="signature-and-encryption-support" class="section level2">
+<h2>Signature and encryption support</h2>
+<p>For outgoing private-key client assertions, JAR, and DPoP, signing
+supports <code>RS256</code>, <code>RS384</code>, <code>ES256</code>,
+<code>ES384</code>, <code>ES512</code>, and both <code>EdDSA</code> and
+<code>Ed25519</code> with Ed25519 keys. Ed25519 accepts an OpenSSL
+private key or PEM; DPoP embeds only its public OKP JWK. Algorithm
+inference and explicit choices remain constrained by provider metadata.
+Secret-based assertions and JAR support <code>HS256</code>,
+<code>HS384</code>, and <code>HS512</code>. RSA continues to default to
+RS256; choose <code>client_assertion_alg = &quot;RS384&quot;</code> explicitly for
+a registration requiring it. RS384 uses SHA-384 with RSASSA-PKCS1-v1_5
+and requires an RSA key of at least 2048 bits, as specified in <a href="https://www.rfc-editor.org/rfc/rfc7518.html#section-3.3">RFC 7518
+section 3.3</a>. RSA-PSS and Ed448 are not supported for outgoing
+signatures. Incoming signature policies are separate; see <a href="https://lukakoning.github.io/shinyOAuth/reference/oauth_provider.html"><code>oauth_provider()</code></a>
+and the <code>jarm_*</code> arguments in <a href="https://lukakoning.github.io/shinyOAuth/reference/oauth_client.html"><code>oauth_client()</code></a>.</p>
+<p>Request Object encryption and JARM decryption support
+<code>RSA-OAEP</code> with <code>A128CBC-HS256</code>,
+<code>A192CBC-HS384</code>, or <code>A256CBC-HS512</code>. This does not
+imply support for encrypted ID tokens or encrypted userinfo, which are
+rejected.</p>
+<p>The R <code>openssl</code> API currently exposes neither OAEP digest
+selection nor RSA-PSS padding options. Its GCM functions do not accept
+the additional authenticated data needed to authenticate JWE protected
+headers. Consequently, <code>RSA-OAEP-256</code>,
+<code>PS256/384/512</code>, and <code>A128/192/256GCM</code> JWE modes
+remain unsupported and fail closed; provider metadata never causes a
+fallback to another algorithm. These are backend interoperability
+limits, not interchangeable names for the supported modes. See the <a href="https://jeroen.r-universe.dev/openssl/doc/manual.html">OpenSSL R
+API</a>.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

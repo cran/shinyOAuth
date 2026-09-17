@@ -10,12 +10,61 @@
 # Functions in this subsection summarize request metadata and redact values
 # that should not appear in audit events.
 
+# Bound untrusted metadata before normalization, including raw diagnostic mode.
+bounded_http_text <- function(value, max_bytes = 512L) {
+  if (!is_valid_string(value)) {
+    return(NULL)
+  }
+  value <- enc2utf8(substr(value, 1L, max_bytes))
+  if (!validUTF8(value)) {
+    return(NULL)
+  }
+  value <- gsub("[[:cntrl:]\\p{Cf}]", "", value, perl = TRUE)
+  while (nchar(value, type = "bytes") > max_bytes) {
+    value <- substr(value, 1L, nchar(value) - 1L)
+  }
+  if (nzchar(value)) value else NULL
+}
+
+# Paths can contain user identifiers or credentials. Only export paths after an
+# application scrubber has converted them to safe, low-cardinality routes.
+telemetry_safe_path <- function(path) {
+  scrubber <- getOption("shinyOAuth.telemetry_path_scrubber")
+  if (!is.function(scrubber)) {
+    return(NULL)
+  }
+  path <- bounded_http_text(path, 2048L)
+  if (is.null(path)) {
+    return(NULL)
+  }
+  route <- tryCatch(scrubber(path), error = function(...) NULL)
+  route <- bounded_http_text(route, 512L)
+  if (
+    is.null(route) ||
+      !startsWith(route, "/") ||
+      startsWith(route, "//") ||
+      grepl("[?#]", route)
+  ) {
+    return(NULL)
+  }
+  route
+}
+
+bound_http_summary <- function(summary) {
+  for (field in c("method", "path", "host", "scheme")) {
+    limit <- switch(field, method = 32L, scheme = 16L, host = 255L, 512L)
+    summary[[field]] <- bounded_http_text(summary[[field]], limit)
+  }
+  summary
+}
+
 #' Build a safe HTTP audit summary
 #'
-#' Creates a compact request summary that is suitable for audit events, with
-#' sensitive query parameters and headers sanitized by default. Used when audit
-#' and telemetry events need browser request context. Redaction is enabled by
-#' default and can be disabled with
+#' Creates a compact request summary that is suitable for audit events. Query
+#' strings, request headers, and client addresses are omitted by default because
+#' unknown field names can still carry secrets or personal data. Used when audit
+#' and telemetry events need browser request context. The raw fields can be
+#' included explicitly with
 #' `options(shinyOAuth.audit_redact_http = FALSE)`.
 #'
 #' @param req Request-like object.
@@ -28,16 +77,25 @@ build_http_summary <- function(req) {
   }
 
   # Core request line/meta
-  method <- .scalar_chr(tryCatch(req$REQUEST_METHOD, error = function(...) {
-    NULL
-  }))
-  path <- .scalar_chr(tryCatch(req$PATH_INFO, error = function(...) NULL))
-  query_string <- .scalar_chr(tryCatch(req$QUERY_STRING, error = function(...) {
-    NULL
-  }))
-  host <- .scalar_chr(tryCatch(req$HTTP_HOST, error = function(...) NULL))
+  method <- .scalar_chr(tryCatch(
+    req[["REQUEST_METHOD"]],
+    error = function(...) {
+      NULL
+    }
+  ))
+  path <- .scalar_chr(tryCatch(req[["PATH_INFO"]], error = function(...) NULL))
+  include_raw <- identical(
+    getOption("shinyOAuth.audit_redact_http", TRUE),
+    FALSE
+  )
+  query_string <- if (include_raw) {
+    .scalar_chr(tryCatch(req[["QUERY_STRING"]], error = function(...) NULL))
+  } else {
+    NA_character_
+  }
+  host <- .scalar_chr(tryCatch(req[["HTTP_HOST"]], error = function(...) NULL))
   scheme <- .scalar_chr(tryCatch(
-    req$HTTP_X_FORWARDED_PROTO,
+    req[["HTTP_X_FORWARDED_PROTO"]],
     error = function(...) NULL
   ))
   if (!is_valid_string(scheme)) {
@@ -47,29 +105,38 @@ build_http_summary <- function(req) {
       error = function(...) NULL
     ))
   }
-  # Remote address preference: X-Forwarded-For (first IP) else REMOTE_ADDR
-  ra <- .scalar_chr(tryCatch(req$REMOTE_ADDR, error = function(...) NULL))
-  xff <- .scalar_chr(tryCatch(req$HTTP_X_FORWARDED_FOR, error = function(...) {
-    NULL
-  }))
-  if (is_valid_string(xff)) {
-    # If multiple comma-separated IPs, take the first hop
-    ra <- strsplit(xff, ",", fixed = TRUE)[[1]]
-    ra <- .scalar_chr(if (length(ra)) trimws(ra[[1]]) else NULL)
+  # Remote addresses are collected only for explicitly enabled raw diagnostics.
+  ra <- if (include_raw) {
+    .scalar_chr(tryCatch(req[["REMOTE_ADDR"]], error = function(...) NULL))
+  } else {
+    NA_character_
+  }
+  if (include_raw) {
+    xff <- .scalar_chr(tryCatch(
+      req[["HTTP_X_FORWARDED_FOR"]],
+      error = function(...) NULL
+    ))
+    if (is_valid_string(xff)) {
+      # If multiple comma-separated IPs, take the first hop
+      ra <- strsplit(xff, ",", fixed = TRUE)[[1]]
+      ra <- .scalar_chr(if (length(ra)) trimws(ra[[1]]) else NULL)
+    }
   }
 
   # Collect HTTP_* into headers list (JSON-friendly scalars)
-  nms <- names(req)
-  hdr_idx <- if (!is.null(nms)) grepl("^HTTP_", nms) else rep(FALSE, 0)
   hdrs <- list()
-  if (length(hdr_idx) && any(hdr_idx)) {
-    for (nm in nms[hdr_idx]) {
-      key <- tolower(sub("^HTTP_", "", nm))
-      val <- .scalar_chr(tryCatch(req[[nm]], error = function(...) NULL))
-      hdrs[[key]] <- if (is_valid_string(val)) val else NULL
+  if (include_raw) {
+    nms <- names(req)
+    hdr_idx <- if (!is.null(nms)) grepl("^HTTP_", nms) else rep(FALSE, 0)
+    if (length(hdr_idx) && any(hdr_idx)) {
+      for (nm in nms[hdr_idx]) {
+        key <- tolower(sub("^HTTP_", "", nm))
+        val <- .scalar_chr(tryCatch(req[[nm]], error = function(...) NULL))
+        hdrs[[key]] <- if (is_valid_string(val)) val else NULL
+      }
+      # Remove NULLs to keep JSON clean
+      hdrs <- Filter(Negate(is.null), hdrs)
     }
-    # Remove NULLs to keep JSON clean
-    hdrs <- Filter(Negate(is.null), hdrs)
   }
 
   raw <- list(
@@ -86,19 +153,18 @@ build_http_summary <- function(req) {
     headers = if (length(hdrs)) hdrs else NULL
   )
 
-  # Sanitize by default to prevent secret leakage in audit logs
-  # Controlled by options(shinyOAuth.audit_redact_http = TRUE/FALSE)
-  if (isTRUE(getOption("shinyOAuth.audit_redact_http", TRUE))) {
+  if (!include_raw) {
     sanitize_http_summary(raw)
   } else {
-    raw
+    bound_http_summary(raw)
   }
 }
 
 #' Sanitize an HTTP audit summary
 #'
-#' Removes or redacts sensitive query parameters and headers before the summary
-#' is logged or emitted in audit events. Used by `build_http_summary()`.
+#' Removes query strings, request headers, and client addresses before the
+#' summary is logged or emitted in audit events. Used by
+#' `build_http_summary()`.
 #'
 #' @param summary HTTP summary list.
 #' @return Sanitized summary list.
@@ -109,22 +175,12 @@ sanitize_http_summary <- function(summary) {
     return(NULL)
   }
 
-  # Redact sensitive query params from query_string
-  if (!is.null(summary$query_string) && nzchar(summary$query_string)) {
-    summary$query_string <- redact_query_string(summary$query_string)
-  }
+  summary[["query_string"]] <- NULL
+  summary[["headers"]] <- NULL
+  summary[["remote_addr"]] <- NULL
+  summary[["path"]] <- telemetry_safe_path(summary[["path"]])
 
-  # Redact sensitive headers
-  if (!is.null(summary$headers) && length(summary$headers) > 0) {
-    summary$headers <- redact_headers(summary$headers)
-  }
-
-  # Client IPs can be personal data; keep them out of sanitized audit events.
-  if (!is.null(summary$remote_addr) && nzchar(summary$remote_addr)) {
-    summary$remote_addr <- "[REDACTED]"
-  }
-
-  summary
+  bound_http_summary(summary)
 }
 
 #' Redact sensitive OAuth query parameters
@@ -157,6 +213,9 @@ redact_query_string <- function(qs) {
     "assertion",
     "request",
     "request_uri",
+    "response",
+    "shinyoauth_form_post",
+    "shinyoauth_form_post_id",
     "claims",
     "login_hint",
     "error_description",
@@ -289,8 +348,13 @@ redact_headers <- function(hdrs) {
     "www_authenticate"
   )
 
-  # Headers to redact (contain potentially sensitive routing/client info)
-  # x_* headers often contain internal infrastructure details
+  # Headers to redact (contain potentially sensitive URLs or routing/client
+  # information). Referer can contain OAuth callback credentials in its query.
+  redact_headers_exact <- c(
+    "referer"
+  )
+
+  # x_* headers often contain internal infrastructure details.
   redact_prefixes <- c(
     "x_"
   )
@@ -309,12 +373,14 @@ redact_headers <- function(hdrs) {
       next
     }
 
-    # Check if header should be redacted by prefix
-    should_redact <- FALSE
-    for (prefix in redact_prefixes) {
-      if (startsWith(nm_lower, prefix)) {
-        should_redact <- TRUE
-        break
+    # Check if header should be redacted by exact name or prefix
+    should_redact <- nm_lower %in% redact_headers_exact
+    if (!should_redact) {
+      for (prefix in redact_prefixes) {
+        if (startsWith(nm_lower, prefix)) {
+          should_redact <- TRUE
+          break
+        }
       }
     }
 

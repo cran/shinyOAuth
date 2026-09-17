@@ -2,7 +2,7 @@
 % Please edit documentation in R/methods__client_bearer_req.R
 \name{resource_req}
 \alias{resource_req}
-\title{Build an authenticated httr2 request for a protected resource}
+\title{Prepare an API request with an access token}
 \usage{
 resource_req(
   token,
@@ -12,9 +12,11 @@ resource_req(
   query = NULL,
   follow_redirect = FALSE,
   check_url = TRUE,
-  oauth_client = NULL,
+  client = NULL,
   token_type = NULL,
-  dpop_nonce = NULL
+  dpop_nonce = NULL,
+  resource_hosts = NULL,
+  oauth_client = NULL
 )
 }
 \arguments{
@@ -24,7 +26,9 @@ resource_req(
 
 \item{method}{Optional HTTP method (character). Defaults to "GET". When
 the effective token type is \code{DPoP}, this must be the final request method
-because the proof is signed against it.}
+because the proof is signed against it. \code{TRACE} and the nonstandard
+\code{TRACK} method are rejected because authenticated requests could be
+reflected by the server and disclose credentials.}
 
 \item{headers}{Optional named list or named character vector of extra
 headers to set on the request. Header names are case-insensitive.
@@ -33,8 +37,9 @@ the token authentication set by this function is not overridden.}
 
 \item{query}{Optional named list of query parameters to append to the URL.}
 
-\item{follow_redirect}{Logical. If \code{FALSE} (the default), HTTP redirects
-are disabled to prevent leaking the access token to unexpected hosts.
+\item{follow_redirect}{Logical or \code{NULL}. \code{FALSE} (the default) disables
+HTTP redirects even when \code{shinyOAuth.allow_redirect} is enabled.
+\code{NULL} inherits that global option (disabled by default).
 Set to \code{TRUE} only if you trust all possible redirect targets and
 understand the security implications.}
 
@@ -42,10 +47,12 @@ understand the security implications.}
 \code{\link[=is_ok_host]{is_ok_host()}} before attaching the access token. This rejects relative
 URLs, plain HTTP to non-loopback hosts, and when
 \code{options(shinyOAuth.allowed_hosts)} is set, hosts outside the allowlist.
+Without an allowlist this performs HTTPS and URL-syntax validation only
+(with the configured non-HTTPS exceptions); any HTTPS host is accepted.
 Set to \code{FALSE} only if you have already validated the URL and understand
 the security implications.}
 
-\item{oauth_client}{Optional \link{OAuthClient}. Required when the effective
+\item{client}{Optional \link{OAuthClient}. Required when the effective
 token type is \code{DPoP}, because the client carries the configured DPoP proof
 key, and also when using sender-constrained mTLS / certificate-bound
 tokens so shinyOAuth can attach the configured client certificate and
@@ -56,12 +63,21 @@ thumbprint carried on a raw JWT access-token string.}
 is supplied as a raw string. Supported values are \code{Bearer} and \code{DPoP}.
 Invalid or multi-valued inputs are rejected. When omitted, shinyOAuth
 preserves \code{OAuthToken@token_type}, and may infer \code{DPoP} from explicit
-\code{OAuthToken@cnf$jkt} metadata. Raw access-token strings default to
+\code{OAuthToken@cnf[["jkt"]]} metadata. Raw access-token strings default to
 \code{Bearer} unless you pass \code{token_type = "DPoP"} explicitly.}
 
 \item{dpop_nonce}{Optional DPoP nonce to embed in the proof for this
 request. This is primarily useful after a resource server challenges with
 \code{DPoP-Nonce}.}
+
+\item{resource_hosts}{Optional non-empty character vector of trusted resource
+host patterns, using \code{\link[=is_ok_host]{is_ok_host()}} matching rules. This call-scoped
+allowlist adds to the global policy and is enforced even if \code{check_url}
+is \code{FALSE}. Use exact hostnames for URLs derived from lower-trust input.
+It constrains the initial URL, not redirect destinations or resolved IPs;
+retain \code{follow_redirect = FALSE}. \code{NULL} adds no resource-specific policy.}
+
+\item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 }
 \value{
 An \link[httr2:httr2]{httr2} request object, ready to be performed with
@@ -71,28 +87,38 @@ change the request method or base URL after calling
 \code{\link[=resource_req]{resource_req()}} because the proof is already bound to those values.
 }
 \description{
-This is a helper for calling downstream APIs with an access token. It creates an
-\code{\link[httr2:request]{httr2::request()}} for the given URL, attaches the right authorization header
-for the token type, and applies shinyOAuth's standard HTTP defaults.
+Build an \link[httr2:httr2]{httr2} request that uses the user's access token. Use this when
+you want to inspect or customize a request before sending it. To build and
+send in one step, use \code{\link[=perform_resource_req]{perform_resource_req()}}.
+}
+\details{
+Only send a token to an API you intend to authorize. The package applies its
+URL policy, timeouts, and redirect defaults. It supports Bearer authentication
+and tokens tied to a key (DPoP) or certificate (mTLS). For DPoP or mTLS,
+also supply \code{client} so the request uses the matching key or
+certificate.
 
-Use \code{\link[=perform_resource_req]{perform_resource_req()}} when you want shinyOAuth to also perform the request
-and handle DPoP nonce challenges for you (which \code{\link[httr2:req_perform]{httr2::req_perform()}}
-would not do on its own).
+Managed Authorization credentials cannot be combined with an \code{access_token}
+query parameter or form field. Inspection covers URL/query inputs and prebuilt
+httr2 form, raw and string bodies labelled \code{application/x-www-form-urlencoded}.
+JSON business fields are unaffected. File, multipart and streaming bodies are
+not parsed; callers must ensure these contain no additional OAuth credential
+transport. Later request changes outside these helpers require a new check.
 }
 \section{DPoP note}{
 
 DPoP proofs bind the current HTTP method and target URI (without query or
-fragment). Adding query parameters after \code{\link[=resource_req]{resource_req()}} is fine, but
-changing the method, scheme, host, or path invalidates the proof.
+fragment). Use the \code{query} argument to preserve encoded resource paths;
+external URL modifiers can decode reserved path characters. Changing the
+method, scheme, host, or path invalidates the proof.
 }
 
 \examples{
 # Make request using OAuthToken object
 # (code is not run because it requires a real token from user interaction)
 if (interactive()) {
-  # Get an OAuthToken
-  # (typically provided as reactive return value by `oauth_module_server()`)
-  token <- OAuthToken()
+  # Inside reactive server code, after login has succeeded:
+  token <- auth[["token"]]
 
   # Recommended for most callers: build + perform in one step.
   response <- perform_resource_req(
@@ -108,7 +134,8 @@ if (interactive()) {
     query = list(limit = 5)
   )
 
-  httr2::req_dry_run(request)
+  # Inspect request settings without printing authentication headers.
+  # httr2::req_perform(request) sends it when ready.
 
   # Or start from your own httr2 request and still let shinyOAuth perform it
   # so DPoP nonce retries remain available.
@@ -117,5 +144,14 @@ if (interactive()) {
     httr2::req_url_query(limit = 5)
 
   response <- perform_resource_req(token, custom_request)
+
+  # Constrain dynamic URLs before attaching a token. check_url alone does not
+  # restrict HTTPS hosts unless a global allowed_hosts policy is configured.
+  response <- perform_resource_req(
+    token,
+    input[["resource_url"]],
+    resource_hosts = "api.example.com",
+    follow_redirect = FALSE
+  )
 }
 }

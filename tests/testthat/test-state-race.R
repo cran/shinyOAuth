@@ -39,16 +39,16 @@ test_that("state store is single-use; second callback cannot reuse same state", 
   url <- shinyOAuth:::prepare_call(client, browser_token = tok)
   enc_payload <- parse_query_param(url, "state")
   payload <- shinyOAuth:::state_decrypt_gcm(enc_payload, key = client@state_key)
-  st <- payload$state
+  st <- payload[["state"]]
 
   # Simulate first retrieval (like handle_callback) which removes from store
   key <- shinyOAuth:::state_cache_key(st)
-  ssv1 <- client@state_store$get(key, missing = NULL)
+  ssv1 <- client@state_store[["get"]](key, missing = NULL)
   expect_type(ssv1, "list")
-  client@state_store$remove(key)
+  client@state_store[["remove"]](key)
 
   # Second retrieval should fail (race/double-submit defense)
-  ssv2 <- client@state_store$get(key, missing = NULL)
+  ssv2 <- client@state_store[["get"]](key, missing = NULL)
   expect_null(ssv2)
 })
 
@@ -58,14 +58,14 @@ test_that("browser token mismatch triggers state error without deleting unrelate
   url <- shinyOAuth:::prepare_call(client, browser_token = tok)
   enc_payload <- parse_query_param(url, "state")
   payload <- shinyOAuth:::state_decrypt_gcm(enc_payload, key = client@state_key)
-  st <- payload$state
+  st <- payload[["state"]]
   key <- shinyOAuth:::state_cache_key(st)
 
   # Use wrong browser token
   wrong_tok <- paste(rep("cd", 64), collapse = "")
 
   # Make sure entry exists before
-  expect_true(key %in% client@state_store$keys())
+  expect_true(key %in% client@state_store[["keys"]]())
 
   # Call internal browser_token validator path to produce a state error
   expect_error(
@@ -74,7 +74,7 @@ test_that("browser token mismatch triggers state error without deleting unrelate
       shinyOAuth:::validate_browser_token(wrong_tok)
       if (
         !identical(
-          client@state_store$get(key, missing = NULL)$browser_token,
+          client@state_store[["get"]](key, missing = NULL)[["browser_token"]],
           wrong_tok
         )
       ) {
@@ -85,5 +85,5 @@ test_that("browser token mismatch triggers state error without deleting unrelate
   )
 
   # Ensure our key still exists (not deleted by mismatch path in this unit test scope)
-  expect_true(key %in% client@state_store$keys())
+  expect_true(key %in% client@state_store[["keys"]]())
 })

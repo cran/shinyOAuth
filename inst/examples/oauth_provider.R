@@ -30,7 +30,8 @@ github_provider <- oauth_provider_github()
 google_provider <- oauth_provider_google()
 
 # Microsoft preconfigured provider
-# See `?oauth_provider_microsoft` for example using a custom tenant ID
+# For a complete app using a custom tenant ID, see:
+# https://lukakoning.github.io/shinyOAuth/reference/oauth_provider_microsoft.html
 
 # Spotify preconfigured provider
 spotify_provider <- oauth_provider_spotify()
@@ -44,6 +45,7 @@ if (interactive()) {
 # Keycloak
 # (requires configured Keycloak realm; example below is therefore not run)
 if (interactive()) {
+  options(shinyOAuth.allow_insecure_oidc_loopback = TRUE)
   oauth_provider_keycloak(base_url = "http://localhost:8080", realm = "myrealm")
 }
 

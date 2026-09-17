@@ -25,17 +25,21 @@ test_that("validate_id_token still accepts valid JWS tokens (3 segments)", {
   now <- as.numeric(Sys.time())
 
   rsa <- openssl::rsa_keygen(bits = 2048)
-  priv_jwk_json <- jose::write_jwk(rsa)
+  priv_jwk_json <- write_test_jwk(rsa)
   priv_jwk <- jsonlite::fromJSON(priv_jwk_json, simplifyVector = TRUE)
-  pub_jwk <- list(kty = priv_jwk$kty, n = priv_jwk$n, e = priv_jwk$e)
-  pub_jwk$kid <- "rsa-jwe-test"
+  pub_jwk <- list(
+    kty = priv_jwk[["kty"]],
+    n = priv_jwk[["n"]],
+    e = priv_jwk[["e"]]
+  )
+  pub_jwk[["kid"]] <- "rsa-jwe-test"
 
   prov <- oauth_provider(
     name = "local-jwe",
     auth_url = paste0(base, "/auth"),
     token_url = paste0(base, "/token"),
     issuer = base,
-    allowed_algs = c("RS256")
+    id_token_allowed_algs = c("RS256")
   )
   cli <- oauth_client(
     provider = prov,
@@ -70,7 +74,7 @@ test_that("validate_id_token still accepts valid JWS tokens (3 segments)", {
     shinyOAuth:::validate_id_token(cli, id_token)
   )
 
-  expect_equal(result$sub, "user-jwe")
+  expect_equal(result[["sub"]], "user-jwe")
 })
 
 test_that("validate_id_token rejects JWE even when header looks like a valid JWT", {

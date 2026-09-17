@@ -36,10 +36,225 @@ provider_issuer_match <- function(provider = NULL) {
   match.arg(issuer_match, choices = c("url", "host", "none"))
 }
 
+#' Internal: resolve the effective explicit provider JWKS URI
+#'
+#' Reads `provider@jwks_uri` when a provider is available and otherwise returns
+#' `NA_character_`. Used by JWKS fetch and cache-key helpers so explicit JWKS
+#' overrides stay aligned with runtime network behavior.
+#'
+#' @param provider Optional [OAuthProvider] used to resolve the explicit JWKS
+#'   URI.
+#'
+#' @return A length-1 character string or `NA_character_`.
+#'
+#' @keywords internal
+#' @noRd
+provider_jwks_uri <- function(provider = NULL) {
+  if (is.null(provider)) {
+    return(NA_character_)
+  }
+
+  provider_value <- try(provider@jwks_uri, silent = TRUE)
+  if (
+    !inherits(provider_value, "try-error") &&
+      is_valid_string(provider_value)
+  ) {
+    return(provider_value)
+  }
+
+  NA_character_
+}
+
+#' Internal: fetch authorization server metadata for JWKS discovery
+#'
+#' Tries the RFC 8414 authorization-server metadata location first and then
+#' OpenID Connect-compatible well-known locations so generic OAuth/JARM issuers
+#' and legacy OIDC deployments can both surface `jwks_uri`.
+#'
+#' @param issuer Issuer base URL (must include scheme).
+#'
+#' @return Named list containing parsed metadata and the successful metadata URL.
+#'
+#' @keywords internal
+#' @noRd
+fetch_authorization_server_metadata <- function(issuer, tls_minimum = NULL) {
+  build_metadata_url <- function(suffix, legacy_append = FALSE) {
+    normalized_issuer <- rtrim_slash(issuer)
+    parsed <- httr2::url_parse(normalized_issuer)
+    host <- parsed[["hostname"]] %||% err_parse("Invalid issuer host")
+    if (grepl(":", host, fixed = TRUE) && !grepl("^\\[", host)) {
+      host <- paste0("[", host, "]")
+    }
+
+    authority <- paste0(parsed[["scheme"]], "://", host)
+    port <- parsed[["port"]] %||% ""
+    if (nzchar(port)) {
+      authority <- paste0(authority, ":", port)
+    }
+
+    # Preserve escaped bytes and empty path segments in issuer identifiers.
+    path <- url_raw_path(normalized_issuer)
+    if (identical(path, "/")) {
+      path <- ""
+    }
+
+    if (isTRUE(legacy_append) || !nzchar(path)) {
+      return(paste0(
+        normalized_issuer,
+        "/.well-known/",
+        suffix
+      ))
+    }
+
+    paste0(authority, "/.well-known/", suffix, path)
+  }
+
+  targets <- list(
+    list(
+      source = "oauth_authorization_server",
+      url = build_metadata_url("oauth-authorization-server")
+    ),
+    list(
+      source = "openid_configuration",
+      url = build_metadata_url("openid-configuration")
+    ),
+    list(
+      source = "openid_configuration_legacy",
+      url = build_metadata_url("openid-configuration", legacy_append = TRUE)
+    )
+  )
+  target_urls <- vapply(targets, function(target) target[["url"]], character(1))
+  targets <- targets[!duplicated(target_urls)]
+
+  attempted_urls <- character(0)
+  last_response <- NULL
+  last_error_message <- NULL
+  for (target in targets) {
+    if (!is_ok_host(target[["url"]])) {
+      err_config("Authorization server metadata host or scheme is not allowed")
+    }
+    attempted_urls <- c(attempted_urls, target[["url"]])
+
+    resp <- try(
+      httr2::request(target[["url"]]) |>
+        add_req_defaults(tls_minimum = tls_minimum) |>
+        req_no_redirect() |>
+        req_with_retry(),
+      silent = TRUE
+    )
+    if (inherits(resp, "try-error")) {
+      cnd <- attr(resp, "condition", exact = TRUE)
+      while (!is.null(cnd) && !is.null(cnd[["parent"]])) {
+        cnd <- cnd[["parent"]]
+      }
+      if (allow_expose_error_body()) {
+        last_error_message <- sanitize_diagnostic_text(conditionMessage(cnd))
+      }
+      next
+    }
+
+    redirect_check <- try(
+      reject_redirect_response(resp, context = "jwks_discovery"),
+      silent = TRUE
+    )
+    if (inherits(redirect_check, "try-error")) {
+      if (allow_expose_error_body()) {
+        last_error_message <- sanitize_diagnostic_text(
+          conditionMessage(attr(redirect_check, "condition", exact = TRUE))
+        )
+      }
+      next
+    }
+
+    if (httr2::resp_is_error(resp)) {
+      last_response <- resp
+      next
+    }
+
+    # Once a metadata endpoint returns 2xx, fail closed on body/JSON
+    # validation errors. A valid generic OAuth metadata document may omit the
+    # optional jwks_uri, however, so continue to OIDC-compatible locations in
+    # that one case.
+    check_resp_body_size(resp, context = "jwks_discovery")
+    disc <- .discover_parse_json(resp)
+    if (!is.list(disc)) {
+      err_parse(c(
+        "x" = "Authorization server metadata JSON did not parse to an object"
+      ))
+    }
+    if (is.null(disc[["jwks_uri"]])) {
+      last_error_message <- paste0(
+        "Authorization server metadata missing jwks_uri at ",
+        otel_http_url_full(target[["url"]])
+      )
+      next
+    }
+
+    return(list(
+      document = disc,
+      metadata_url = target[["url"]],
+      metadata_source = target[["source"]]
+    ))
+  }
+
+  if (!is.null(last_response)) {
+    err_http(
+      c("x" = "Failed to fetch authorization server metadata"),
+      last_response,
+      context = list(
+        issuer = issuer,
+        discovery_url = utils::tail(attempted_urls, 1),
+        attempted_metadata_urls = attempted_urls
+      )
+    )
+  }
+
+  err_config(
+    c(
+      "x" = "Failed to fetch authorization server metadata",
+      "i" = paste0("Issuer: ", otel_http_url_full(issuer)),
+      "i" = paste0("Metadata locations attempted: ", length(attempted_urls)),
+      if (allow_expose_error_body() && is_valid_string(last_error_message)) {
+        stats::setNames(
+          paste0(
+            "Last failure: ",
+            last_error_message
+          ),
+          "i"
+        )
+      }
+    ),
+    context = list(
+      issuer = issuer,
+      attempted_metadata_urls = attempted_urls,
+      metadata_error = last_error_message
+    )
+  )
+}
+
+fetch_client_jwks <- function(client, ...) {
+  args <- list(...)
+  minimum <- client_tls_minimum(client)
+  if (!is.null(minimum)) {
+    args[["tls_minimum"]] <- minimum
+  }
+  do.call(fetch_jwks, args)
+}
+
+force_refresh_client_jwks <- function(client, ...) {
+  args <- list(...)
+  minimum <- client_tls_minimum(client)
+  if (!is.null(minimum)) {
+    args[["tls_minimum"]] <- minimum
+  }
+  do.call(force_refresh_provider_jwks, args)
+}
+
 #' Internal: Fetch JWKS for issuer (cachem-only)
 #'
-#' Attempts to download the OpenID Connect discovery document to locate the
-#' JWKS URI, then fetches and caches the key set. Used by ID token and signed
+#' Attempts to resolve an explicit provider `jwks_uri` or download
+#' authorization server metadata to locate the JWKS URI, then fetches and
+#' caches the key set. Used by ID token, JARM, Request Object, and signed
 #' UserInfo verification.
 #'
 #' Caching details:
@@ -76,11 +291,12 @@ fetch_jwks <- function(
   force_refresh = FALSE,
   pins = NULL,
   pin_mode = c("any", "all"),
-  provider = NULL
+  provider = NULL,
+  tls_minimum = NULL
 ) {
   # Duck-type the cache interface instead of enforcing cachem inheritance
-  has_get <- !is.null(jwks_cache$get) && is.function(jwks_cache$get)
-  has_set <- !is.null(jwks_cache$set) && is.function(jwks_cache$set)
+  has_get <- !is.null(jwks_cache[["get"]]) && is.function(jwks_cache[["get"]])
+  has_set <- !is.null(jwks_cache[["set"]]) && is.function(jwks_cache[["set"]])
   if (!isTRUE(has_get && has_set)) {
     err_config(c(
       "x" = "Invalid jwks_cache backend",
@@ -91,6 +307,7 @@ fetch_jwks <- function(
   pin_mode <- match.arg(pin_mode)
   now <- as.numeric(Sys.time())
   issuer_match <- provider_issuer_match(provider)
+  jwks_uri_override <- provider_jwks_uri(provider)
 
   # Extract host-policy from provider (if available)
   host_match <- FALSE
@@ -109,13 +326,20 @@ fetch_jwks <- function(
     pin_mode = pin_mode,
     issuer_match = issuer_match,
     jwks_host_issuer_match = host_match,
-    jwks_host_allow_only = allow_only
+    jwks_host_allow_only = allow_only,
+    jwks_uri_override = jwks_uri_override,
+    tls_minimum = tls_minimum
   )
-
-  entry <- jwks_cache$get(cache_key, missing = NULL)
+  entry <- jwks_cache[["get"]](cache_key, missing = NULL)
 
   cached_jwks_source_valid <- function(entry) {
-    cached_jwks_uri <- entry$jwks_uri %||% NULL
+    cached_jwks_uri <- entry[["jwks_uri"]] %||% NULL
+    if (
+      is_valid_string(jwks_uri_override) &&
+        !identical(cached_jwks_uri, jwks_uri_override)
+    ) {
+      return(FALSE)
+    }
     if (
       is.character(cached_jwks_uri) &&
         length(cached_jwks_uri) == 1L &&
@@ -138,7 +362,7 @@ fetch_jwks <- function(
       return(!inherits(host_ok, "try-error"))
     }
 
-    cached_jwks_host <- entry$jwks_uri_host %||% NULL
+    cached_jwks_host <- entry[["jwks_uri_host"]] %||% NULL
     if (
       is.character(cached_jwks_host) &&
         length(cached_jwks_host) == 1L &&
@@ -159,22 +383,36 @@ fetch_jwks <- function(
     FALSE
   }
 
-  # Rely entirely on cachem's own eviction policy (max_age). If an entry is
-  # present, treat it as fresh; if it has been evicted/expired, $get() will
-  # return NULL and we'll refetch. We still record fetched_at for diagnostics.
-  if (!force_refresh && !is.null(entry) && !is.null(entry$jwks)) {
+  # Both the backend's lifetime and the provider's HTTP freshness must permit
+  # reuse. Older entries without HTTP metadata retain the backend's policy.
+  fresh_until <- entry[["fresh_until"]] %||% Inf
+  if (
+    !force_refresh &&
+      !is.null(entry) &&
+      !is.null(entry[["jwks"]]) &&
+      is.numeric(fresh_until) &&
+      length(fresh_until) == 1L &&
+      !is.na(fresh_until) &&
+      now < fresh_until
+  ) {
     # Defense-in-depth: re-validate cached JWKS under current pinning policy
     ok <- try(
-      validate_jwks(entry$jwks, pins = pins, pin_mode = pin_mode),
+      validate_jwks(
+        entry[["jwks"]],
+        pins = pins,
+        pin_mode = pin_mode
+      ),
       silent = TRUE
     )
     if (inherits(ok, "try-error")) {
       # Evict incompatible/invalid cached entry and continue to refetch
-      if (!is.null(jwks_cache$remove) && is.function(jwks_cache$remove)) {
-        jwks_cache$remove(cache_key)
+      if (
+        !is.null(jwks_cache[["remove"]]) && is.function(jwks_cache[["remove"]])
+      ) {
+        jwks_cache[["remove"]](cache_key)
       }
     } else {
-      discovery_issuer <- entry$discovery_issuer
+      discovery_issuer <- entry[["discovery_issuer"]]
       if (
         is.character(discovery_issuer) &&
           length(discovery_issuer) == 1L &&
@@ -190,57 +428,63 @@ fetch_jwks <- function(
           silent = TRUE
         )
         if (inherits(issuer_ok, "try-error")) {
-          if (!is.null(jwks_cache$remove) && is.function(jwks_cache$remove)) {
-            jwks_cache$remove(cache_key)
+          if (
+            !is.null(jwks_cache[["remove"]]) &&
+              is.function(jwks_cache[["remove"]])
+          ) {
+            jwks_cache[["remove"]](cache_key)
           }
         } else {
           if (isTRUE(cached_jwks_source_valid(entry))) {
-            return(entry$jwks)
+            return(entry[["jwks"]])
           }
-          if (!is.null(jwks_cache$remove) && is.function(jwks_cache$remove)) {
-            jwks_cache$remove(cache_key)
+          if (
+            !is.null(jwks_cache[["remove"]]) &&
+              is.function(jwks_cache[["remove"]])
+          ) {
+            jwks_cache[["remove"]](cache_key)
           }
         }
       } else {
         if (isTRUE(cached_jwks_source_valid(entry))) {
-          return(entry$jwks)
+          return(entry[["jwks"]])
         }
-        if (!is.null(jwks_cache$remove) && is.function(jwks_cache$remove)) {
-          jwks_cache$remove(cache_key)
+        if (
+          !is.null(jwks_cache[["remove"]]) &&
+            is.function(jwks_cache[["remove"]])
+        ) {
+          jwks_cache[["remove"]](cache_key)
         }
       }
     }
   }
 
-  disco_url <- paste0(rtrim_slash(issuer), "/.well-known/openid-configuration")
-  resp <- httr2::request(disco_url) |>
-    add_req_defaults() |>
-    req_no_redirect() |>
-    req_with_retry()
-  # Security: reject redirect responses to prevent bypassing host validation
-  reject_redirect_response(resp, context = "jwks_discovery")
-  if (httr2::resp_is_error(resp)) {
-    err_http(
-      c("x" = "Failed to fetch OIDC discovery document"),
-      resp,
-      context = list(issuer = issuer)
-    )
-  }
-  check_resp_body_size(resp, context = "jwks_discovery")
-  disc <- .discover_parse_json(resp)
-  discovery_issuer <- validate_discovery_issuer(
-    issuer_input = issuer,
-    issuer_discovered = disc$issuer %||% NULL,
-    issuer_match = issuer_match
-  )
-  jwks_uri <- disc$jwks_uri %||%
-    {
-      err_parse(c("x" = "Discovery document missing jwks_uri"))
+  if (is_valid_string(jwks_uri_override)) {
+    discovery_issuer <- issuer
+    jwks_uri <- jwks_uri_override
+  } else {
+    metadata <- if (is.null(tls_minimum)) {
+      fetch_authorization_server_metadata(issuer)
+    } else {
+      fetch_authorization_server_metadata(issuer, tls_minimum = tls_minimum)
     }
+    disc <- metadata[["document"]]
+    discovery_issuer <- validate_discovery_issuer(
+      issuer_input = issuer,
+      issuer_discovered = disc[["issuer"]] %||% NULL,
+      issuer_match = issuer_match
+    )
+    jwks_uri <- disc[["jwks_uri"]] %||%
+      {
+        err_parse(c("x" = "Authorization server metadata missing jwks_uri"))
+      }
+  }
   if (!is_ok_host(jwks_uri)) {
     err_config(c(
-      "x" = "jwks_uri is not in an allowed host",
-      "!" = paste0("Value: ", jwks_uri),
+      protocol_diagnostic_message(
+        "jwks_uri is not in an allowed host",
+        jwks_uri
+      ),
       "i" = "See `?is_ok_host` to configure allowed hosts"
     ))
   }
@@ -256,7 +500,7 @@ fetch_jwks <- function(
   }
 
   jresp <- httr2::request(jwks_uri) |>
-    add_req_defaults() |>
+    add_req_defaults(tls_minimum = tls_minimum) |>
     req_no_redirect() |>
     req_with_retry()
   # Security: reject redirect responses to prevent bypassing host validation
@@ -285,16 +529,78 @@ fetch_jwks <- function(
     err_parse(c("x" = "JWKS JSON did not parse to an object"))
   }
   # Validate structure and (optionally) pin before caching
-  validate_jwks(jwks, pins = pins, pin_mode = pin_mode)
+  validate_jwks(jwks, pins = pins, pin_mode = pin_mode, wire = TRUE)
+  received_at <- as.numeric(Sys.time())
+  freshness <- jwks_http_freshness(jresp, now, received_at)
   new_entry <- list(
     jwks = jwks,
-    fetched_at = now,
+    fetched_at = received_at,
+    fresh_until = freshness[["fresh_until"]],
     jwks_uri = jwks_uri,
     jwks_uri_host = fetched_jwks_host,
     discovery_issuer = discovery_issuer
   )
-  jwks_cache$set(cache_key, new_entry)
+  if (isTRUE(freshness[["store"]])) {
+    jwks_cache[["set"]](cache_key, new_entry)
+  } else if (is.function(jwks_cache[["remove"]])) {
+    jwks_cache[["remove"]](cache_key)
+  } else {
+    # Custom caches need not implement remove; overwrite any earlier keys.
+    jwks_cache[["set"]](cache_key, list(fresh_until = 0))
+  }
   jwks
+}
+
+# Apply origin freshness to cached public key material (RFC 9111). A full fetch
+# revalidates stale/no-cache entries; no conditional-cache support is required.
+jwks_http_freshness <- function(resp, requested_at, received_at) {
+  directives <- trimws(strsplit(
+    tolower(httr2::resp_header(resp, "cache-control") %||% ""),
+    ",",
+    fixed = TRUE
+  )[[1]])
+  names <- trimws(sub("=.*$", "", directives))
+  store <- !("no-store" %in% names)
+  if (!store || "no-cache" %in% names) {
+    return(list(store = store, fresh_until = received_at))
+  }
+  date <- function(name) {
+    value <- httr2::resp_header(resp, name)
+    if (is.null(value)) {
+      return(NA_real_)
+    }
+    as.numeric(curl::parse_date(value))
+  }
+  date_value <- date("date")
+  if (!is.finite(date_value)) {
+    date_value <- received_at
+  }
+  max_age <- directives[names == "max-age"]
+  lifetime <- Inf
+  if (length(max_age)) {
+    value <- trimws(sub("^[^=]*=", "", max_age))
+    value <- sub('^"([0-9]+)"$', "\\1", value)
+    lifetime <- if (length(value) == 1L && grepl("^[0-9]+$", value)) {
+      as.numeric(value)
+    } else {
+      0
+    }
+  } else if (!is.null(httr2::resp_header(resp, "expires"))) {
+    expires <- date("expires")
+    lifetime <- if (is.finite(expires)) max(0, expires - date_value) else 0
+  }
+  age_value <- httr2::resp_header(resp, "age") %||% "0"
+  age <- if (grepl("^[0-9]+$", age_value)) as.numeric(age_value) else Inf
+  current_age <- max(
+    0,
+    received_at - date_value,
+    age + received_at - requested_at
+  )
+  remaining <- lifetime - current_age
+  if (is.na(remaining)) {
+    remaining <- 0
+  }
+  list(store = TRUE, fresh_until = received_at + max(0, remaining))
 }
 
 #' Internal: Rate-limit forced JWKS refresh attempts
@@ -318,6 +624,7 @@ fetch_jwks <- function(
 #' @param jwks_host_issuer_match Whether the JWKS host must match the issuer
 #'   host.
 #' @param jwks_host_allow_only Optional explicitly allowed JWKS host.
+#' @param jwks_uri_override Optional explicit provider JWKS URI.
 #' Used by `fetch_jwks()` to throttle forced JWKS refreshes triggered by new
 #' or unexpected key IDs.
 #' @return `TRUE` when a forced refresh is allowed and recorded; otherwise
@@ -333,7 +640,9 @@ jwks_force_refresh_allowed <- function(
   now = as.numeric(Sys.time()),
   issuer_match = "url",
   jwks_host_issuer_match = FALSE,
-  jwks_host_allow_only = NA_character_
+  jwks_host_allow_only = NA_character_,
+  jwks_uri_override = NA_character_,
+  tls_minimum = NULL
 ) {
   pin_mode <- match.arg(pin_mode)
   issuer_match <- match.arg(issuer_match, choices = c("url", "host", "none"))
@@ -351,11 +660,33 @@ jwks_force_refresh_allowed <- function(
     pin_mode = pin_mode,
     issuer_match = issuer_match,
     jwks_host_issuer_match = jwks_host_issuer_match,
-    jwks_host_allow_only = jwks_host_allow_only
+    jwks_host_allow_only = jwks_host_allow_only,
+    jwks_uri_override = jwks_uri_override,
+    tls_minimum = tls_minimum
   )
   throttle_key <- paste0(base_key, "xfr")
 
-  last <- jwks_cache$get(throttle_key, missing = NULL)
+  if (identical(min_interval, 0) || identical(min_interval, 0L)) {
+    return(TRUE)
+  }
+
+  # Shared caches must claim the throttle window atomically. A backend-provided
+  # set-if-absent primitive both elects one worker and expires the claim after
+  # the interval. Fail closed when a potentially shared backend lacks it.
+  set_if_absent <- jwks_cache[["set_if_absent"]] %||% NULL
+  if (is.function(set_if_absent)) {
+    claimed <- try(
+      set_if_absent(throttle_key, now, ttl = min_interval),
+      silent = TRUE
+    )
+    return(!inherits(claimed, "try-error") && isTRUE(claimed))
+  }
+  if (!inherits(jwks_cache, "cache_mem")) {
+    return(FALSE)
+  }
+
+  # cache_mem is process-local and R evaluates these operations serially.
+  last <- jwks_cache[["get"]](throttle_key, missing = NULL)
   if (is.numeric(last) && length(last) == 1L && !is.na(last)) {
     if ((now - last) < min_interval) {
       return(FALSE)
@@ -363,8 +694,68 @@ jwks_force_refresh_allowed <- function(
   }
 
   # Record the attempt time before any network work happens.
-  jwks_cache$set(throttle_key, now)
+  jwks_cache[["set"]](throttle_key, now)
   TRUE
+}
+
+#' Force-refresh provider JWKS when the shared throttle allows it
+#'
+#' Used after a key miss or signature failure so key rotation can be recovered
+#' without allowing unbounded network fetches.
+#'
+#' @param issuer Issuer URL.
+#' @param jwks_cache JWKS cache backend.
+#' @param pins Optional pinned JWK thumbprints.
+#' @param pin_mode Pinning mode.
+#' @param provider Optional OAuth provider carrying issuer and host policy.
+#' @param min_interval Minimum seconds between forced refreshes.
+#' @return Refreshed JWKS, or `NULL` when the refresh is rate-limited.
+#' @keywords internal
+#' @noRd
+force_refresh_provider_jwks <- function(
+  issuer,
+  jwks_cache,
+  pins = NULL,
+  pin_mode = c("any", "all"),
+  provider = NULL,
+  min_interval = 30,
+  tls_minimum = NULL
+) {
+  pin_mode <- match.arg(pin_mode)
+  host_match <- isTRUE(try(provider@jwks_host_issuer_match, silent = TRUE))
+  allow_only <- try(provider@jwks_host_allow_only, silent = TRUE)
+  if (inherits(allow_only, "try-error")) {
+    allow_only <- NA_character_
+  }
+
+  allowed <- jwks_force_refresh_allowed(
+    issuer,
+    jwks_cache,
+    pins = pins,
+    pin_mode = pin_mode,
+    min_interval = min_interval,
+    issuer_match = provider_issuer_match(provider),
+    jwks_host_issuer_match = host_match,
+    jwks_host_allow_only = allow_only,
+    jwks_uri_override = provider_jwks_uri(provider),
+    tls_minimum = tls_minimum
+  )
+  if (!isTRUE(allowed)) {
+    return(NULL)
+  }
+
+  args <- list(
+    issuer,
+    jwks_cache,
+    force_refresh = TRUE,
+    pins = pins,
+    pin_mode = pin_mode,
+    provider = provider
+  )
+  if (!is.null(tls_minimum)) {
+    args[["tls_minimum"]] <- tls_minimum
+  }
+  do.call(fetch_jwks, args)
 }
 
 #' Internal: Compute cache key for JWKS entries
@@ -412,7 +803,7 @@ normalize_jwks_cache_host_patterns <- function(patterns) {
 #' relaxed provider or looser runtime allowlist populates the cache and a
 #' stricter configuration skips validation on hit.
 #' Used by `fetch_jwks()` and `jwks_force_refresh_allowed()` so cached JWKS
-#' data and refresh throttles stay scoped to the same issuer and host policy.
+#' data and refresh throttles stay scoped to the same issuer, host and TLS policy.
 #'
 #' @param issuer Issuer URL.
 #' @param pins Optional vector of pinned JWK thumbprints.
@@ -421,6 +812,7 @@ normalize_jwks_cache_host_patterns <- function(patterns) {
 #' @param jwks_host_issuer_match Whether the JWKS host must match the issuer
 #'   host.
 #' @param jwks_host_allow_only Optional explicitly allowed JWKS host.
+#' @param jwks_uri_override Optional explicit provider JWKS URI.
 #' @param allowed_hosts Optional effective value of
 #'   `options(shinyOAuth.allowed_hosts)`.
 #' @param allowed_non_https_hosts Optional effective value of
@@ -435,11 +827,13 @@ jwks_cache_key <- function(
   issuer_match = "url",
   jwks_host_issuer_match = FALSE,
   jwks_host_allow_only = NA_character_,
+  jwks_uri_override = NA_character_,
   allowed_hosts = getOption("shinyOAuth.allowed_hosts", default = NULL),
   allowed_non_https_hosts = getOption(
     "shinyOAuth.allowed_non_https_hosts",
     default = c("localhost", "127.0.0.1", "::1", "[::1]")
-  )
+  ),
+  tls_minimum = NULL
 ) {
   pin_mode <- match.arg(pin_mode)
   issuer_match <- match.arg(issuer_match, choices = c("url", "host", "none"))
@@ -458,6 +852,15 @@ jwks_cache_key <- function(
       nzchar(jwks_host_allow_only)
   ) {
     allow_only <- tolower(trimws(jwks_host_allow_only))
+  }
+  jwks_uri_override_norm <- ""
+  if (
+    is.character(jwks_uri_override) &&
+      length(jwks_uri_override) == 1L &&
+      !is.na(jwks_uri_override) &&
+      nzchar(jwks_uri_override)
+  ) {
+    jwks_uri_override_norm <- trimws(jwks_uri_override)
   }
   allowed_hosts_norm <- normalize_jwks_cache_host_patterns(allowed_hosts)
   allowed_non_https_norm <- normalize_jwks_cache_host_patterns(
@@ -478,6 +881,8 @@ jwks_cache_key <- function(
     "|",
     allow_only,
     "|",
+    jwks_uri_override_norm,
+    "|",
     allowed_hosts_norm,
     "|",
     allowed_non_https_norm
@@ -485,7 +890,15 @@ jwks_cache_key <- function(
   ch_raw <- openssl::sha256(charToRaw(cfg_str))
   ch <- paste0(sprintf("%02x", as.integer(ch_raw)), collapse = "")
   # Use an alphanumeric delimiter to satisfy cache key constraints while keeping clarity
-  paste0(ih, "x", ch)
+  key <- paste0(ih, "x", ch)
+  if (!is.null(tls_minimum)) {
+    policy <- resolve_tls_policy(minimum = tls_minimum)
+    if (!is.null(policy[["problem"]])) {
+      err_config(policy[["problem"]])
+    }
+    key <- paste0(key, "tls", gsub(".", "", tls_minimum, fixed = TRUE))
+  }
+  key
 }
 
 #' Internal: ensure JWKS host aligns with issuer
@@ -503,6 +916,8 @@ jwks_cache_key <- function(
 #' @param issuer Issuer URL.
 #' @param jwks_uri JWKS URI to validate.
 #' @param provider Optional provider object carrying JWKS host policy.
+#' @param check_host Require issuer-host equality when no pin is set.
+#' @param pinned_host Optional exact JWKS host for pre-construction discovery.
 #' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
 #'   configuration error.
 #' @keywords internal
@@ -510,14 +925,14 @@ jwks_cache_key <- function(
 validate_jwks_host_matches_issuer <- function(
   issuer,
   jwks_uri,
-  provider = NULL
+  provider = NULL,
+  check_host = FALSE,
+  pinned_host = NA_character_
 ) {
   issuer_host <- parse_url_host(issuer, "issuer")
   jwks_host <- parse_url_host(jwks_uri, "jwks_uri")
 
   # Default relaxed behavior unless provider opts in
-  check_host <- FALSE
-  pinned_host <- NA_character_
   if (!is.null(provider)) {
     # Best-effort access without hard S7 dependency here
     check_host <- isTRUE(try(provider@jwks_host_issuer_match, silent = TRUE))

@@ -1,43 +1,50 @@
 if (
   # Example requires configured Microsoft Entra ID (Azure AD) tenant:
-  nzchar(Sys.getenv("MS_TENANT")) && interactive() && requireNamespace("later")
+  nzchar(Sys.getenv("MS_TENANT")) &&
+    interactive() &&
+    requireNamespace("later", quietly = TRUE)
 ) {
   library(shiny)
   library(shinyOAuth)
 
-  # Configure provider and client (Microsoft Entra ID with your tenant
+  # Configure provider and client (Microsoft Entra ID with your tenant)
   client <- oauth_client(
     provider = oauth_provider_microsoft(
       # Provide your own tenant ID here (set as environment variable MS_TENANT)
       tenant = Sys.getenv("MS_TENANT")
     ),
-    # Default Azure CLI app ID (public client; activated in many tenants):
+    # Azure CLI public-client app ID; the tenant must permit this app.
+    # For your deployed app, use your own registration and redirect URI:
     client_id = "04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+    client_secret = "",
     redirect_uri = "http://localhost:8100",
     scopes = c("openid", "profile", "email")
   )
 
   # UI
-  ui <- fluidPage(
-    use_shinyOAuth(),
-    h3("OAuth demo (Microsoft Entra ID)"),
-    uiOutput("oauth_error"),
-    tags$hr(),
-    h4("Auth object (summary)"),
-    verbatimTextOutput("auth_print"),
-    tags$hr(),
-    h4("User info"),
-    verbatimTextOutput("user_info")
+  ui <- oauth_ui(
+    fluidPage(
+      h3("OAuth demo (Microsoft Entra ID)"),
+      uiOutput("oauth_error"),
+      tags[["hr"]](),
+      h4("Auth object (summary)"),
+      verbatimTextOutput("auth_print"),
+      tags[["hr"]](),
+      h4("User info"),
+      verbatimTextOutput("user_info")
+    ),
+    id = "auth",
+    client = client
   )
 
   # Server
   server <- function(input, output, session) {
     auth <- oauth_module_server("auth", client)
 
-    output$auth_print <- renderText({
-      authenticated <- auth$authenticated
-      tok <- auth$token
-      err <- auth$error
+    output[["auth_print"]] <- renderText({
+      authenticated <- auth[["authenticated"]]
+      tok <- auth[["token"]]
+      err <- auth[["error"]]
 
       paste0(
         "Authenticated?",
@@ -53,7 +60,7 @@ if (
         !is.null(tok),
         "\n",
         "Has refresh token: ",
-        !is.null(tok) && isTRUE(nzchar(tok@refresh_token %||% "")),
+        !is.null(tok) && isTRUE(nzchar(tok@refresh_token)),
         "\n",
         "Has ID token: ",
         !is.null(tok) && !is.na(tok@id_token),
@@ -63,31 +70,31 @@ if (
       )
     })
 
-    output$user_info <- renderPrint({
-      req(auth$token)
-      auth$token@userinfo
+    output[["user_info"]] <- renderPrint({
+      req(auth[["authenticated"]])
+      auth[["token"]]@userinfo
     })
 
     observeEvent(
-      list(auth$error, auth$error_description),
+      list(auth[["error"]], auth[["error_description"]]),
       {
-        if (interactive() && !is.null(auth$error_description)) {
+        if (interactive() && !is.null(auth[["error_description"]])) {
           rlang::inform(c(
             "OAuth error details",
-            "i" = paste0("error: ", auth$error),
-            "i" = paste0("error_description: ", auth$error_description)
+            "i" = paste0("error: ", auth[["error"]]),
+            "i" = paste0("error_description: ", auth[["error_description"]])
           ))
         }
       },
       ignoreInit = TRUE
     )
 
-    output$oauth_error <- renderUI({
-      if (is.null(auth$error)) {
+    output[["oauth_error"]] <- renderUI({
+      if (is.null(auth[["error"]])) {
         return(NULL)
       }
 
-      msg <- if (identical(auth$error, "access_denied")) {
+      msg <- if (identical(auth[["error"]], "access_denied")) {
         "Sign-in was canceled or denied. Please try again."
       } else {
         "Authentication failed. Please try again."

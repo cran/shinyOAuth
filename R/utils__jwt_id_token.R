@@ -57,7 +57,7 @@ validate_id_token <- function(
 
   prov <- client@provider
   issuer <- prov@issuer
-  allowed_algs <- toupper(
+  allowed_algs <- vapply(
     prov@allowed_algs %||%
       c(
         "RS256",
@@ -66,8 +66,11 @@ validate_id_token <- function(
         "ES256",
         "ES384",
         "ES512",
+        "Ed25519",
         "EdDSA"
-      )
+      ),
+    canonicalize_jws_alg,
+    character(1)
   )
   leeway <- prov@leeway %||% getOption("shinyOAuth.leeway", 30)
   jwks_cache <- prov@jwks_cache
@@ -93,10 +96,30 @@ validate_id_token <- function(
   # RFC 7515 s4.1.11: also reject critical header parameters we do not support.
   enforce_inbound_jwt_header_policy(header_fields, err_id_token)
 
-  alg <- toupper(header_fields$alg)
-  kid <- header_fields$kid
+  alg <- header_fields[["alg"]]
+  kid <- header_fields[["kid"]]
+  supported_algs <- c(
+    "RS256",
+    "RS384",
+    "RS512",
+    "ES256",
+    "ES384",
+    "ES512",
+    "Ed25519",
+    "EdDSA",
+    "HS256",
+    "HS384",
+    "HS512",
+    "none"
+  )
+  if (!(alg %in% supported_algs)) {
+    err_id_token(protocol_diagnostic_message("Unsupported JWT alg", alg))
+  }
   if (!isTRUE(skip_signature) && !(alg %in% allowed_algs)) {
-    err_id_token(paste0("JWT alg not allowed by provider: ", header_fields$alg))
+    err_id_token(paste0(
+      "JWT alg not allowed by provider: ",
+      header_fields[["alg"]]
+    ))
   }
 
   parsed_payload <- tryCatch(
@@ -124,17 +147,19 @@ validate_id_token <- function(
           "ES256",
           "ES384",
           "ES512",
-          "EDDSA"
+          "Ed25519",
+          "EdDSA"
         )
     ) {
-      jwks <- fetch_jwks(
+      jwks <- fetch_client_jwks(
+        client,
         issuer,
         jwks_cache,
         pins = pins,
         pin_mode = pin_mode,
         provider = prov
       )
-      verified <- FALSE
+      did_force_refresh <- FALSE
       # Determine candidate keys with safer kid handling
       if (!is.null(kid)) {
         # If header has kid, try only matching keys. If none match, refresh JWKS once and try again.
@@ -145,7 +170,6 @@ validate_id_token <- function(
           pins = pins
         )
         if (length(kid_keys) == 0L) {
-          did_force_refresh <- FALSE
           if (
             isTRUE(jwks_force_refresh_allowed(
               issuer,
@@ -161,11 +185,14 @@ validate_id_token <- function(
               jwks_host_allow_only = {
                 ao <- try(prov@jwks_host_allow_only, silent = TRUE)
                 if (inherits(ao, "try-error")) NA_character_ else ao
-              }
+              },
+              jwks_uri_override = provider_jwks_uri(prov),
+              tls_minimum = client_tls_minimum(client)
             ))
           ) {
             did_force_refresh <- TRUE
-            jwks <- fetch_jwks(
+            jwks <- fetch_client_jwks(
+              client,
               issuer,
               jwks_cache,
               force_refresh = TRUE,
@@ -199,38 +226,60 @@ validate_id_token <- function(
         )
       }
 
-      keys <- filter_jwks_for_alg(keys, alg)
-      if (length(keys) == 0L) {
-        err_id_token("No compatible JWKS keys for alg")
-      }
+      keys <- filter_jwks_for_alg(keys, alg, allowed_algs)
       keys <- filter_microsoft_jwks_for_token_issuer(
         keys,
         provider_issuer = issuer,
-        token_issuer = parsed_payload$iss %||% NULL,
-        token_tid = issuer_expectation$token_tid
+        token_issuer = parsed_payload[["iss"]] %||% NULL,
+        token_tid = issuer_expectation[["token_tid"]]
       )
-      if (length(keys) == 0L && isTRUE(issuer_expectation$enforce_key_issuer)) {
-        err_id_token("No Microsoft JWKS key matches token issuer scope")
-      }
 
-      # Attempt verification only with the selected keys (no fallback to all when kid is present)
-      for (jk in keys) {
-        pub <- try(jwk_to_pubkey(jk), silent = TRUE)
-        if (inherits(pub, "try-error")) {
-          next
-        }
-        if (isTRUE(verify_jws_signature_no_time(id_token, pub, alg))) {
-          verified <- TRUE
-          if (identical(alg, "EDDSA")) {
-            verified_eddsa_curve <- resolve_verified_eddsa_curve(
-              jwk = jk,
-              key = pub
-            )
-          }
-          break
+      # A provider may rotate key material while retaining the same kid. If
+      # cached candidates do not verify, refresh once under the shared throttle
+      # and retry with only the newly selected candidates.
+      verified_key <- verify_jwt_with_jwks(id_token, keys, alg)
+      if (is.null(verified_key) && !isTRUE(did_force_refresh)) {
+        refreshed_jwks <- force_refresh_client_jwks(
+          client,
+          issuer,
+          jwks_cache,
+          pins = pins,
+          pin_mode = pin_mode,
+          provider = prov
+        )
+        if (!is.null(refreshed_jwks)) {
+          did_force_refresh <- TRUE
+          keys <- select_candidate_jwks(
+            refreshed_jwks,
+            header_alg = alg,
+            kid = kid,
+            pins = pins
+          )
+          keys <- filter_jwks_for_alg(keys, alg, allowed_algs)
+          keys <- filter_microsoft_jwks_for_token_issuer(
+            keys,
+            provider_issuer = issuer,
+            token_issuer = parsed_payload[["iss"]] %||% NULL,
+            token_tid = issuer_expectation[["token_tid"]]
+          )
+          verified_key <- verify_jwt_with_jwks(id_token, keys, alg)
         }
       }
-      if (!isTRUE(verified)) err_id_token("ID token signature invalid")
+      if (is.null(verified_key)) {
+        if (
+          length(keys) == 0L &&
+            isTRUE(issuer_expectation[["enforce_key_issuer"]])
+        ) {
+          err_id_token("No Microsoft JWKS key matches token issuer scope")
+        }
+        err_id_token("ID token signature invalid")
+      }
+      if (identical(alg, "EdDSA")) {
+        verified_eddsa_curve <- resolve_verified_eddsa_curve(
+          jwk = verified_key[["jwk"]],
+          key = verified_key[["key"]]
+        )
+      }
     } else if (alg %in% c("HS256", "HS384", "HS512")) {
       # Gate HMAC verification behind an explicit, opt-in option
       allow_hs <- isTRUE(getOption("shinyOAuth.allow_hs", FALSE))
@@ -269,7 +318,10 @@ validate_id_token <- function(
         err_id_token("ID token HMAC invalid")
       }
     } else {
-      err_id_token(paste0("Unsupported JWT alg: ", header$alg))
+      err_id_token(paste0(
+        "Unsupported JWT alg: ",
+        header_fields[["alg"]]
+      ))
     }
   }
 
@@ -277,13 +329,18 @@ validate_id_token <- function(
   # OIDC Core §3.1.3.7 step 2: iss MUST exactly match the Issuer Identifier.
   # For Microsoft tenant-independent metadata, the effective issuer is derived
   # from the token's GUID tid claim.
-  if (!is_valid_string(payload$iss)) {
+  if (!is_valid_string(payload[["iss"]])) {
     err_id_token("Issuer mismatch/invalid")
   }
-  if (!identical(payload$iss, issuer_expectation$expected_issuer)) {
+  if (
+    !identical(
+      payload[["iss"]],
+      issuer_expectation[["expected_issuer"]]
+    )
+  ) {
     err_id_token("Issuer mismatch/invalid")
   }
-  aud <- payload$aud
+  aud <- normalize_jwt_audience(payload[["aud"]])
   # OIDC: aud MAY be a string or an array of strings. Accept length >= 1.
   if (
     !(is.character(aud) &&
@@ -296,21 +353,33 @@ validate_id_token <- function(
   if (!(client_id %in% aud)) {
     err_id_token("Audience does not include client_id")
   }
-  if (!is_valid_string(payload$sub)) {
-    err_id_token("ID token missing sub claim")
+  if (!all(aud %in% c(client_id, client@trusted_id_token_audiences))) {
+    err_id_token("ID token contains untrusted additional audiences")
   }
+  if (!is_valid_oidc_sub(payload[["sub"]])) {
+    err_id_token("ID token sub claim must be 1 to 255 ASCII characters")
+  }
+  payload <- normalize_authenticated_id_token_claims(
+    payload,
+    issuer,
+    signature_verified = !isTRUE(skip_signature)
+  )
+  validate_oidc_standard_claim_types(payload, err_id_token, "ID token")
   # OIDC Core 12.2: During refresh, sub MUST match the original ID token's sub
-  if (is_valid_string(expected_sub) && !identical(payload$sub, expected_sub)) {
+  if (
+    is_valid_string(expected_sub) &&
+      !identical(payload[["sub"]], expected_sub)
+  ) {
     err_id_token("ID token sub claim does not match original (OIDC 12.2)")
   }
-  if (is.null(payload$exp)) {
+  if (is.null(payload[["exp"]])) {
     err_id_token("ID token missing exp claim")
   }
   # Validate temporal claims are single, finite numerics before arithmetic
-  if (!jwt_is_single_finite_number(payload$exp)) {
+  if (!jwt_is_single_finite_number(payload[["exp"]])) {
     err_id_token("exp claim must be a single finite number")
   }
-  exp_val <- as.numeric(payload$exp)
+  exp_val <- as.numeric(payload[["exp"]])
 
   # Use integer seconds to minimize flakiness vs. boundary tests
   now <- floor(as.numeric(Sys.time()))
@@ -318,34 +387,40 @@ validate_id_token <- function(
   if (!is.finite(lwe) || is.na(lwe) || length(lwe) != 1) {
     lwe <- 0
   }
-  if (exp_val < (now - lwe)) {
+  if (exp_val <= (now - lwe)) {
     err_id_token("ID token expired")
   }
   # OIDC Core requires iat to be present on ID Tokens
-  if (is.null(payload$iat)) {
+  if (is.null(payload[["iat"]])) {
     err_id_token("ID token missing iat claim")
   }
-  if (!jwt_is_single_finite_number(payload$iat)) {
+  if (!jwt_is_single_finite_number(payload[["iat"]])) {
     err_id_token("iat claim must be a single finite number when present")
   }
-  iat_val <- as.numeric(payload$iat)
+  iat_val <- as.numeric(payload[["iat"]])
+  if (iat_val > exp_val) {
+    err_id_token("ID token iat claim must not be after exp")
+  }
   if (iat_val > (now + lwe)) {
     err_id_token("ID token issued in the future")
   }
-  # OIDC Core §3.1.3.7 rule 9: reject tokens with unreasonably long lifetimes.
-  # A misconfigured or malicious provider could issue an ID token valid for years.
+  # Package hardening: reject tokens with unreasonably long lifetimes.
+  # OIDC Core §3.1.3.7 rule 9 requires exp to be in the future, but does not
+  # prescribe an exp - iat cap. A misconfigured or malicious provider could
+  # otherwise issue an ID token valid for years.
   max_lifetime <- getOption("shinyOAuth.max_id_token_lifetime", 86400)
   if (
-    is.numeric(max_lifetime) &&
-      length(max_lifetime) == 1L &&
-      is.finite(max_lifetime)
+    !is.numeric(max_lifetime) ||
+      is.complex(max_lifetime) ||
+      length(max_lifetime) != 1L ||
+      is.na(max_lifetime) ||
+      max_lifetime <= 0
   ) {
-    if (max_lifetime <= 0) {
-      err_config(c(
-        "x" = "shinyOAuth.max_id_token_lifetime must be a positive number",
-        "i" = paste0("Got: ", max_lifetime)
-      ))
-    }
+    err_config(
+      "shinyOAuth.max_id_token_lifetime must be a single positive numeric value or Inf"
+    )
+  }
+  if (is.finite(max_lifetime)) {
     if ((exp_val - iat_val) > max_lifetime) {
       err_id_token(c(
         "x" = "ID token lifetime exceeds max_id_token_lifetime",
@@ -364,11 +439,14 @@ validate_id_token <- function(
       ))
     }
   }
-  if (!is.null(payload$nbf)) {
-    if (!jwt_is_single_finite_number(payload$nbf)) {
+  if ("nbf" %in% names(payload)) {
+    if (!jwt_is_single_finite_number(payload[["nbf"]])) {
       err_id_token("nbf claim must be a single finite number when present")
     }
-    nbf_val <- as.numeric(payload$nbf)
+    nbf_val <- as.numeric(payload[["nbf"]])
+    if (nbf_val > exp_val) {
+      err_id_token("ID token nbf claim must not be after exp")
+    }
     # Token is not yet valid when the not-before time is beyond allowed clock skew.
     # Use a > comparison for consistency with exp/iat boundary handling.
     if (nbf_val > (now + lwe)) {
@@ -376,28 +454,39 @@ validate_id_token <- function(
     }
   }
   if (is_valid_string(expected_nonce)) {
-    if (is.null(payload$nonce)) {
+    if (is.null(payload[["nonce"]])) {
       err_id_token("ID token missing nonce claim")
     }
-    if (!identical(payload$nonce, expected_nonce)) {
+    if (!identical(payload[["nonce"]], expected_nonce)) {
       err_id_token("ID token nonce mismatch")
     }
   }
-  # Authorized party (azp) handling per OIDC Core §2: if azp is present, it
-  # must equal client_id. shinyOAuth also fails closed when aud has multiple
-  # entries but azp is absent, because the package does not support a separate
-  # trusted-extra-audience allowlist.
-  if (!is.null(payload$azp)) {
-    if (!identical(payload$azp, client_id)) {
+  # OIDC Core §3.1.3.7 permits extension-specific azp validation. Our policy
+  # requires client_id when azp is present, without requiring its presence.
+  # Additional audiences must independently satisfy the
+  # explicit allowlist above; azp alone never grants audience trust.
+  if ("azp" %in% names(payload)) {
+    if (!identical(payload[["azp"]], client_id)) {
       err_id_token("azp claim does not match client_id")
     }
-  } else if (length(aud) > 1) {
-    err_id_token("Multiple audiences but azp claim missing")
   }
 
-  # auth_time validation per OIDC Core §3.1.2.1 / §2:
-  # When max_age was requested, auth_time MUST be present. Validate
-  # that now - auth_time <= max_age + leeway.
+  # auth_time validation per OIDC Core §2 / §3.1.2.1:
+  # When present, auth_time is a NumericDate and must therefore be a JSON
+  # number and cannot be beyond the allowed clock skew. When max_age was
+  # requested, it MUST also be present and satisfy
+  # now - auth_time <= max_age + leeway.
+  auth_time_present <- "auth_time" %in% names(payload)
+  if (
+    auth_time_present &&
+      !jwt_is_single_finite_number(payload[["auth_time"]])
+  ) {
+    err_id_token("auth_time claim must be a single finite number")
+  }
+  if (auth_time_present && payload[["auth_time"]] > (now + lwe)) {
+    err_id_token("auth_time is in the future")
+  }
+
   if (!is.null(max_age)) {
     max_age_val <- suppressWarnings(as.numeric(max_age))
     if (
@@ -408,29 +497,12 @@ validate_id_token <- function(
     ) {
       err_id_token("max_age must be a non-negative finite number")
     }
-    if (is.null(payload$auth_time)) {
+    if (!auth_time_present) {
       err_id_token(
         "ID token missing auth_time claim (required when max_age is requested, OIDC Core 3.1.2.1)"
       )
     }
-    if (!jwt_is_single_finite_number(payload$auth_time)) {
-      err_id_token("auth_time claim must be a single finite number")
-    }
-    auth_time_val <- as.numeric(payload$auth_time)
-    if (auth_time_val > (now + lwe)) {
-      err_id_token(c(
-        "x" = "auth_time is in the future",
-        "i" = paste0(
-          "auth_time=",
-          auth_time_val,
-          ", now=",
-          now,
-          ", leeway=",
-          lwe,
-          "s"
-        )
-      ))
-    }
+    auth_time_val <- as.numeric(payload[["auth_time"]])
     elapsed <- now - auth_time_val
     if (elapsed > (max_age_val + lwe)) {
       err_id_token(c(
@@ -457,18 +529,23 @@ validate_id_token <- function(
   # binding. This is a defense-in-depth measure against token substitution.
   # When id_token_at_hash_required is TRUE, the claim MUST be present.
   at_hash_required <- isTRUE(prov@id_token_at_hash_required)
-  if (at_hash_required && is.null(payload$at_hash)) {
+  if (at_hash_required && !"at_hash" %in% names(payload)) {
     err_id_token(
       "ID token missing required at_hash claim (id_token_at_hash_required = TRUE)"
     )
   }
-  if (!is.null(payload$at_hash)) {
+  if ("at_hash" %in% names(payload)) {
+    if (!is_valid_string(payload[["at_hash"]])) {
+      err_id_token(
+        "at_hash claim must be a single non-empty string when present"
+      )
+    }
     if (!is_valid_string(expected_access_token)) {
       err_id_token(
         "ID token contains at_hash claim but no access token was provided for validation"
       )
     }
-    if (identical(alg, "EDDSA") && isTRUE(skip_signature)) {
+    if (identical(alg, "EdDSA") && isTRUE(skip_signature)) {
       err_id_token(c(
         "x" = paste(
           "Cannot validate EdDSA at_hash when signature verification is skipped"
@@ -477,23 +554,21 @@ validate_id_token <- function(
       ))
     }
     if (
-      identical(alg, "EDDSA") &&
+      identical(alg, "EdDSA") &&
         identical(canonicalize_eddsa_curve(verified_eddsa_curve), "Ed448")
     ) {
-      if (at_hash_required) {
-        err_id_token(c(
-          "x" = "Cannot validate required Ed448 at_hash with the current crypto bindings",
-          "i" = "OIDC code flow only makes at_hash validation optional unless id_token_at_hash_required = TRUE",
-          "i" = "Current crypto bindings do not expose the exact SHAKE256 mapping needed for Ed448"
-        ))
-      }
+      err_id_token(c(
+        "x" = "Cannot validate Ed448 at_hash with the current crypto bindings",
+        "i" = "A present at_hash claim must be validated even when its presence was not required",
+        "i" = "Current crypto bindings do not expose the exact SHAKE256 mapping needed for Ed448"
+      ))
     } else {
       computed <- compute_at_hash(
         expected_access_token,
         alg,
         eddsa_curve = verified_eddsa_curve
       )
-      if (!constant_time_compare(computed, payload$at_hash)) {
+      if (!constant_time_compare(computed, payload[["at_hash"]])) {
         err_id_token(
           "at_hash claim does not match the access token (OIDC Core 3.1.3.8)"
         )
@@ -506,7 +581,46 @@ validate_id_token <- function(
   invisible(payload)
 }
 
+# Apple documents Boolean and exact string representations. Apply the same
+# accommodation during validation and public claim access, only for an
+# authenticated Apple issuer. The compact signed JWT remains unchanged.
+normalize_authenticated_id_token_claims <- function(
+  payload,
+  issuer,
+  signature_verified
+) {
+  if (
+    isTRUE(signature_verified) &&
+      identical(issuer, "https://appleid.apple.com") &&
+      identical(payload[["iss"]], issuer) &&
+      is.character(payload[["email_verified"]]) &&
+      length(payload[["email_verified"]]) == 1L &&
+      payload[["email_verified"]] %in% c("true", "false")
+  ) {
+    payload[["email_verified"]] <- identical(
+      payload[["email_verified"]],
+      "true"
+    )
+  }
+  payload
+}
+
 ## 1.2 Numeric claim helpers ---------------------------------------------------
+
+#' Internal: validate an OpenID Connect Subject Identifier
+#'
+#' @param x Candidate `sub` claim value.
+#' @return `TRUE` for a non-empty ASCII string of at most 255 characters.
+#' @keywords internal
+#' @noRd
+is_valid_oidc_sub <- function(x) {
+  if (!is_valid_string(x) || nchar(x, type = "chars") > 255L) {
+    return(FALSE)
+  }
+
+  bytes <- as.integer(charToRaw(enc2utf8(x)))
+  length(bytes) > 0L && all(bytes <= 127L)
+}
 
 #' Internal: check for one finite numeric scalar
 #'
@@ -543,11 +657,10 @@ canonicalize_eddsa_curve <- function(eddsa_curve) {
     return(NULL)
   }
 
-  curve <- toupper(eddsa_curve)
-  if (identical(curve, "ED25519")) {
+  if (identical(eddsa_curve, "Ed25519")) {
     return("Ed25519")
   }
-  if (identical(curve, "ED448")) {
+  if (identical(eddsa_curve, "Ed448")) {
     return("Ed448")
   }
 
@@ -568,7 +681,7 @@ canonicalize_eddsa_curve <- function(eddsa_curve) {
 resolve_verified_eddsa_curve <- function(jwk = NULL, key = NULL) {
   # Prefer the JWK curve because it is explicit and survives key conversion.
   if (is.list(jwk)) {
-    curve <- canonicalize_eddsa_curve(jwk$crv %||% NULL)
+    curve <- canonicalize_eddsa_curve(jwk[["crv"]] %||% NULL)
     if (!is.null(curve)) {
       return(curve)
     }
@@ -605,7 +718,9 @@ compute_at_hash <- function(access_token, alg, eddsa_curve = NULL) {
 
   # Map JWT alg to hash function per RFC 7518:
   # *256 -> SHA-256, *384 -> SHA-384, *512 -> SHA-512
-  hash_fn <- if (grepl("256", alg, fixed = TRUE)) {
+  hash_fn <- if (identical(alg, "ED25519")) {
+    openssl::sha512
+  } else if (grepl("256", alg, fixed = TRUE)) {
     openssl::sha256
   } else if (grepl("384", alg, fixed = TRUE)) {
     openssl::sha384

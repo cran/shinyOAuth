@@ -2,7 +2,7 @@
 # This ensures cryptographic validation occurs before making external calls
 # or exposing PII via the userinfo endpoint.
 
-test_that("login flow: get_userinfo is called after validate_id_token", {
+test_that("login flow: fetch_userinfo is called after validate_id_token", {
   # Create a provider with OIDC features that require ID token validation
   # and userinfo fetch
   id_token <- build_dummy_jwt(list(
@@ -25,7 +25,7 @@ test_that("login flow: get_userinfo is called after validate_id_token", {
     userinfo_id_token_match = FALSE,
     token_auth_style = "body",
     jwks_cache = cachem::cache_mem(max_age = 60),
-    allowed_algs = c("RS256"),
+    id_token_allowed_algs = c("RS256"),
     allowed_token_types = c("Bearer")
   )
 
@@ -70,8 +70,8 @@ test_that("login flow: get_userinfo is called after validate_id_token", {
       call_order <<- c(call_order, "validate_id_token")
       invisible(list(sub = "user123", iss = "https://test.example.com"))
     },
-    get_userinfo = function(oauth_client, token) {
-      call_order <<- c(call_order, "get_userinfo")
+    fetch_userinfo = function(oauth_client, token) {
+      call_order <<- c(call_order, "fetch_userinfo")
       list(sub = "user123", name = "Test User")
     },
     .package = "shinyOAuth",
@@ -79,7 +79,7 @@ test_that("login flow: get_userinfo is called after validate_id_token", {
       shinyOAuth:::handle_callback(
         cli,
         code = "auth-code",
-        payload = enc,
+        state = enc,
         browser_token = tok
       )
     }
@@ -88,15 +88,15 @@ test_that("login flow: get_userinfo is called after validate_id_token", {
   # Verify both functions were called
 
   expect_true("validate_id_token" %in% call_order)
-  expect_true("get_userinfo" %in% call_order)
+  expect_true("fetch_userinfo" %in% call_order)
 
-  # Verify ordering: validate_id_token MUST be called before get_userinfo
+  # Verify ordering: validate_id_token MUST be called before fetch_userinfo
   validate_pos <- which(call_order == "validate_id_token")[1]
-  userinfo_pos <- which(call_order == "get_userinfo")[1]
+  userinfo_pos <- which(call_order == "fetch_userinfo")[1]
   expect_lt(
     validate_pos,
     userinfo_pos,
-    label = "validate_id_token must be called before get_userinfo"
+    label = "validate_id_token must be called before fetch_userinfo"
   )
 })
 
@@ -121,7 +121,7 @@ test_that("handle_callback binds userinfo to a nonce-validated id_token even whe
     userinfo_id_token_match = FALSE,
     token_auth_style = "body",
     jwks_cache = cachem::cache_mem(max_age = 60),
-    allowed_algs = c("RS256"),
+    id_token_allowed_algs = c("RS256"),
     allowed_token_types = c("Bearer")
   )
 
@@ -163,7 +163,7 @@ test_that("handle_callback binds userinfo to a nonce-validated id_token even whe
     ) {
       invisible(list(sub = "user123", iss = "https://test.example.com"))
     },
-    get_userinfo = function(oauth_client, token) {
+    fetch_userinfo = function(oauth_client, token) {
       list(sub = "user123", name = "Test User")
     },
     verify_userinfo_id_token_subject_match = function(
@@ -179,7 +179,7 @@ test_that("handle_callback binds userinfo to a nonce-validated id_token even whe
       shinyOAuth:::handle_callback(
         cli,
         code = "auth-code",
-        payload = enc,
+        state = enc,
         browser_token = tok
       )
     }
@@ -228,7 +228,7 @@ test_that("oauth_provider accepts and infers nonce-driven userinfo subject bindi
   expect_false(inferred@id_token_validation)
 })
 
-test_that("login flow: get_userinfo not called when ID token validation fails", {
+test_that("login flow: fetch_userinfo not called when ID token validation fails", {
   # Ensure that if ID token validation fails, we never reach the userinfo call
   prov <- oauth_provider(
     name = "test",
@@ -245,7 +245,7 @@ test_that("login flow: get_userinfo not called when ID token validation fails", 
     userinfo_id_token_match = FALSE,
     token_auth_style = "body",
     jwks_cache = cachem::cache_mem(max_age = 60),
-    allowed_algs = c("RS256"),
+    id_token_allowed_algs = c("RS256"),
     allowed_token_types = c("Bearer")
   )
 
@@ -293,7 +293,7 @@ test_that("login flow: get_userinfo not called when ID token validation fails", 
       ) {
         shinyOAuth:::err_id_token("Simulated ID token validation failure")
       },
-      get_userinfo = function(oauth_client, token) {
+      fetch_userinfo = function(oauth_client, token) {
         userinfo_called <<- TRUE
         list(sub = "user123")
       },
@@ -302,7 +302,7 @@ test_that("login flow: get_userinfo not called when ID token validation fails", 
         shinyOAuth:::handle_callback(
           cli,
           code = "auth-code",
-          payload = enc,
+          state = enc,
           browser_token = tok
         )
       }
@@ -314,7 +314,7 @@ test_that("login flow: get_userinfo not called when ID token validation fails", 
 
   expect_false(
     userinfo_called,
-    label = "get_userinfo must not be called when ID token validation fails"
+    label = "fetch_userinfo must not be called when ID token validation fails"
   )
 })
 
@@ -674,7 +674,7 @@ test_that("handle_callback: userinfo/id_token match IS performed after userinfo 
     userinfo_id_token_match = TRUE, # This is the key setting
     token_auth_style = "body",
     jwks_cache = cachem::cache_mem(max_age = 60),
-    allowed_algs = c("RS256"),
+    id_token_allowed_algs = c("RS256"),
     allowed_token_types = c("Bearer")
   )
 
@@ -722,7 +722,7 @@ test_that("handle_callback: userinfo/id_token match IS performed after userinfo 
     ) {
       invisible(list(sub = "user123", iss = "https://test.example.com"))
     },
-    get_userinfo = function(oauth_client, token) {
+    fetch_userinfo = function(oauth_client, token) {
       list(sub = "user123", name = "Test User")
     },
     verify_userinfo_id_token_subject_match = function(
@@ -739,7 +739,7 @@ test_that("handle_callback: userinfo/id_token match IS performed after userinfo 
       shinyOAuth:::handle_callback(
         cli,
         code = "auth-code",
-        payload = enc,
+        state = enc,
         browser_token = tok
       )
     }
@@ -752,8 +752,11 @@ test_that("handle_callback: userinfo/id_token match IS performed after userinfo 
   )
 
   # Verify it was called with the correct arguments
-  expect_equal(match_args$userinfo, list(sub = "user123", name = "Test User"))
-  expect_equal(match_args$id_token, id_token)
+  expect_equal(
+    match_args[["userinfo"]],
+    list(sub = "user123", name = "Test User")
+  )
+  expect_equal(match_args[["id_token"]], id_token)
 })
 
 test_that("handle_callback: userinfo/id_token mismatch aborts login", {
@@ -775,7 +778,7 @@ test_that("handle_callback: userinfo/id_token mismatch aborts login", {
     userinfo_id_token_match = TRUE,
     token_auth_style = "body",
     jwks_cache = cachem::cache_mem(max_age = 60),
-    allowed_algs = c("RS256"),
+    id_token_allowed_algs = c("RS256"),
     allowed_token_types = c("Bearer")
   )
 
@@ -824,7 +827,7 @@ test_that("handle_callback: userinfo/id_token mismatch aborts login", {
         # ID token says sub = "user123"
         invisible(list(sub = "user123", iss = "https://test.example.com"))
       },
-      get_userinfo = function(oauth_client, token) {
+      fetch_userinfo = function(oauth_client, token) {
         # Userinfo says sub = "different-user" - MISMATCH!
         list(sub = "different-user", name = "Imposter")
       },
@@ -833,7 +836,7 @@ test_that("handle_callback: userinfo/id_token mismatch aborts login", {
         shinyOAuth:::handle_callback(
           cli,
           code = "auth-code",
-          payload = enc,
+          state = enc,
           browser_token = tok
         )
       }

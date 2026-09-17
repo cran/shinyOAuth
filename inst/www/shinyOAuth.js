@@ -1,16 +1,22 @@
 /* shinyOAuth.js - external client helpers to avoid inline scripts (CSP-friendly)
  * Handlers:
- *  - shinyOAuth:setBrowserToken    {instance, maxAgeMs, sameSite, path, inputId}
- *  - shinyOAuth:clearBrowserToken  {instance, sameSite, path}
+ *  - shinyOAuth:setBrowserToken    {instance, maxAgeMs, sameSite, path, inputId, requestId, token}
+ *  - shinyOAuth:clearBrowserToken  {instance, sameSite, path, token}
  *  - shinyOAuth:redirect           {url}
  *  - shinyOAuth:clearQueryAndFixTitle {titleReplacement, cleanTitle}
  */
 (function(){
   'use strict';
 
-  function getCookie(name){
+  function getCookie(name, sameSite, cookiePath){
     var m=document.cookie.match('(?:^|; )'+name+'=([^;]*)');
-    return m?decodeURIComponent(m[1]):null;
+    if (!m) return null;
+    try { return decodeURIComponent(m[1]); }
+    catch(e) {
+      // A corrupt marker must not poison every subsequent login attempt.
+      clearCookiesFor(name.replace(/^__Host-/, ''), sameSite || 'Strict', cookiePath || '/');
+      return null;
+    }
   }
 
   function isValidHexToken(v, expectedLen){
@@ -53,6 +59,36 @@
     return Array.from(a, function(x){return x.toString(16).padStart(2,'0');}).join('');
   }
 
+  // Cookies share a hostname across ports. Keep the actual binding in
+  // origin- and tab-scoped storage and put only an independent random marker in the
+  // cookie. Neither reading nor planting that marker establishes a binding.
+  function readBrowserBinding(name){
+    var saved;
+    try { saved = window.sessionStorage.getItem(name + ':binding'); }
+    catch(e) { throw new Error('storage_unavailable'); }
+    try {
+      var binding = JSON.parse(saved);
+      if (binding && binding.version === 2 &&
+          isValidHexToken(binding.id, 32) &&
+          isValidHexToken(binding.token, 128) &&
+          isValidHexToken(binding.cookie, 128) &&
+          Number.isFinite(binding.expiresAt) && binding.expiresAt > Date.now()) {
+        return binding;
+      }
+    } catch(e) { /* Invalid or old records must never restore a binding. */ }
+    return null;
+  }
+
+  function writeBrowserBinding(name, id, token, cookie, ageMs, transaction){
+    var key = name + ':binding';
+    var saved = JSON.stringify({version: 2, id: id, token: token, cookie: cookie, transaction: transaction,
+      expiresAt: Date.now() + ageMs});
+    try {
+      window.sessionStorage.setItem(key, saved);
+      if (window.sessionStorage.getItem(key) !== saved) throw new Error();
+    } catch(e) { throw new Error('storage_unavailable'); }
+  }
+
   function clearCookiesFor(name, sameSite, cookiePath){
     var isHttps = window.location.protocol==='https:';
     var paths = [];
@@ -83,19 +119,60 @@
       var isHttps = window.location.protocol==='https:';
       var requireSecure = (sameSite === 'None');
       if (requireSecure && !isHttps) throw new Error('samesite_none_requires_https');
-      var useHostPrefix = isHttps && cookiePath === '/';
+      // HTTPS bindings must never trust cookies planted by a sibling domain.
+      // Module isolation is supplied by the cookie name, not its Path.
+      if (isHttps) cookiePath = '/';
+      var useHostPrefix = isHttps;
       var base = useHostPrefix ? '__Host-shinyOAuth_sid' : 'shinyOAuth_sid';
-      var name = base + (inst ? ('-' + inst) : '');
-      var v = getCookie(name);
+      var storageName = base + (inst ? ('-' + inst) : '');
+      var binding = readBrowserBinding(storageName);
+      var bindingId = binding ? binding.id : null;
+      var name = bindingId ? storageName + '-' + bindingId : null;
+      var marker = name ? getCookie(name, sameSite, cookiePath) : null;
+      var v = binding && binding.cookie === marker ? binding.token : null;
+      // Records from older clients have unknown ownership; retain their markers
+      // conservatively, just like a pending transaction copied into a cloned tab.
+      var transaction = !!(binding && binding.transaction !== false);
       var expectedLen = 128; /* 64 bytes hex-encoded */
-      if(!isValidHexToken(v, expectedLen)){ v = randomHex(64); }
-      setCookie(name, v, ageMs, sameSite, /*forceSecure*/ requireSecure, cookiePath);
+      // A new authorization must use the binding selected by this Shiny
+      // session, even when an existing cookie is syntactically valid.
+      if (payload.requestId) {
+        if (!isValidHexToken(payload.token, expectedLen)) throw new Error('invalid_browser_token');
+        v = payload.token;
+        marker = randomHex(64);
+        bindingId = randomHex(16);
+        transaction = true;
+      }
+      if(!isValidHexToken(v, expectedLen)){
+        v = randomHex(64);
+        marker = randomHex(64);
+        bindingId = randomHex(16);
+        transaction = false;
+      }
+      // Give every new transaction its own cookie as well as tab-local storage.
+      // Even a tab cloned with copied sessionStorage cannot replace another
+      // tab's pending marker by starting a new login.
+      name = storageName + '-' + bindingId;
+      writeBrowserBinding(storageName, bindingId, v, marker, ageMs, transaction);
+      setCookie(name, marker, ageMs, sameSite, /*forceSecure*/ requireSecure, cookiePath);
+      if (getCookie(name, sameSite, cookiePath) !== marker) throw new Error('cookie_unavailable');
+      // An idle predecessor cannot own a pending authorization. Remove it only
+      // after the replacement is usable. Live/legacy predecessors keep their TTL
+      // so a cloned tab cannot invalidate the original tab's pending login.
+      if (binding && binding.transaction === false && binding.id !== bindingId) {
+        clearCookiesFor((storageName + '-' + binding.id).replace(/^__Host-/, ''), sameSite, cookiePath);
+      }
       var shiny = ensureShiny();
       if (shiny) shiny.setInputValue(payload.inputId, v, {priority:'event'});
+      if (shiny && payload.requestId) {
+        shiny.setInputValue(payload.ackInputId, {
+          requestId: payload.requestId
+        }, {priority:'event'});
+      }
     } catch(e) {
       var shiny = ensureShiny();
       if (shiny) shiny.setInputValue(payload.errorInputId, String(e && e.message || e), {priority:'event'});
-      if (window.console && console.warn) console.warn('shinyOAuth: failed to set browser token cookie:', e);
+      if (window.console && console.warn) console.warn('shinyOAuth: failed to set browser binding:', e);
     }
   }
 
@@ -105,12 +182,19 @@
     var cfg = (payload.path === undefined || payload.path === null || payload.path === '') ? '/' : String(payload.path);
     var cookiePath = normPath(cfg, /*defaultToRoot*/ true);
     var inst = String(payload.instance || '');
-    // When instance is empty, clear the base cookie name (no suffix).
-    // This covers module instances without a namespace suffix and
-    // sanitized IDs that collapse to empty.
-    var base = 'shinyOAuth_sid';
-    var target = inst ? (base + '-' + inst) : base;
-    clearCookiesFor(target, sameSite, cookiePath);
+    // Resolve only this tab's current transaction marker, including when the
+    // module uses the base storage name without an instance suffix.
+    var base = window.location.protocol === 'https:' ? '__Host-shinyOAuth_sid' : 'shinyOAuth_sid';
+    var storageName = inst ? (base + '-' + inst) : base;
+    var binding;
+    try {
+      binding = readBrowserBinding(storageName);
+      if (binding && payload.token && binding.token !== payload.token) return;
+      window.sessionStorage.removeItem(storageName + ':binding');
+    } catch(e) { /* Do not clear another tab's marker when storage is unavailable. */ }
+    if (binding) {
+      clearCookiesFor((storageName + '-' + binding.id).replace(/^__Host-/, ''), sameSite, cookiePath);
+    }
     // Also clear the mirrored Shiny input so a subsequent set with the same
     // value is not suppressed by client-side de-duplication.
     try {
@@ -126,9 +210,54 @@
     window.location.assign(String(payload.url));
   }
 
+  function handleAuthorizePost(payload){
+    if (!payload || payload.method !== 'POST' || typeof payload.url !== 'string' ||
+        !Array.isArray(payload.fields) || payload.fields.length > 256) return;
+    var endpoint;
+    try { endpoint = new URL(payload.url); } catch(e) { return; }
+    if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash) return;
+    var fields = payload.fields;
+    var encoded = new URLSearchParams();
+    for (var i = 0; i < fields.length; i++) {
+      var field = fields[i];
+      if (!field || typeof field.name !== 'string' || !field.name || /^_charset_$/i.test(field.name) ||
+          typeof field.value !== 'string' || /[\r\n]/.test(field.name + field.value)) return;
+      encoded.append(field.name, field.value);
+    }
+    if (encoded.toString().length > 131072) return;
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.action = payload.url;
+    form.enctype = 'application/x-www-form-urlencoded';
+    form.acceptCharset = 'UTF-8';
+    form.target = '_self';
+    form.hidden = true;
+    // Provider field names can shadow form methods; call their prototypes.
+    for (var j = 0; j < fields.length; j++) {
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = fields[j].name;
+      input.value = fields[j].value;
+      Node.prototype.appendChild.call(form, input);
+    }
+    document.body.appendChild(form);
+    HTMLFormElement.prototype.submit.call(form);
+    Element.prototype.remove.call(form);
+  }
+
+  function shouldDropCallbackParam(key, value, drop, dropResponse){
+    if(key === 'response') return !!dropResponse;
+    return drop.indexOf(key) !== -1;
+  }
+
+  function decodeFormPart(value){
+    return decodeURIComponent(String(value || '').replace(/\+/g,' '));
+  }
+
   function handleClearQueryAndFixTitle(payload){
     var titleReplacement = payload && payload.titleReplacement;
     var cleanTitle = !!(payload && payload.cleanTitle);
+    var dropResponse = !!(payload && payload.dropResponse);
     try {
       if (typeof titleReplacement === 'string') {
         document.title = titleReplacement;
@@ -143,7 +272,11 @@
     try{
       var u=new URL(window.location.href);
       var drop=['code','state','session_state','id_token','access_token','token_type','expires_in','error','error_description','error_uri','iss','shinyOAuth_form_post','shinyOAuth_form_post_id'];
-      for(var i=0;i<drop.length;i++){u.searchParams.delete(drop[i]);}
+      var keptSearch=new URLSearchParams();
+      u.searchParams.forEach(function(value, key){
+        if(!shouldDropCallbackParam(key, value, drop, dropResponse)) keptSearch.append(key, value);
+      });
+      u.search=keptSearch.toString() ? ('?'+keptSearch.toString()) : '';
       var h=window.location.hash||'';
       if(h && h.indexOf('#/')===0){
         var qidx=h.indexOf('?');
@@ -154,9 +287,10 @@
           var kept=[];
           for(var j=0;j<parts.length;j++){
             var kv=parts[j].split('=');
-            if(kv.length===2){
-              var k=decodeURIComponent(kv[0].replace(/\+/g,' '));
-              if(drop.indexOf(k)===-1){kept.push(parts[j]);}
+            if(kv.length>=2){
+              var k=decodeFormPart(kv[0]);
+              var v=decodeFormPart(kv.slice(1).join('='));
+              if(!shouldDropCallbackParam(k, v, drop, dropResponse)){kept.push(parts[j]);}
             }else if(parts[j]){kept.push(parts[j]);}
           }
           u.hash=kept.length ? hpath+'?'+kept.join('&') : hpath;
@@ -168,9 +302,10 @@
           var kept=[];
           for(var j=0;j<parts.length;j++){
             var kv=parts[j].split('=');
-            if(kv.length===2){
-              var k=decodeURIComponent(kv[0].replace(/\+/g,' '));
-              if(drop.indexOf(k)===-1){kept.push(parts[j]);}
+            if(kv.length>=2){
+              var k=decodeFormPart(kv[0]);
+              var v=decodeFormPart(kv.slice(1).join('='));
+              if(!shouldDropCallbackParam(k, v, drop, dropResponse)){kept.push(parts[j]);}
             }else{kept.push(parts[j]);}
           }
           u.hash=kept.length ? '#'+kept.join('&') : '';
@@ -191,8 +326,29 @@
     Shiny.addCustomMessageHandler('shinyOAuth:setBrowserToken', handleSetBrowserToken);
     Shiny.addCustomMessageHandler('shinyOAuth:clearBrowserToken', handleClearBrowserToken);
     Shiny.addCustomMessageHandler('shinyOAuth:redirect', handleRedirect);
+    Shiny.addCustomMessageHandler('shinyOAuth:authorizePost', handleAuthorizePost);
     Shiny.addCustomMessageHandler('shinyOAuth:clearQueryAndFixTitle', handleClearQueryAndFixTitle);
   }
 
+  function prepareSmartLaunch(){
+    var marker = document.querySelector('meta[name="shinyOAuth-smart-launch"]');
+    if (!marker) return;
+    var ticket = marker.getAttribute('content');
+    var input = marker.getAttribute('data-input');
+    var clean = marker.getAttribute('data-url');
+    marker.remove();
+    if (!ticket || !/^[A-Za-z0-9_-]{32}$/.test(ticket) || !input || !window.jQuery) return;
+    try {
+      var url = new URL(clean);
+      if (url.origin !== window.location.origin || url.search || url.hash) return;
+      window.history.replaceState(null, '', url.href);
+    } catch(e) { return; }
+    jQuery(document).one('shiny:connected', function(){
+      var shiny = ensureShiny();
+      if (shiny) shiny.setInputValue(input, ticket, {priority: 'event'});
+    });
+  }
+
+  prepareSmartLaunch();
   register();
 })();

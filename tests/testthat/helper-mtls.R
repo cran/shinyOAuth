@@ -1,12 +1,7 @@
 write_fake_pem <- function(path, label) {
-  writeLines(
-    c(
-      paste0("-----BEGIN ", label, "-----"),
-      "test",
-      paste0("-----END ", label, "-----")
-    ),
-    path
-  )
+  # Request/configuration tests need parseable, matching certificate material.
+  fixture <- if (label == "PRIVATE KEY") "client-key.pem" else "client-cert.pem"
+  file.copy(mtls_pem_fixture(fixture), path, overwrite = TRUE)
 }
 
 make_mtls_test_files <- function() {
@@ -27,4 +22,63 @@ mtls_pem_fixture <- function(filename) {
     winslash = "/",
     mustWork = TRUE
   )
+}
+
+req_perform_tls_fixture <- function(req, minimum) {
+  tryCatch(
+    req_perform_bounded(req),
+    httr2_failure = function(err) {
+      # Some system libcurl builds support TLS 1.2 but lack TLS 1.3. Only
+      # that build-time limitation skips the separate TLS 1.3 exchange test;
+      # certificate, handshake and connection failures must still surface.
+      if (
+        identical(minimum, "1.3") &&
+          inherits(err[["parent"]], "curl_error_not_built_in")
+      ) {
+        testthat::skip(paste0(
+          "TLS 1.3 is not built into the linked libcurl (",
+          curl::curl_version()[["ssl_version"]],
+          ")"
+        ))
+      }
+      stop(err)
+    }
+  )
+}
+
+wait_for_mtls_server_port <- function(server, timeout = 30) {
+  deadline <- unname(proc.time()["elapsed"]) + timeout
+  diagnostics <- ""
+  repeat {
+    # poll_io() can wake for stderr or process exit before stdout is ready.
+    server[["poll_io"]](100)
+    diagnostics <- paste0(diagnostics, server[["read_error"]]())
+    line <- server[["read_output_lines"]](n = 1L)
+    if (length(line)) {
+      port <- suppressWarnings(as.integer(line))
+      if (
+        !grepl("^[0-9]+$", line) || is.na(port) || port < 1L || port > 65535L
+      ) {
+        stop("TLS fixture published an invalid port: ", line, call. = FALSE)
+      }
+      return(port)
+    }
+    if (!server[["is_alive"]]()) {
+      stop(
+        "TLS fixture exited before publishing its port (status ",
+        server[["get_exit_status"]](),
+        "): ",
+        diagnostics,
+        server[["read_all_error"]](),
+        call. = FALSE
+      )
+    }
+    if (unname(proc.time()["elapsed"]) >= deadline) {
+      stop(
+        "Timed out waiting for the TLS fixture port: ",
+        diagnostics,
+        call. = FALSE
+      )
+    }
+  }
 }

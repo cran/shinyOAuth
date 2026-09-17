@@ -11,35 +11,28 @@
 #' Revoke an OAuth 2.0 token
 #'
 #' @description
-#' Attempts to revoke an access or refresh token when the provider exposes a
-#' revocation endpoint (RFC 7009).
+#' Ask the provider to invalidate an access or refresh token, for example when
+#' a user disconnects their account or your application disposes of stored
+#' credentials. The provider must support token revocation. The Shiny module
+#' calls this during logout; use `auth[["logout"]]()` to also clear its local session.
+#' Revocation does not end the user's login session at the provider.
 #'
-#' Authentication mirrors the provider's `token_auth_style` (same as token
-#' exchange and introspection).
+#' @details
+#' Uses the client's configured credentials and `token_auth_style`. Check the
+#' returned `status`: an absent endpoint or token, or an unsuccessful HTTP
+#' response, leaves the revocation result unknown. A successful response means
+#' the provider accepted the request; local logout does not depend on it.
 #'
-#' Best-effort semantics:
-#' - If the provider does not expose a revocation endpoint, returns
-#'   `supported = FALSE`, `revoked = NA`, and `status = "revocation_unsupported"`.
-#' - If the selected token value is missing, returns `supported = TRUE`,
-#'   `revoked = NA`, and `status = "missing_token"`.
-#' - If the endpoint returns a 2xx, returns `supported = TRUE`, `revoked = TRUE`,
-#'   and `status = "ok"`.
-#' - If the endpoint returns an HTTP error, returns `supported = TRUE`,
-#'   `revoked = NA`, and `status = "http_<code>"`.
+#' @param client [OAuthClient] object
+#' @param token [OAuthToken] object containing tokens to revoke
+#' @param token_kind Which token to revoke: "refresh" (default) or "access"
+#' @param async If `TRUE`, return a promise resolving to the result.
+#'   Configure mirai daemons or a future plan first; mirai takes priority.
+#'   Use a non-sequential future plan to move work outside the main R process.
+#'   Default `FALSE` waits and returns the result directly.
 #'
-#' @param oauth_client [OAuthClient] object
-#' @param oauth_token [OAuthToken] object containing tokens to revoke
-#' @param which Which token to revoke: "refresh" (default) or "access"
-#' @param async Logical, default FALSE. If TRUE and an async backend is
-#'   configured, the operation is dispatched through shinyOAuth's async
-#'   promise path and this function returns a promise-compatible async result
-#'   that resolves to the result list. [mirai] is preferred when daemons are
-#'   configured via [mirai::daemons()]; otherwise the current [future] plan is
-#'   used. Non-sequential future plans run off the main R session;
-#'   `future::sequential()` stays in-process.
-#' @param shiny_session Optional pre-captured Shiny session context (from
-#'   `capture_shiny_session_context()`) to include in audit events. Used when
-#'   calling from async workers that lack access to the reactive domain.
+#' @param shiny_session Optional captured Shiny session details for audit events.
+#'   Normally supplied by the module; leave `NULL` when calling directly.
 #'
 #' @return A list with fields:
 #' - `supported`: logical, `TRUE` when a revocation endpoint is configured.
@@ -49,25 +42,61 @@
 #' - `status`: machine-readable status such as `"ok"`, `"missing_token"`,
 #'   `"revocation_unsupported"`, or `"http_<code>"`.
 #'
+#' @example inst/examples/token_methods.R
+#'
+#' @param oauth_client Compatibility alias for `client`. Supply only one spelling.
+#' @param oauth_token Compatibility alias for `token`. Supply only one spelling.
+#' @param which Compatibility alias for `token_kind`. Supply only one spelling.
 #' @export
 revoke_token <- function(
-  oauth_client,
-  oauth_token,
-  which = c("refresh", "access"),
+  client,
+  token,
+  token_kind = c("refresh", "access"),
   async = FALSE,
-  shiny_session = NULL
+  shiny_session = NULL,
+  oauth_client = NULL,
+  oauth_token = NULL,
+  which = NULL
 ) {
+  which <- resolve_argument_alias(
+    token_kind,
+    which,
+    missing(token_kind),
+    missing(which),
+    "token_kind",
+    "which"
+  )
+  oauth_token <- resolve_argument_alias(
+    token,
+    oauth_token,
+    missing(token),
+    missing(oauth_token),
+    "token",
+    "oauth_token"
+  )
+  oauth_client <- resolve_argument_alias(
+    client,
+    oauth_client,
+    missing(client),
+    missing(oauth_client),
+    "client",
+    "oauth_client"
+  )
   S7::check_is_S7(oauth_client, OAuthClient)
   S7::check_is_S7(oauth_token, OAuthToken)
   if (!(is.logical(async) && length(async) == 1 && !is.na(async))) {
-    err_input("{.arg async} must be a single non-NA logical.")
+    err_input("`async` must be a single non-NA logical.")
   }
 
-  which <- match.arg(which)
-  async_attr <- isTRUE(tryCatch(shiny_session$is_async, error = function(...) {
-    NULL
-  })) ||
-    isTRUE(get_async_session_context()$is_async) ||
+  which <- match.arg(which, c("refresh", "access"))
+  auth_client <- endpoint_auth_client(oauth_client, "revocation")
+  async_attr <- isTRUE(tryCatch(
+    shiny_session[["is_async"]],
+    error = function(...) {
+      NULL
+    }
+  )) ||
+    isTRUE(get_async_session_context()[["is_async"]]) ||
     isTRUE(is_async_worker_context())
   trace_id <- resolve_trace_id()
 
@@ -89,10 +118,10 @@ revoke_token <- function(
         worker_phase = "token.revoke.worker",
         parent_extra = list(
           oauth.token.which = which,
-          oauth.client_auth_style = otel_client_auth_style(oauth_client),
+          oauth.client_auth_style = otel_client_auth_style(auth_client),
           oauth.extra_token_params_count = 0L,
           oauth.extra_token_headers_count = otel_count_items(
-            oauth_client@provider@extra_token_headers
+            auth_client@provider@extra_token_headers
           )
         ),
         worker_extra = list(oauth.token.which = which)
@@ -106,7 +135,7 @@ revoke_token <- function(
           oauth_client@provider,
           "revocation_endpoint",
           prefer_mtls = client_uses_mtls_endpoint(
-            oauth_client,
+            auth_client,
             token = oauth_token
           )
         ) %||%
@@ -148,7 +177,7 @@ revoke_token <- function(
         }
 
         params <- list(token = tok_val)
-        params$token_type_hint <- if (which == "access") {
+        params[["token_type_hint"]] <- if (which == "access") {
           "access_token"
         } else {
           "refresh_token"
@@ -158,20 +187,20 @@ revoke_token <- function(
         prepared <- apply_direct_client_auth(
           req = req,
           params = params,
-          client = oauth_client,
+          client = auth_client,
           context = "revoke_token"
         )
-        req <- prepared$req
-        params <- prepared$params
+        req <- prepared[["req"]]
+        params <- prepared[["params"]]
         req <- req_apply_authorization_server_mtls(
           req,
-          oauth_client,
+          auth_client,
           token = oauth_token
         )
 
-        req <- add_req_defaults(req)
+        req <- add_req_defaults(req, client = oauth_client)
         req <- req_no_redirect(req)
-        extra_headers <- as.list(oauth_client@provider@extra_token_headers)
+        extra_headers <- as.list(auth_client@provider@extra_token_headers)
         if (length(extra_headers)) {
           req <- do.call(httr2::req_headers, c(list(req), extra_headers))
         }
@@ -179,7 +208,7 @@ revoke_token <- function(
         req <- req_refresh_jwt_client_assertion_on_retry(
           req = req,
           params = params,
-          client = oauth_client,
+          client = auth_client,
           context = "revoke_token",
           body_mode = "form"
         )
@@ -230,7 +259,7 @@ revoke_token <- function(
           return(annotate_token_revocation_span_result(which, result))
         }
 
-        if (httr2::resp_is_error(resp)) {
+        if (httr2::resp_status(resp) != 200L) {
           status_code <- paste0("http_", httr2::resp_status(resp))
           result <- list(
             supported = TRUE,
@@ -266,13 +295,14 @@ revoke_token <- function(
         phase = "token.revoke",
         extra = list(
           oauth.token.which = which,
-          oauth.client_auth_style = otel_client_auth_style(oauth_client),
+          oauth.client_auth_style = otel_client_auth_style(auth_client),
           oauth.extra_token_params_count = 0L,
           oauth.extra_token_headers_count = otel_count_items(
-            oauth_client@provider@extra_token_headers
+            auth_client@provider@extra_token_headers
           )
         )
       ),
+      mark_ok = FALSE,
       parent = if (isTRUE(async_attr)) NULL else NA
     )
   })
@@ -284,51 +314,37 @@ revoke_token <- function(
 #' Introspect an OAuth 2.0 token
 #'
 #' @description
-#' Introspects an access or refresh token when the provider exposes an
-#' introspection endpoint (RFC 7662). Returns a small result object describing
-#' whether introspection is supported and, when known, whether the token is
-#' active.
-#'
-#' Authentication to the introspection endpoint mirrors the provider's
-#' `token_auth_style`:
-#'  - "header" (default): HTTP Basic with `client_id`/`client_secret`.
-#'  - "body": form fields `client_id` and (when available) `client_secret`.
-#'  - "public": form field `client_id` only; `client_secret` is never sent.
-#'  - "client_secret_jwt" / "private_key_jwt": a signed JWT client assertion
-#'    is generated (RFC 7523) and sent via `client_assertion_type` and
-#'    `client_assertion`, with `aud` resolved via
-#'    `resolve_client_assertion_audience()` (so `client_assertion_audience`
-#'    overrides are honored).
+#' Ask the provider to check an access or refresh token. This is called token
+#' introspection and requires a configured `introspection_url`. Use it when you
+#' need the provider's current token status rather than only a locally recorded
+#' expiry time: a token may have been revoked before its expiry. To require it
+#' automatically during login and refresh, set `introspect = TRUE` on
+#' [oauth_client()].
 #'
 #' @details
-#' Best-effort semantics:
-#' - If the provider does not expose an introspection endpoint, the function
-#'   returns `supported = FALSE`, `active = NA`, and `status = "introspection_unsupported"`.
-#' - If the endpoint responds with an HTTP error (e.g., 404/500) or the body
-#'   cannot be parsed or does not include a usable `active` field, the function
-#'   does not throw. It returns `supported = TRUE`, `active = NA`, and a
-#'   descriptive `status` (for example, `"http_404"`, `"invalid_json"`,
-#'   `"missing_active"`). In this context, `NA`
-#'   means "unknown" and will not break flows unless your code explicitly
-#'   requires a definitive result (i.e., `isTRUE(result$active)`).
-#' - Providers vary in how they encode the RFC 7662 `active` field (logical,
-#'   numeric, or character variants like "true"/"false", 1/0). These are
-#'   normalized to logical `TRUE`/`FALSE` when possible; otherwise `active` is
-#'   set to `NA`.
+#' Read `result[["active"]]`: `TRUE` means active, `FALSE` means inactive, and `NA`
+#' means the result is unknown. Use `isTRUE(result[["active"]])` if your code must
+#' require a definite confirmation.
 #'
-#' @param oauth_client [OAuthClient] object
-#' @param oauth_token [OAuthToken] object to introspect
-#' @param which Which token to introspect: "access" (default) or "refresh".
-#' @param async Logical, default FALSE. If TRUE and an async backend is
-#'   configured, the operation is dispatched through shinyOAuth's async
-#'   promise path and this function returns a promise-compatible async result
-#'   that resolves to the result list. [mirai] is preferred when daemons are
-#'   configured via [mirai::daemons()]; otherwise the current [future] plan is
-#'   used. Non-sequential future plans run off the main R session;
-#'   `future::sequential()` stays in-process.
-#' @param shiny_session Optional pre-captured Shiny session context (from
-#'   `capture_shiny_session_context()`) to include in audit events. Used when
-#'   calling from async workers that lack access to the reactive domain.
+#' Unsupported endpoints, missing tokens, unsuccessful HTTP responses, and
+#' unusable response bodies return a descriptive `status`. The provider must
+#' return `active` as a JSON boolean. Other types return `"invalid_active"`.
+#' Encoded or decoded body limits return `"body_too_large"`; unsupported
+#' compression returns `"unsupported_encoding"`. Both leave `active = NA`.
+#' Other transport failures and decoding errors raise conditions (or reject
+#' the asynchronous promise) instead of returning a status result.
+#' Requests use the client's configured credentials and `token_auth_style`.
+#'
+#' @param client [OAuthClient] object
+#' @param token [OAuthToken] object to introspect
+#' @param token_kind Which token to introspect: "access" (default) or "refresh".
+#' @param async If `TRUE`, return a promise resolving to the result.
+#'   Configure mirai daemons or a future plan first; mirai takes priority.
+#'   Use a non-sequential future plan to move work outside the main R process.
+#'   Default `FALSE` waits and returns the result directly.
+#'
+#' @param shiny_session Optional captured Shiny session details for audit events.
+#'   Normally supplied by the module; leave `NULL` when calling directly.
 #'
 #' @return A list with fields:
 #' - `supported`: logical, `TRUE` when an introspection endpoint is configured.
@@ -342,27 +358,61 @@ revoke_token <- function(
 #'
 #' @example inst/examples/token_methods.R
 #'
+#' @param oauth_client Compatibility alias for `client`. Supply only one spelling.
+#' @param oauth_token Compatibility alias for `token`. Supply only one spelling.
+#' @param which Compatibility alias for `token_kind`. Supply only one spelling.
 #' @export
 
 introspect_token <- function(
-  oauth_client,
-  oauth_token,
-  which = c("access", "refresh"),
+  client,
+  token,
+  token_kind = c("access", "refresh"),
   async = FALSE,
-  shiny_session = NULL
+  shiny_session = NULL,
+  oauth_client = NULL,
+  oauth_token = NULL,
+  which = NULL
 ) {
+  which <- resolve_argument_alias(
+    token_kind,
+    which,
+    missing(token_kind),
+    missing(which),
+    "token_kind",
+    "which"
+  )
+  oauth_token <- resolve_argument_alias(
+    token,
+    oauth_token,
+    missing(token),
+    missing(oauth_token),
+    "token",
+    "oauth_token"
+  )
+  oauth_client <- resolve_argument_alias(
+    client,
+    oauth_client,
+    missing(client),
+    missing(oauth_client),
+    "client",
+    "oauth_client"
+  )
   # Type checks
   S7::check_is_S7(oauth_client, OAuthClient)
   S7::check_is_S7(oauth_token, OAuthToken)
   if (!(is.logical(async) && length(async) == 1 && !is.na(async))) {
-    err_input("{.arg async} must be a single non-NA logical.")
+    err_input("`async` must be a single non-NA logical.")
   }
 
-  which <- match.arg(which)
-  async_attr <- isTRUE(tryCatch(shiny_session$is_async, error = function(...) {
-    NULL
-  })) ||
-    isTRUE(get_async_session_context()$is_async) ||
+  which <- match.arg(which, c("access", "refresh"))
+  auth_client <- endpoint_auth_client(oauth_client, "introspection")
+  async_attr <- isTRUE(tryCatch(
+    shiny_session[["is_async"]],
+    error = function(...) {
+      NULL
+    }
+  )) ||
+    isTRUE(get_async_session_context()[["is_async"]]) ||
     isTRUE(is_async_worker_context())
   trace_id <- resolve_trace_id()
 
@@ -384,10 +434,10 @@ introspect_token <- function(
         worker_phase = "token.introspect.worker",
         parent_extra = list(
           oauth.token.which = which,
-          oauth.client_auth_style = otel_client_auth_style(oauth_client),
+          oauth.client_auth_style = otel_client_auth_style(auth_client),
           oauth.extra_token_params_count = 0L,
           oauth.extra_token_headers_count = otel_count_items(
-            oauth_client@provider@extra_token_headers
+            auth_client@provider@extra_token_headers
           )
         ),
         worker_extra = list(oauth.token.which = which)
@@ -400,7 +450,7 @@ introspect_token <- function(
           oauth_client@provider,
           "introspection_endpoint",
           prefer_mtls = client_uses_mtls_endpoint(
-            oauth_client,
+            auth_client,
             token = oauth_token
           )
         ) %||%
@@ -444,28 +494,28 @@ introspect_token <- function(
 
         params <- list(token = tok_val)
         if (which == "refresh") {
-          params$token_type_hint <- "refresh_token"
+          params[["token_type_hint"]] <- "refresh_token"
         } else {
-          params$token_type_hint <- "access_token"
+          params[["token_type_hint"]] <- "access_token"
         }
 
         req <- httr2::request(url)
         prepared <- apply_direct_client_auth(
           req = req,
           params = params,
-          client = oauth_client,
+          client = auth_client,
           context = "introspect_token"
         )
-        req <- prepared$req
-        params <- prepared$params
+        req <- prepared[["req"]]
+        params <- prepared[["params"]]
         req <- req_apply_authorization_server_mtls(
           req,
-          oauth_client,
+          auth_client,
           token = oauth_token
         )
-        req <- add_req_defaults(req)
+        req <- add_req_defaults(req, client = oauth_client)
         req <- req_no_redirect(req)
-        extra_headers <- as.list(oauth_client@provider@extra_token_headers)
+        extra_headers <- as.list(auth_client@provider@extra_token_headers)
         if (length(extra_headers)) {
           req <- do.call(httr2::req_headers, c(list(req), extra_headers))
         }
@@ -473,34 +523,62 @@ introspect_token <- function(
         req <- req_refresh_jwt_client_assertion_on_retry(
           req = req,
           params = params,
-          client = oauth_client,
+          client = auth_client,
           context = "introspect_token",
           body_mode = "form"
         )
         req <- httr2::req_method(req, "POST")
         req <- httr2::req_error(req, is_error = function(resp) FALSE)
-        resp <- with_otel_span(
-          "shinyOAuth.token.introspect.http",
-          {
-            resp <- req_with_retry(req)
-            otel_record_http_result(resp)
-            resp
-          },
-          attributes = otel_http_attributes(
-            method = "POST",
-            url = url,
-            extra = c(
-              list(oauth.phase = "token.introspect"),
-              otel_mtls_endpoint_alias_attributes(
-                provider = oauth_client@provider,
-                endpoint = "introspection_endpoint",
-                url = url
+        resp <- tryCatch(
+          with_otel_span(
+            "shinyOAuth.token.introspect.http",
+            {
+              resp <- req_with_retry(req)
+              otel_record_http_result(resp)
+              resp
+            },
+            attributes = otel_http_attributes(
+              method = "POST",
+              url = url,
+              extra = c(
+                list(oauth.phase = "token.introspect"),
+                otel_mtls_endpoint_alias_attributes(
+                  provider = oauth_client@provider,
+                  endpoint = "introspection_endpoint",
+                  url = url
+                )
               )
-            )
+            ),
+            options = list(kind = "client"),
+            mark_ok = FALSE
           ),
-          options = list(kind = "client"),
-          mark_ok = FALSE
+          shinyOAuth_parse_error = function(e) {
+            if (
+              !isTRUE(
+                e[["context"]][["reason"]] %in%
+                  c("body_too_large", "unsupported_encoding")
+              )
+            ) {
+              stop(e)
+            }
+            e
+          }
         )
+        if (inherits(resp, "shinyOAuth_parse_error")) {
+          result <- list(
+            supported = TRUE,
+            active = NA,
+            raw = NULL,
+            status = resp[["context"]][["reason"]]
+          )
+          emit_token_introspection_audit(
+            oauth_client,
+            which,
+            result,
+            shiny_session
+          )
+          return(annotate_token_introspection_span_result(which, result))
+        }
 
         redirect_err <- try(
           reject_redirect_response(resp, context = "token_introspection"),
@@ -524,7 +602,7 @@ introspect_token <- function(
           return(annotate_token_introspection_span_result(which, result))
         }
 
-        if (httr2::resp_is_error(resp)) {
+        if (httr2::resp_status(resp) != 200L) {
           result <- list(
             supported = TRUE,
             active = NA,
@@ -566,11 +644,21 @@ introspect_token <- function(
         body_trimmed <- trimws(body_txt)
         parsed <- try(
           {
+            if (!response_has_json_media_type(resp)) {
+              err_parse("Introspection response must use a JSON media type")
+            }
             reject_duplicate_json_object_members(
               body_txt,
               "Introspection response JSON"
             )
-            jsonlite::fromJSON(body_txt, simplifyVector = FALSE)
+            value <- jsonlite::fromJSON(body_txt, simplifyVector = FALSE)
+            if ("scope" %in% names(value)) {
+              validate_response_scope(
+                value[["scope"]],
+                allow_empty = client_uses_smart_scopes(oauth_client)
+              )
+            }
+            value
           },
           silent = TRUE
         )
@@ -624,13 +712,14 @@ introspect_token <- function(
         phase = "token.introspect",
         extra = list(
           oauth.token.which = which,
-          oauth.client_auth_style = otel_client_auth_style(oauth_client),
+          oauth.client_auth_style = otel_client_auth_style(auth_client),
           oauth.extra_token_params_count = 0L,
           oauth.extra_token_headers_count = otel_count_items(
-            oauth_client@provider@extra_token_headers
+            auth_client@provider@extra_token_headers
           )
         )
       ),
+      mark_ok = FALSE,
       parent = if (isTRUE(async_attr)) NULL else NA
     )
   })
@@ -642,60 +731,87 @@ introspect_token <- function(
 #' Refresh an OAuth 2.0 token
 #'
 #' @description
-#' Refreshes an OAuth session by obtaining a new access token with the refresh
-#' token. When configured, shinyOAuth also re-fetches userinfo and validates any
-#' new ID token returned by the provider.
+#' Use a refresh token to obtain a new access token without sending the user
+#' through login again. Call this when your application manages token lifetime
+#' itself, for example before continuing API requests with an expiring token.
+#' Assign the returned [OAuthToken] to keep the updated credentials.
+#' [oauth_module_server()] can manage refresh during a Shiny session with
+#' `refresh_proactively = TRUE` when a refresh token is available.
 #'
-#' Per OIDC Core Section 12.2, providers may omit the ID token from refresh
-#' responses. When omitted, the original ID token from the initial login is
-#' preserved.
+#' @details
+#' The provider may replace the refresh token too; otherwise the old refresh
+#' token is kept. Required userinfo is fetched again, and configured client
+#' introspection must succeed before the refreshed token is returned.
 #'
-#' If the provider does return a new ID token during refresh, `refresh_token()`
-#' requires that an original ID token from the initial login is available so it
-#' can enforce subject continuity (OIDC 12.2: `sub` MUST match). If no original
-#' ID token is available, refresh fails with an error.
+#' For ordinary OAuth clients, refresh explicitly requests the token's retained
+#' `granted_scopes` when known. This preserves prior scope reductions and makes
+#' an omitted response `scope` refer to that requested set. Tokens without known
+#' scopes omit the request parameter. SMART uses its own original-grant rules.
 #'
-#' When `id_token_validation = TRUE`, any refresh-returned ID token is also
-#' fully validated (signature and claims) in addition to the OIDC 12.2 `sub`
-#' continuity check.
+#' OIDC refresh responses may omit the ID token, in which case the original is
+#' kept. If a new ID token is returned, an original must be available and the
+#' subject, issuer, and audience must remain consistent, as must `auth_time`
+#' and nonce when applicable. Full signature and
+#' claim validation runs when `id_token_validation = TRUE`. Userinfo is checked
+#' against a validated ID token when both are available;
+#' `userinfo_id_token_match = TRUE` requires that baseline.
 #'
-#' When `userinfo_required = TRUE`, userinfo is re-fetched using the fresh
-#' access token. Whenever shinyOAuth has both refreshed userinfo and a
-#' validated ID token baseline, it checks that their `sub` claims still match.
-#' If `userinfo_id_token_match = TRUE`, the absence of a trustworthy ID token
-#' baseline is treated as an error instead of silently accepting unbound
-#' userinfo data.
+#' Refresh does not establish a new interactive login. Use the module's
+#' `reauth_after_seconds` argument when a fresh login is required.
+#' A returned ID token must have an `iat` at or after the refresh request start,
+#' allowing the provider's configured clock leeway and same-second issuance.
 #'
-#' @param oauth_client [OAuthClient] object
+#' Within one R process, overlapping asynchronous calls for the same client and
+#' refresh token share one promise and result. Token snapshots, client settings,
+#' and validation options must match; conflicting calls fail before dispatch.
+#' A synchronous or reentrant call while that refresh is pending raises an error;
+#' await the existing promise instead. Separate R processes require coordination
+#' by the application. The input token is a value object: store the returned
+#' token for subsequent refreshes, and use an application generation check when
+#' assigning results after logout or a new login. Completed results are not cached.
+#'
+#' Refresh errors carry a non-secret `refresh_credential_outcome` field:
+#' `"not_consumed"`, `"consumed"`, `"possibly_consumed"`, or `"rejected"`.
+#' Only `"not_consumed"` permits retrying the input refresh credential. After
+#' any other outcome (including an unavailable worker result), discard that
+#' credential and require a new login. This does not accept unvalidated access
+#' or identity data. The module applies this rule even with indefinite sessions.
+#'
+#' @param client [OAuthClient] object
 #' @param token [OAuthToken] object containing the refresh token
-#' @param async Logical, default FALSE. If TRUE and an async backend is
-#'   configured, the refresh is dispatched through shinyOAuth's async promise
-#'   path and this function returns a promise-compatible async result that
-#'   resolves to an updated `OAuthToken`. [mirai] is preferred when daemons are
-#'   configured via [mirai::daemons()]; otherwise the current [future] plan is
-#'   used. Non-sequential future plans run off the main R session;
-#'   `future::sequential()` stays in-process.
-#' @param introspect Logical, default FALSE. After a successful refresh, if the
-#'   provider exposes an introspection endpoint, introspect the new access
-#'   token for validation and audit/diagnostics. When enabled, refresh fails
-#'   if introspection is unsupported, inactive, or missing required
-#'   `introspect_elements`. The raw introspection result is not stored
+#' @param async If `TRUE`, return a promise resolving to the result.
+#'   Configure mirai daemons or a future plan first; mirai takes priority.
+#'   Use a non-sequential future plan to move work outside the main R process.
+#'   Default `FALSE` waits and returns the result directly.
+#'
+#' @param introspect `NULL` (default) or a logical. After a successful refresh,
+#'   introspect the new access token when either this argument is `TRUE` or the
+#'   client was configured with `introspect = TRUE`. A per-call `FALSE` cannot
+#'   disable a configured client requirement. When enabled, refresh fails if
+#'   introspection is unsupported, inactive, or missing required
+#'   `introspection_checks`. The raw introspection result is not stored
 #'   separately, but a successful introspection response may backfill
 #'   `token@cnf`.
-#' @param shiny_session Optional pre-captured Shiny session context (from
-#'   `capture_shiny_session_context()`) to include in audit events. Used when
-#'   calling from async workers that lack access to the reactive domain.
+#' @param shiny_session Optional captured Shiny session details for audit events.
+#'   Normally supplied by the module; leave `NULL` when calling directly.
 #'
 #' @return An updated [OAuthToken] object with refreshed credentials.
 #'
 #'   **What changes:**
 #'   - `access_token`: Always updated to the fresh token
 #'   - `expires_at`: Computed from `expires_in` when provided; otherwise a
-#'     finite fallback expiry from `resolve_missing_expires_in()`
+#'     fallback lifetime set by `shinyOAuth.default_expires_in` (3600 seconds by default)
 #'   - `refresh_token`: Updated if the provider rotates it; otherwise preserved
 #'   - `id_token`: Updated only if the provider returns one (and it validates);
-#'     otherwise the original from login is preserved
+#'     otherwise the latest stored ID token is preserved
+#'   - `original_id_token`: Retained from login for continuity checks, even if
+#'     intermediate refresh ID tokens omit `nonce` or `auth_time`
 #'   - `userinfo`: Refreshed if `userinfo_required = TRUE`; otherwise preserved
+#'   - `extra_fields`: Replaced by the additional parameters in the refresh
+#'     response, or an empty list if none are returned. Not merged with earlier
+#'     responses; explicit JSON `null` values remain named `NULL` entries.
+#'   - `initial_extra_fields`: Preserved from the initial code exchange. This
+#'     historical snapshot does not establish current access permissions.
 #'   - `cnf`: Updated from the token response when present, and may be
 #'     backfilled from refresh-time introspection when enabled. When the
 #'     refresh response omits new observable `cnf`, shinyOAuth does not carry
@@ -707,323 +823,660 @@ introspect_token <- function(
 #'   token that fails validation (wrong issuer, audience, expired, or subject
 #'   mismatch with original), or if userinfo subject doesn't match the new ID
 #'   token, the refresh fails with an error. In `oauth_module_server()`, this
-#'   clears the session and sets `authenticated = FALSE`.
+#'   clears the session and sets `authenticated = FALSE`, unless
+#'   `indefinite_session = TRUE` keeps it with `token_stale = TRUE`.
 #'
 #' @example inst/examples/token_methods.R
 #'
+#' @param oauth_client Compatibility alias for `client`. Supply only one spelling.
 #' @export
 
 refresh_token <- function(
+  client,
+  token,
+  async = FALSE,
+  introspect = NULL,
+  shiny_session = NULL,
+  oauth_client = NULL
+) {
+  oauth_client <- resolve_argument_alias(
+    client,
+    oauth_client,
+    missing(client),
+    missing(oauth_client),
+    "client",
+    "oauth_client"
+  )
+  refresh_token_dispatch(oauth_client, token, async, introspect, shiny_session)
+}
+
+# The manager supplies an explicit, validated scope request. Legacy refresh
+# calls keep their original public interface. Generic OAuth retains known scopes;
+# SMART refreshes explicitly request a limit only after the grant narrows.
+refresh_token_dispatch <- function(
   oauth_client,
   token,
   async = FALSE,
-  introspect = FALSE,
-  shiny_session = NULL
+  introspect = NULL,
+  shiny_session = NULL,
+  scope_request = NULL
 ) {
   S7::check_is_S7(oauth_client, OAuthClient)
   S7::check_is_S7(token, OAuthToken)
-  if (!(is.logical(async) && length(async) == 1 && !is.na(async))) {
-    err_input("{.arg async} must be a single non-NA logical.")
+  scope_request <- validate_refresh_scope_request(
+    oauth_client,
+    token,
+    scope_request
+  )
+  if (!(is.logical(async) && length(async) == 1L && !is.na(async))) {
+    err_input("`async` must be a single non-NA logical.")
   }
   if (
-    !(is.logical(introspect) && length(introspect) == 1 && !is.na(introspect))
+    !is.null(introspect) &&
+      !(is.logical(introspect) &&
+        length(introspect) == 1L &&
+        !is.na(introspect))
   ) {
-    err_input("{.arg introspect} must be a single non-NA logical.")
+    err_input("`introspect` must be NULL or a single non-NA logical.")
+  }
+  if (!is_valid_string(token@refresh_token)) {
+    err_input("No refresh token available")
+  }
+  effective_introspect <- isTRUE(oauth_client@introspect) || isTRUE(introspect)
+  key <- refresh_flight_key(oauth_client, token)
+  flights <- refresh_flights[["active"]]
+  active <- flights[[key]]
+  policy_options <- capture_async_options()
+  if (!is.null(active)) {
+    if (!isTRUE(async) || is.null(active[["promise"]])) {
+      err_token(
+        "Refresh already in progress; await the outstanding async refresh"
+      )
+    }
+    if (
+      !identical(active[["client"]], oauth_client) ||
+        !identical(active[["token"]], token) ||
+        !identical(active[["introspect"]], effective_introspect) ||
+        !identical(active[["scope_request"]], scope_request) ||
+        !identical(active[["options"]], policy_options)
+    ) {
+      err_token(
+        "Refresh already in progress with different token or validation settings"
+      )
+    }
+    return(active[["promise"]])
   }
 
-  async_attr <- isTRUE(tryCatch(shiny_session$is_async, error = function(...) {
-    NULL
-  })) ||
-    isTRUE(get_async_session_context()$is_async) ||
+  flight <- new.env(parent = emptyenv())
+  flight[["client"]] <- oauth_client
+  flight[["token"]] <- token
+  flight[["introspect"]] <- effective_introspect
+  flight[["scope_request"]] <- scope_request
+  flight[["options"]] <- policy_options
+  flights[[key]] <- flight
+  release <- function() {
+    # An older completion must never remove a newer operation's lock.
+    if (identical(flights[[key]], flight)) {
+      rm(list = key, envir = flights)
+    }
+  }
+  deferred <- FALSE
+  on.exit(if (!deferred) release(), add = TRUE)
+  result <- tryCatch(
+    {
+      args <- list(
+        oauth_client = oauth_client,
+        token = token,
+        async = async,
+        introspect = effective_introspect,
+        shiny_session = shiny_session
+      )
+      if (!is.null(scope_request)) {
+        args[["scope_request"]] <- scope_request
+      }
+      do.call(refresh_token_impl, args)
+    },
+    error = function(e) stop(refresh_outcome_error(e, "not_consumed"))
+  )
+  if (isTRUE(async) && promises::is.promise(result)) {
+    flight[["promise"]] <- promises::then(
+      result,
+      onFulfilled = function(value) {
+        release()
+        value
+      },
+      onRejected = function(error) {
+        release()
+        stop(refresh_outcome_error(error, "possibly_consumed"))
+      }
+    )
+    deferred <- TRUE
+    return(flight[["promise"]])
+  }
+  result
+}
+
+# Process-local coordination happens before dispatch. Workers execute only the
+# implementation, including when a sequential future executes in this process.
+refresh_flights <- new.env(parent = emptyenv())
+refresh_flights[["active"]] <- new.env(parent = emptyenv())
+
+refresh_flight_key <- function(client, token) {
+  if (is.null(refresh_flights[["key"]])) {
+    refresh_flights[["key"]] <- openssl::rand_bytes(32L)
+  }
+  raw_to_hex_lower(openssl::sha256(
+    serialize(
+      list(
+        client@provider@issuer,
+        client@provider@token_url,
+        client@client_id,
+        token@refresh_token
+      ),
+      NULL,
+      version = 2
+    ),
+    key = refresh_flights[["key"]]
+  ))
+}
+
+# Preserve the original condition class and expose only lifecycle metadata.
+refresh_outcome_error <- function(error, outcome) {
+  if (is.null(error[["refresh_credential_outcome"]])) {
+    error[["refresh_credential_outcome"]] <- outcome
+  }
+  error
+}
+
+refresh_credential_retryable <- function(error) {
+  identical(error[["refresh_credential_outcome"]], "not_consumed")
+}
+
+validate_refresh_delivery <- function(token, previous) {
+  tryCatch(
+    validate_token_acceptance_deadline(token),
+    error = function(e) {
+      outcome <- if (identical(token@refresh_token, previous@refresh_token)) {
+        "not_consumed"
+      } else {
+        "consumed"
+      }
+      stop(refresh_outcome_error(e, outcome))
+    }
+  )
+}
+
+with_refresh_outcome <- function(expr, outcome) {
+  tryCatch(force(expr), error = function(e) {
+    stop(refresh_outcome_error(e, outcome[["value"]]))
+  })
+}
+
+refresh_token_impl <- function(
+  oauth_client,
+  token,
+  async = FALSE,
+  introspect = NULL,
+  shiny_session = NULL,
+  scope_request = NULL
+) {
+  S7::check_is_S7(oauth_client, OAuthClient)
+  S7::check_is_S7(token, OAuthToken)
+  scope_request <- validate_refresh_scope_request(
+    oauth_client,
+    token,
+    scope_request
+  )
+  if (!(is.logical(async) && length(async) == 1 && !is.na(async))) {
+    err_input("`async` must be a single non-NA logical.")
+  }
+  if (
+    !is.null(introspect) &&
+      !(is.logical(introspect) && length(introspect) == 1 && !is.na(introspect))
+  ) {
+    err_input("`introspect` must be NULL or a single non-NA logical.")
+  }
+  effective_introspect <- isTRUE(oauth_client@introspect) || isTRUE(introspect)
+  auth_client <- endpoint_auth_client(oauth_client, "token")
+
+  async_attr <- isTRUE(tryCatch(
+    shiny_session[["is_async"]],
+    error = function(...) {
+      NULL
+    }
+  )) ||
+    isTRUE(get_async_session_context()[["is_async"]]) ||
     isTRUE(is_async_worker_context())
   trace_id <- resolve_trace_id()
 
+  outcome <- new.env(parent = emptyenv())
+  outcome[["value"]] <- "not_consumed"
   # Optional async execution using mirai if requested and available.
-  with_trace_id(trace_id, {
-    if (isTRUE(async)) {
-      return(dispatch_token_async(
-        function_name = "refresh_token",
-        call_args = list(
-          oauth_client = oauth_client,
-          token = token,
-          introspect = introspect
-        ),
-        client = oauth_client,
-        shiny_session = shiny_session,
-        trace_id = trace_id,
-        span_name = "shinyOAuth.refresh",
-        phase = "refresh",
-        worker_span_name = "shinyOAuth.refresh.worker",
-        worker_phase = "refresh.worker",
-        parent_extra = list(
-          oauth.client_auth_style = otel_client_auth_style(oauth_client),
-          oauth.extra_token_params_count = otel_count_items(
-            oauth_client@provider@extra_token_params
+  with_refresh_outcome(
+    with_trace_id(trace_id, {
+      if (isTRUE(async)) {
+        return(dispatch_token_async(
+          function_name = "refresh_token_impl",
+          call_args = list(
+            oauth_client = oauth_client,
+            token = token,
+            introspect = effective_introspect,
+            scope_request = scope_request
           ),
-          oauth.extra_token_headers_count = otel_count_items(
-            oauth_client@provider@extra_token_headers
+          client = oauth_client,
+          shiny_session = shiny_session,
+          trace_id = trace_id,
+          span_name = "shinyOAuth.refresh",
+          phase = "refresh",
+          worker_span_name = "shinyOAuth.refresh.worker",
+          worker_phase = "refresh.worker",
+          parent_extra = list(
+            oauth.client_auth_style = otel_client_auth_style(auth_client),
+            oauth.extra_token_params_count = otel_count_items(
+              oauth_client@provider@extra_token_params
+            ),
+            oauth.extra_token_headers_count = otel_count_items(
+              auth_client@provider@extra_token_headers
+            )
           )
-        )
-      ))
-    }
-    with_otel_span(
-      "shinyOAuth.refresh",
-      {
-        if (!is_valid_string(token@refresh_token)) {
-          err_input("No refresh token available")
-        }
+        ))
+      }
+      with_otel_span(
+        "shinyOAuth.refresh",
+        {
+          if (!is_valid_string(token@refresh_token)) {
+            err_input("No refresh token available")
+          }
 
-        # Snapshot the pre-refresh refresh token so the audit event can report
-        # whether the provider rotated it (returned a new one) or preserved it.
-        pre_refresh_token <- token@refresh_token
+          # Snapshot the pre-refresh refresh token so the audit event can report
+          # whether the provider rotated it (returned a new one) or preserved it.
+          pre_refresh_token <- token@refresh_token
+          original_id_token <- if (is_valid_string(token@original_id_token)) {
+            token@original_id_token
+          } else {
+            token@id_token
+          }
 
-        params <- list(
-          grant_type = "refresh_token",
-          refresh_token = token@refresh_token
-        )
-        if (length(oauth_client@resource) > 0) {
-          params$resource <- oauth_client@resource
-        }
-        # Allow provider to add custom token params (mirrors login path)
-        if (length(oauth_client@provider@extra_token_params) > 0) {
-          params <- c(params, oauth_client@provider@extra_token_params)
-        }
+          requested_scopes <- scope_request[["scopes"]]
+          params <- list(
+            grant_type = "refresh_token",
+            refresh_token = token@refresh_token
+          )
+          if (client_uses_smart(oauth_client)) {
+            scopes <- smart_refresh_request_scopes(
+              oauth_client,
+              token,
+              scope_request
+            )
+            if (!is.null(scopes)) {
+              params[["scope"]] <- paste(scopes, collapse = " ")
+            }
+          } else {
+            # RFC 6749 section 6: omitting scope requests the original refresh
+            # grant, which can exceed the preceding access-token grant. Request
+            # the retained scope explicitly so omitted responses are unambiguous.
+            requested_scopes <- scope_request[["scopes"]] %||%
+              token@granted_scopes
+            if (length(requested_scopes)) {
+              params[["scope"]] <- paste(requested_scopes, collapse = " ")
+            } else {
+              requested_scopes <- NULL
+            }
+          }
+          if (length(oauth_client@resource) > 0) {
+            params[["resource"]] <- oauth_client@resource
+          }
+          # Allow provider to add custom token params (mirrors login path)
+          if (length(oauth_client@provider@extra_token_params) > 0) {
+            params <- merge_token_extra_params(
+              params,
+              oauth_client@provider@extra_token_params
+            )
+          }
 
-        token_url <- resolve_provider_endpoint_url(
-          oauth_client@provider,
-          "token_endpoint",
-          prefer_mtls = client_uses_mtls_endpoint(
-            oauth_client,
+          token_url <- resolve_provider_endpoint_url(
+            oauth_client@provider,
+            "token_endpoint",
+            prefer_mtls = client_uses_mtls_endpoint(
+              auth_client,
+              token = token
+            )
+          )
+
+          req <- httr2::request(token_url)
+          prepared <- apply_direct_client_auth(
+            req = req,
+            params = params,
+            client = auth_client,
+            context = "refresh_token"
+          )
+          req <- prepared[["req"]]
+          params <- prepared[["params"]]
+          req <- req_apply_authorization_server_mtls(
+            req,
+            auth_client,
             token = token
           )
-        )
 
-        req <- httr2::request(token_url)
-        prepared <- apply_direct_client_auth(
-          req = req,
-          params = params,
-          client = oauth_client,
-          context = "refresh_token"
-        )
-        req <- prepared$req
-        params <- prepared$params
-        req <- req_apply_authorization_server_mtls(
-          req,
-          oauth_client,
-          token = token
-        )
-
-        req <- add_req_defaults(req)
-        req <- req_no_redirect(req)
-        # Allow provider to add custom token headers (mirrors login path)
-        extra_headers <- as.list(oauth_client@provider@extra_token_headers)
-        if (length(extra_headers)) {
-          req <- do.call(httr2::req_headers, c(list(req), extra_headers))
-        }
-        req <- req_body_form_encoded(req, compact_list(params))
-        req <- req_refresh_jwt_client_assertion_on_retry(
-          req = req,
-          params = params,
-          client = oauth_client,
-          context = "refresh_token",
-          body_mode = "encoded"
-        )
-        req <- httr2::req_method(req, "POST")
-        resp <- with_otel_span(
-          "shinyOAuth.token.exchange.http",
-          {
-            # Refresh may consume a rotatable refresh token; do not retry.
-            resp <- req_with_dpop_retry(req, oauth_client, idempotent = FALSE)
-            otel_record_http_result(resp)
-            resp
-          },
-          attributes = otel_http_attributes(
-            method = "POST",
-            url = token_url,
-            extra = c(
-              list(oauth.phase = "refresh"),
-              otel_mtls_endpoint_alias_attributes(
-                provider = oauth_client@provider,
-                endpoint = "token_endpoint",
-                url = token_url
+          req <- add_req_defaults(req, client = oauth_client)
+          req <- req_no_redirect(req)
+          # Allow provider to add custom token headers (mirrors login path)
+          extra_headers <- as.list(auth_client@provider@extra_token_headers)
+          if (length(extra_headers)) {
+            req <- do.call(httr2::req_headers, c(list(req), extra_headers))
+          }
+          req <- req_body_form_encoded(req, compact_list(params))
+          req <- req_refresh_jwt_client_assertion_on_retry(
+            req = req,
+            params = params,
+            client = auth_client,
+            context = "refresh_token",
+            body_mode = "encoded"
+          )
+          req <- httr2::req_method(req, "POST")
+          token_request_started_at <- as.numeric(Sys.time())
+          resp <- with_otel_span(
+            "shinyOAuth.token.exchange.http",
+            {
+              # Refresh may consume a rotatable refresh token; do not retry.
+              outcome[["value"]] <- "possibly_consumed"
+              resp <- req_with_dpop_retry(req, oauth_client, idempotent = FALSE)
+              otel_record_http_result(resp)
+              resp
+            },
+            attributes = otel_http_attributes(
+              method = "POST",
+              url = token_url,
+              extra = c(
+                list(oauth.phase = "refresh"),
+                otel_mtls_endpoint_alias_attributes(
+                  provider = oauth_client@provider,
+                  endpoint = "token_endpoint",
+                  url = token_url
+                )
               )
+            ),
+            options = list(kind = "client"),
+            mark_ok = FALSE
+          )
+
+          # Security: reject redirect responses to prevent credential leakage
+          reject_redirect_response(resp, context = "token_refresh")
+
+          if (httr2::resp_is_error(resp)) {
+            tryCatch(
+              err_http(
+                c("x" = "Token refresh failed"),
+                resp,
+                context = list(phase = "refresh_token")
+              ),
+              error = function(e) {
+                if (identical(e[["oauth_error"]], "invalid_grant")) {
+                  outcome[["value"]] <- "rejected"
+                } else if (
+                  isTRUE(
+                    e[["oauth_error"]] %in%
+                      c(
+                        "invalid_request",
+                        "invalid_client",
+                        "unauthorized_client",
+                        "unsupported_grant_type",
+                        "invalid_scope",
+                        "temporarily_unavailable"
+                      )
+                  )
+                ) {
+                  outcome[["value"]] <- "not_consumed"
+                }
+                stop(e)
+              }
             )
-          ),
-          options = list(kind = "client"),
-          mark_ok = FALSE
-        )
+          }
 
-        # Security: reject redirect responses to prevent credential leakage
-        reject_redirect_response(resp, context = "token_refresh")
-
-        if (httr2::resp_is_error(resp)) {
-          err_http(
-            c("x" = "Token refresh failed"),
+          tok <- parse_token_response(
             resp,
-            context = list(phase = "refresh_token")
+            allow_empty_scope = client_uses_smart_scopes(oauth_client)
           )
-        }
-
-        tok <- parse_token_response(resp)
-        # Normalize expires_in when provided as a quoted number (form or JSON)
-        if (!is.null(tok$expires_in)) {
-          tok$expires_in <- coerce_expires_in(tok$expires_in)
-        }
-
-        otel_set_span_attributes(
-          attributes = otel_token_response_attributes(
-            tok,
-            client = oauth_client
-          )
-        )
-
-        # Validate expires_in if present (align with swap_code_for_token_set())
-        if (!is.null(tok$expires_in)) {
-          if (
-            !is.numeric(tok$expires_in) ||
-              length(tok$expires_in) != 1L ||
-              !is.finite(tok$expires_in) ||
-              tok$expires_in < 0
+          extra_fields <- token_response_extra_fields(tok)
+          outcome[["value"]] <- if (
+            is_valid_string(tok[["refresh_token"]]) &&
+              !identical(tok[["refresh_token"]], pre_refresh_token)
           ) {
+            "consumed"
+          } else {
+            "not_consumed"
+          }
+          # Normalize expires_in when provided as a quoted number (form or JSON)
+          if (!is.null(tok[["expires_in"]])) {
+            tok[["expires_in"]] <- coerce_expires_in(
+              tok[["expires_in"]]
+            )
+          }
+
+          otel_set_span_attributes(
+            attributes = otel_token_response_attributes(
+              tok,
+              client = oauth_client
+            )
+          )
+
+          # Validate expires_in if present (align with swap_code_for_token_set())
+          if (!is.null(tok[["expires_in"]])) {
+            if (
+              !is.numeric(tok[["expires_in"]]) ||
+                length(tok[["expires_in"]]) != 1L ||
+                !is.finite(tok[["expires_in"]]) ||
+                tok[["expires_in"]] < 0
+            ) {
+              err_token(
+                "Invalid expires_in in token response",
+                context = list(phase = "refresh_token")
+              )
+            }
+
+            if (tok[["expires_in"]] <= 0) {
+              warn_about_nonpositive_expires_in(
+                tok[["expires_in"]],
+                phase = "refresh_token"
+              )
+            }
+          }
+
+          # Verify the response contains a new access token
+          if (!is_valid_string(tok[["access_token"]])) {
             err_token(
-              "Invalid expires_in in token response",
+              "Token response missing access_token",
               context = list(phase = "refresh_token")
             )
           }
 
-          if (tok$expires_in <= 0) {
-            warn_about_nonpositive_expires_in(
-              tok$expires_in,
-              phase = "refresh_token"
+          # Validate credentials immediately after refresh, before any userinfo call.
+          if (!is_valid_access_token(tok[["access_token"]])) {
+            err_token(
+              "Token response access_token contains invalid characters",
+              context = list(phase = "refresh_token")
             )
           }
-        }
+          tok <- apply_missing_token_type_policy(oauth_client, tok)
+          verify_token_type_allowlist(oauth_client, tok)
 
-        # Verify the response contains a new access token
-        if (!is_valid_string(tok$access_token)) {
-          err_token(
-            "Token response missing access_token",
-            context = list(phase = "refresh_token")
+          token_set <- list(
+            access_token = tok[["access_token"]],
+            token_type = tok[["token_type"]],
+            refresh_token = tok[["refresh_token"]],
+            id_token = tok[["id_token"]],
+            cnf = tok[["cnf"]],
+            userinfo = NULL,
+            expires_in = tok[["expires_in"]],
+            scope = tok[["scope"]]
           )
-        }
-
-        # Validate token_type immediately after refresh, before any userinfo call.
-        verify_token_type_allowlist(oauth_client, tok)
-
-        token_set <- list(
-          access_token = tok$access_token,
-          token_type = tok$token_type,
-          refresh_token = tok$refresh_token,
-          id_token = tok$id_token,
-          cnf = tok$cnf,
-          userinfo = NULL,
-          expires_in = tok$expires_in,
-          scope = tok$scope
-        )
-        defer_certificate_binding <- isTRUE(introspect) &&
-          client_requests_certificate_bound_tokens(oauth_client) &&
-          !is_valid_string(
-            token_cnf_x5t_s256(
-              access_token = token_set$access_token,
-              cnf = token_set$cnf
+          token_set <- c(
+            token_set,
+            tok[intersect("authorization_details", names(tok))]
+          )
+          if (!is.null(scope_request)) {
+            # RFC 6749 permits omission only when the response matches the
+            # current request. Preserve the unverified evidence flag; SMART
+            # still requires an explicit response scope.
+            grant <- resolve_granted_scope_state(
+              smart_response_scope(oauth_client, token_set),
+              scope_request[["scopes"]],
+              is_refresh = TRUE,
+              previous_granted_scopes = scope_request[["scopes"]],
+              smart = client_uses_smart_scopes(oauth_client)
             )
-          )
-        token_set <- verify_token_set(
-          oauth_client,
-          token_set = token_set,
-          nonce = NULL,
-          is_refresh = TRUE,
-          original_id_token = token@id_token,
-          prior_granted_scopes = token@granted_scopes,
-          shiny_session = shiny_session,
-          defer_certificate_binding = defer_certificate_binding
-        )
-        effective_token_type <- resolve_effective_access_token_type(
-          oauth_client,
-          token_set = token_set
-        )
-
-        expires_at <- if (
-          is.numeric(token_set$expires_in) && is.finite(token_set$expires_in)
-        ) {
-          as.numeric(Sys.time()) + as.numeric(token_set$expires_in)
-        } else {
-          resolve_missing_expires_in(phase = "refresh_token")
-        }
-
-        refreshed_id_token <- if (is_valid_string(token_set$id_token)) {
-          token_set$id_token
-        } else {
-          token@id_token
-        }
-        refreshed_id_token_validated <- if (
-          is_valid_string(token_set$id_token)
-        ) {
-          isTRUE(token_set[[".id_token_validated"]])
-        } else {
-          isTRUE(token@id_token_validated)
-        }
-        refreshed_cnf <- resolve_refresh_token_cnf(
-          cnf = token_set$cnf,
-          access_token = token_set$access_token
-        )
-
-        refreshed_token <- OAuthToken(
-          access_token = token_set$access_token,
-          token_type = effective_token_type,
-          refresh_token = token_set$refresh_token %||% token@refresh_token,
-          expires_at = expires_at,
-          id_token = refreshed_id_token %||% NA_character_,
-          id_token_validated = refreshed_id_token_validated,
-          userinfo = token@userinfo %||% list(),
-          cnf = refreshed_cnf,
-          granted_scopes = token_set$granted_scopes %||% character(0),
-          granted_scopes_verified = isTRUE(token_set$granted_scopes_verified)
-        )
-
-        intro_res <- NULL
-        if (isTRUE(introspect)) {
-          intro_res <- call_with_optional_shiny_session(
-            introspect_token,
-            oauth_client = oauth_client,
-            oauth_token = refreshed_token,
-            which = "access",
-            async = FALSE,
-            shiny_session = shiny_session
-          )
-          validate_token_cnf_consistency(
-            access_token = refreshed_token@access_token,
-            cnf = token_set$cnf,
-            introspection_result = intro_res,
-            error_context = "token",
-            phase = "refresh_token"
-          )
-          refreshed_token@cnf <- resolve_refresh_token_cnf(
-            cnf = token_set$cnf,
-            access_token = refreshed_token@access_token,
-            introspection_result = intro_res
-          )
-          refreshed_token@token_type <- resolve_effective_access_token_type(
+            validate_refresh_scope_grant(
+              oauth_client,
+              grant[["granted_scopes"]],
+              scope_request
+            )
+          }
+          defer_certificate_binding <- isTRUE(effective_introspect) &&
+            client_requires_observed_mtls_cnf(oauth_client) &&
+            !is_valid_string(
+              token_cnf_x5t_s256(
+                access_token = token_set[["access_token"]],
+                cnf = token_set[["cnf"]]
+              )
+            )
+          token_set <- verify_token_set(
             oauth_client,
             token_set = token_set,
-            introspection_result = intro_res,
-            phase = "refresh_token"
+            nonce = NULL,
+            is_refresh = TRUE,
+            original_id_token = original_id_token,
+            refresh_request_started_at = token_request_started_at,
+            requested_scopes = requested_scopes,
+            prior_granted_scopes = requested_scopes %||% token@granted_scopes,
+            shiny_session = shiny_session,
+            defer_certificate_binding = defer_certificate_binding,
+            introspection_pending = isTRUE(effective_introspect)
           )
-          validate_token_dpop_binding(
-            oauth_client = oauth_client,
-            token = refreshed_token,
-            error_context = "token",
-            phase = "refresh_token"
-          )
-          validate_observed_dpop_cnf_required(
-            oauth_client = oauth_client,
-            token = refreshed_token,
-            introspection_result = intro_res,
-            error_context = "token",
-            phase = "refresh_token"
+          effective_token_type <- resolve_effective_access_token_type(
+            oauth_client,
+            token_set = token_set
           )
 
-          if (isTRUE(defer_certificate_binding)) {
+          expires_at <- if (
+            is.numeric(token_set[["expires_in"]]) &&
+              is.finite(token_set[["expires_in"]])
+          ) {
+            token_request_started_at +
+              as.numeric(token_set[["expires_in"]])
+          } else {
+            resolve_missing_expires_in(
+              phase = "refresh_token",
+              now = token_request_started_at
+            )
+          }
+
+          refreshed_id_token <- if (is_valid_string(token_set[["id_token"]])) {
+            token_set[["id_token"]]
+          } else {
+            token@id_token
+          }
+          refreshed_id_token_validated <- if (
+            is_valid_string(token_set[["id_token"]])
+          ) {
+            isTRUE(token_set[[".id_token_validated"]])
+          } else {
+            isTRUE(token@id_token_validated)
+          }
+          refreshed_cnf <- resolve_refresh_token_cnf(
+            cnf = token_set[["cnf"]],
+            access_token = token_set[["access_token"]]
+          )
+
+          refreshed_token <- OAuthToken(
+            access_token = token_set[["access_token"]],
+            token_type = effective_token_type,
+            refresh_token = token_set[["refresh_token"]] %||%
+              token@refresh_token,
+            expires_at = expires_at,
+            id_token = refreshed_id_token %||% NA_character_,
+            original_id_token = original_id_token,
+            id_token_validated = refreshed_id_token_validated,
+            userinfo = token@userinfo %||% list(),
+            cnf = refreshed_cnf,
+            granted_scopes = token_set[["granted_scopes"]] %||%
+              character(0),
+            granted_scopes_verified = isTRUE(
+              token_set[["granted_scopes_verified"]]
+            ),
+            extra_fields = extra_fields,
+            initial_extra_fields = token@initial_extra_fields,
+            original_granted_scopes = token@original_granted_scopes
+          )
+
+          intro_res <- NULL
+          if (isTRUE(effective_introspect)) {
+            intro_res <- call_with_optional_shiny_session(
+              introspect_token,
+              oauth_client = oauth_client,
+              oauth_token = refreshed_token,
+              which = "access",
+              async = FALSE,
+              shiny_session = shiny_session
+            )
+            if (
+              !is.null(scope_request) && "scope" %in% names(intro_res[["raw"]])
+            ) {
+              validate_response_scope(
+                intro_res[["raw"]][["scope"]],
+                err_token,
+                allow_empty = client_uses_smart_scopes(oauth_client)
+              )
+              validate_refresh_scope_grant(
+                oauth_client,
+                normalize_scope_tokens(intro_res[["raw"]][["scope"]]),
+                scope_request
+              )
+            }
+            refreshed_token <- enforce_token_introspection_policy(
+              oauth_client = oauth_client,
+              token = refreshed_token,
+              introspection_result = intro_res,
+              requested_scopes = requested_scopes %||%
+                effective_client_scopes(oauth_client),
+              phase = "refresh_token",
+              token_response_cnf = token_set[["cnf"]],
+              expires_in_missing = is.null(token_set[["expires_in"]]),
+              defer_subject_match = TRUE
+            )
+            validate_token_cnf_consistency(
+              access_token = refreshed_token@access_token,
+              cnf = token_set[["cnf"]],
+              introspection_result = intro_res,
+              error_context = "token",
+              phase = "refresh_token"
+            )
+            refreshed_token@cnf <- resolve_refresh_token_cnf(
+              cnf = token_set[["cnf"]],
+              access_token = refreshed_token@access_token,
+              introspection_result = intro_res
+            )
+            refreshed_token@token_type <- resolve_effective_access_token_type(
+              oauth_client,
+              token_set = token_set,
+              introspection_result = intro_res,
+              phase = "refresh_token"
+            )
+            validate_token_dpop_binding(
+              oauth_client = oauth_client,
+              token = refreshed_token,
+              error_context = "token",
+              phase = "refresh_token"
+            )
+            validate_observed_dpop_cnf_required(
+              oauth_client = oauth_client,
+              token = refreshed_token,
+              introspection_result = intro_res,
+              error_context = "token",
+              phase = "refresh_token"
+            )
+
+            # Validate newly observed binding even when missing confirmation
+            # was permitted before introspection.
             validate_token_certificate_binding(
               token = refreshed_token,
               oauth_client = oauth_client,
@@ -1031,110 +1484,132 @@ refresh_token <- function(
               phase = "refresh_token"
             )
           }
-        }
 
-        if (isTRUE(oauth_client@provider@userinfo_required)) {
-          userinfo_baseline_id_token <- if (
-            isTRUE(token_set[[".id_token_validated"]]) &&
-              is_valid_string(token_set$id_token)
-          ) {
-            token_set$id_token
-          } else {
-            token@id_token
+          validate_refresh_scope_grant(
+            oauth_client,
+            refreshed_token@granted_scopes,
+            scope_request
+          )
+          if (isTRUE(oauth_client@provider@userinfo_required)) {
+            userinfo_baseline_id_token <- if (
+              isTRUE(token_set[[".id_token_validated"]]) &&
+                is_valid_string(token_set[["id_token"]])
+            ) {
+              token_set[["id_token"]]
+            } else {
+              token@id_token
+            }
+            userinfo_baseline_id_token_validated <- if (
+              isTRUE(token_set[[".id_token_validated"]]) &&
+                is_valid_string(token_set[["id_token"]])
+            ) {
+              TRUE
+            } else {
+              isTRUE(token@id_token_validated)
+            }
+
+            refreshed_token@id_token <- userinfo_baseline_id_token %||%
+              NA_character_
+            refreshed_token@id_token_validated <-
+              userinfo_baseline_id_token_validated
+
+            ui <- call_with_optional_shiny_session(
+              fetch_userinfo,
+              oauth_client = oauth_client,
+              token = refreshed_token,
+              shiny_session = shiny_session
+            )
+
+            refreshed_token@id_token <- refreshed_id_token %||% NA_character_
+            refreshed_token@id_token_validated <- refreshed_id_token_validated
+
+            enforce_userinfo_id_token_subject_match(
+              oauth_client,
+              userinfo = ui,
+              token_set = token_set,
+              token = token
+            )
+
+            token_set[["userinfo"]] <- ui
+            refreshed_token@userinfo <- ui
           }
-          userinfo_baseline_id_token_validated <- if (
-            isTRUE(token_set[[".id_token_validated"]]) &&
-              is_valid_string(token_set$id_token)
-          ) {
-            TRUE
-          } else {
-            isTRUE(token@id_token_validated)
+
+          if (isTRUE(effective_introspect)) {
+            enforce_token_introspection_subject(
+              oauth_client,
+              refreshed_token,
+              intro_res
+            )
           }
 
-          refreshed_token@id_token <- userinfo_baseline_id_token %||%
-            NA_character_
-          refreshed_token@id_token_validated <-
-            userinfo_baseline_id_token_validated
+          refreshed_token <- smart_update_token_context(
+            oauth_client,
+            refreshed_token,
+            token
+          )
+          validate_token_acceptance_deadline(refreshed_token)
+          token@access_token <- refreshed_token@access_token
+          token@refresh_token <- refreshed_token@refresh_token
+          token@token_type <- refreshed_token@token_type
+          token@expires_at <- refreshed_token@expires_at
+          token@granted_scopes <- refreshed_token@granted_scopes
+          token@granted_scopes_verified <- refreshed_token@granted_scopes_verified
+          token@id_token <- refreshed_token@id_token
+          token@original_id_token <- refreshed_token@original_id_token
+          token@id_token_validated <- refreshed_token@id_token_validated
+          token@cnf <- refreshed_token@cnf
+          token@userinfo <- refreshed_token@userinfo
+          token@extra_fields <- refreshed_token@extra_fields
+          token@initial_extra_fields <- refreshed_token@initial_extra_fields
+          token@smart_context <- refreshed_token@smart_context
+          token@original_granted_scopes <- refreshed_token@original_granted_scopes
 
-          ui <- call_with_optional_shiny_session(
-            get_userinfo,
-            oauth_client = oauth_client,
-            token = refreshed_token,
+          audit_event(
+            "token_refresh",
+            context = list(
+              provider = oauth_client@provider@name %||% NA_character_,
+              issuer = oauth_client@provider@issuer %||% NA_character_,
+              client_id_digest = string_digest(oauth_client@client_id),
+              refresh_token_rotated = is_valid_string(token_set[[
+                "refresh_token",
+                exact = TRUE
+              ]]) &&
+                !identical(
+                  token_set[["refresh_token"]],
+                  pre_refresh_token
+                ),
+              new_expires_at = token@expires_at,
+              expires_in_synthesized = !(is.numeric(token_set[[
+                "expires_in",
+                exact = TRUE
+              ]]) &&
+                is.finite(token_set[["expires_in"]]))
+            ),
             shiny_session = shiny_session
           )
 
-          refreshed_token@id_token <- refreshed_id_token %||% NA_character_
-          refreshed_token@id_token_validated <- refreshed_id_token_validated
-
-          enforce_userinfo_id_token_subject_match(
-            oauth_client,
-            userinfo = ui,
-            token_set = token_set,
-            token = token
+          token
+        },
+        attributes = otel_client_attributes(
+          client = oauth_client,
+          shiny_session = shiny_session,
+          async = async_attr,
+          phase = "refresh",
+          extra = list(
+            oauth.client_auth_style = otel_client_auth_style(auth_client),
+            oauth.extra_token_params_count = otel_count_items(
+              oauth_client@provider@extra_token_params
+            ),
+            oauth.extra_token_headers_count = otel_count_items(
+              auth_client@provider@extra_token_headers
+            )
           )
-
-          validate_essential_claims(oauth_client, ui, "userinfo")
-          token_set$userinfo <- ui
-          refreshed_token@userinfo <- ui
-        }
-
-        if (isTRUE(introspect)) {
-          refreshed_token <- enforce_token_introspection_policy(
-            oauth_client = oauth_client,
-            token = refreshed_token,
-            introspection_result = intro_res,
-            requested_scopes = effective_client_scopes(oauth_client),
-            phase = "refresh_token",
-            token_response_cnf = token_set$cnf
-          )
-        }
-
-        token@access_token <- refreshed_token@access_token
-        token@refresh_token <- refreshed_token@refresh_token
-        token@token_type <- refreshed_token@token_type
-        token@expires_at <- refreshed_token@expires_at
-        token@granted_scopes <- refreshed_token@granted_scopes
-        token@granted_scopes_verified <- refreshed_token@granted_scopes_verified
-        token@id_token <- refreshed_token@id_token
-        token@id_token_validated <- refreshed_token@id_token_validated
-        token@cnf <- refreshed_token@cnf
-        token@userinfo <- refreshed_token@userinfo
-
-        audit_event(
-          "token_refresh",
-          context = list(
-            provider = oauth_client@provider@name %||% NA_character_,
-            issuer = oauth_client@provider@issuer %||% NA_character_,
-            client_id_digest = string_digest(oauth_client@client_id),
-            refresh_token_rotated = is_valid_string(token_set$refresh_token) &&
-              !identical(token_set$refresh_token, pre_refresh_token),
-            new_expires_at = token@expires_at,
-            expires_in_synthesized = !(is.numeric(token_set$expires_in) &&
-              is.finite(token_set$expires_in))
-          ),
-          shiny_session = shiny_session
-        )
-
-        token
-      },
-      attributes = otel_client_attributes(
-        client = oauth_client,
-        shiny_session = shiny_session,
-        async = async_attr,
-        phase = "refresh",
-        extra = list(
-          oauth.client_auth_style = otel_client_auth_style(oauth_client),
-          oauth.extra_token_params_count = otel_count_items(
-            oauth_client@provider@extra_token_params
-          ),
-          oauth.extra_token_headers_count = otel_count_items(
-            oauth_client@provider@extra_token_headers
-          )
-        )
-      ),
-      parent = if (isTRUE(async_attr)) NULL else NA
-    )
-  })
+        ),
+        parent = if (isTRUE(async_attr)) NULL else NA
+      )
+    }),
+    outcome
+  )
 }
 
 # 2 Token response helpers -----------------------------------------------------
@@ -1175,9 +1650,9 @@ emit_token_revocation_audit <- function(
         issuer = oauth_client@provider@issuer %||% NA_character_,
         client_id_digest = string_digest(oauth_client@client_id),
         which = which,
-        supported = isTRUE(result$supported),
-        revoked = result$revoked %||% NA,
-        status = result$status %||% NA_character_
+        supported = isTRUE(result[["supported"]]),
+        revoked = result[["revoked"]] %||% NA,
+        status = result[["status"]] %||% NA_character_
       ),
       shiny_session = shiny_session
     ),
@@ -1200,16 +1675,17 @@ emit_token_revocation_audit <- function(
 #' @keywords internal
 #' @noRd
 annotate_token_revocation_span_result <- function(which, result) {
-  revoked <- result$revoked %||% NA
+  otel_record_token_operation_result(result)
+  revoked <- result[["revoked"]] %||% NA
   otel_set_span_attributes(
     attributes = compact_list(list(
-      oauth.supported = isTRUE(result$supported),
+      oauth.supported = isTRUE(result[["supported"]]),
       oauth.revoked = if (length(revoked) == 1L && !is.na(revoked)) {
         isTRUE(revoked)
       } else {
         NULL
       },
-      oauth.status = result$status %||% NULL
+      oauth.status = result[["status"]] %||% NULL
     ))
   )
   result
@@ -1237,31 +1713,37 @@ emit_token_introspection_audit <- function(
   result,
   shiny_session = NULL
 ) {
-  raw <- result$raw %||% NULL
+  raw <- result[["raw"]] %||% NULL
   if (!is.list(raw)) {
     raw <- NULL
   }
 
   sub_digest <- NA_character_
-  if (!is.null(raw) && is_valid_string(raw$sub %||% NA_character_)) {
-    sub_digest <- string_digest(as.character(raw$sub)[1])
+  if (
+    !is.null(raw) &&
+      is_valid_string(raw[["sub"]] %||% NA_character_)
+  ) {
+    sub_digest <- string_digest(as.character(raw[["sub"]])[1])
   }
   introspected_client_id_digest <- NA_character_
-  if (!is.null(raw) && is_valid_string(raw$client_id %||% NA_character_)) {
+  if (
+    !is.null(raw) &&
+      is_valid_string(raw[["client_id"]] %||% NA_character_)
+  ) {
     introspected_client_id_digest <- string_digest(as.character(
-      raw$client_id
+      raw[["client_id"]]
     )[1])
   }
   scope_digest <- NA_character_
   if (
     !is.null(raw) &&
-      !is.null(raw$scope) &&
-      is_valid_string(as.character(raw$scope)[1])
+      !is.null(raw[["scope"]]) &&
+      is_valid_string(as.character(raw[["scope"]])[1])
   ) {
-    scope_digest <- string_digest(as.character(raw$scope)[1])
+    scope_digest <- string_digest(as.character(raw[["scope"]])[1])
   }
 
-  active <- result$active %||% NA
+  active <- result[["active"]] %||% NA
   try(
     audit_event(
       "token_introspection",
@@ -1270,13 +1752,13 @@ emit_token_introspection_audit <- function(
         issuer = oauth_client@provider@issuer %||% NA_character_,
         client_id_digest = string_digest(oauth_client@client_id),
         which = which,
-        supported = isTRUE(result$supported),
+        supported = isTRUE(result[["supported"]]),
         active = if (length(active) == 1L && is.na(active)) {
           NA
         } else {
           isTRUE(active)
         },
-        status = result$status %||% NA_character_,
+        status = result[["status"]] %||% NA_character_,
         sub_digest = sub_digest,
         introspected_client_id_digest = introspected_client_id_digest,
         scope_digest = scope_digest
@@ -1303,16 +1785,17 @@ emit_token_introspection_audit <- function(
 #' @keywords internal
 #' @noRd
 annotate_token_introspection_span_result <- function(which, result) {
-  active <- result$active %||% NA
+  otel_record_token_operation_result(result)
+  active <- result[["active"]] %||% NA
   otel_set_span_attributes(
     attributes = compact_list(list(
-      oauth.supported = isTRUE(result$supported),
+      oauth.supported = isTRUE(result[["supported"]]),
       oauth.active = if (length(active) == 1L && !is.na(active)) {
         isTRUE(active)
       } else {
         NULL
       },
-      oauth.status = result$status %||% NULL
+      oauth.status = result[["status"]] %||% NULL
     ))
   )
   result
@@ -1325,40 +1808,17 @@ annotate_token_introspection_span_result <- function(which, result) {
 
 #' Internal: normalize an RFC 7662 active field
 #'
-#' Used by [introspect_token()] because providers encode the introspection
-#' `active` field as logical, numeric, or string values depending on their
-#' implementation.
+#' Used by [introspect_token()] to require the RFC 7662 JSON Boolean.
 #'
 #' @param x Provider-supplied `active` field value.
 #' @return `TRUE`, `FALSE`, or `NA` when the value cannot be normalized safely.
 #' @keywords internal
 #' @noRd
 coerce_introspection_active <- function(x) {
-  if (is.list(x) || length(x) != 1L) {
+  if (!is.logical(x) || length(x) != 1L) {
     return(NA)
   }
-
-  if (is.logical(x)) {
-    return(ifelse(!is.na(x[[1]]), x[[1]], NA))
-  }
-  if (is.numeric(x)) {
-    xv <- suppressWarnings(as.numeric(x[[1]]))
-    if (length(xv) == 1L && !is.na(xv)) {
-      return(xv != 0)
-    }
-    return(NA)
-  }
-  if (is.character(x)) {
-    v <- tolower(trimws(as.character(x[[1]])))
-    if (v %in% c("true", "1", "t", "yes", "y")) {
-      return(TRUE)
-    }
-    if (v %in% c("false", "0", "f", "no", "n")) {
-      return(FALSE)
-    }
-    return(NA)
-  }
-  NA
+  x[[1]]
 }
 
 # 3 Async execution helpers ----------------------------------------------------
@@ -1424,9 +1884,9 @@ dispatch_token_async <- function(
       expr = quote({
         .ns <- asNamespace("shinyOAuth")
         .fn <- get(function_name, envir = .ns, inherits = FALSE)
-        .ns$with_trace_id(captured_trace_id, {
-          .ns$with_async_options(captured_async_options, {
-            .ns$with_async_session_context(captured_shiny_session, {
+        .ns[["with_trace_id"]](captured_trace_id, {
+          .ns[["with_async_options"]](captured_async_options, {
+            .ns[["with_async_session_context"]](captured_shiny_session, {
               do.call(
                 .fn,
                 c(
@@ -1449,7 +1909,9 @@ dispatch_token_async <- function(
         captured_shiny_session = captured_shiny_session
       ),
       otel_context = list(
-        headers = otel_parent$headers,
+        token_operation_result = function_name %in%
+          c("revoke_token", "introspect_token"),
+        headers = otel_parent[["headers"]],
         worker_span_name = worker_span_name,
         shiny_session = captured_shiny_session,
         attributes = otel_client_attributes(
@@ -1469,8 +1931,20 @@ dispatch_token_async <- function(
 
   promise |>
     promises::then(function(value) {
-      otel_end_async_parent(otel_parent, status = "ok")
-      replay_async_conditions(value)
+      value <- replay_async_conditions(value)
+      if (function_name %in% c("refresh_token", "refresh_token_impl")) {
+        validate_refresh_delivery(value, call_args[["token"]])
+      }
+      otel_end_async_parent(
+        otel_parent,
+        status = "ok",
+        result = if (function_name %in% c("revoke_token", "introspect_token")) {
+          value
+        } else {
+          NULL
+        }
+      )
+      value
     }) |>
     promises::catch(function(err) {
       otel_end_async_parent(otel_parent, status = "error", error = err)

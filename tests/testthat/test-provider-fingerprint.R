@@ -32,7 +32,7 @@ test_that("provider_fingerprint avoids delimiter collisions", {
       ),
       userinfo_id_selector = S7::new_property(
         S7::class_any,
-        default = quote(function(userinfo) userinfo$sub)
+        default = quote(function(userinfo) userinfo[["sub"]])
       ),
       userinfo_id_token_match = S7::new_property(
         S7::class_logical,
@@ -54,11 +54,19 @@ test_that("provider_fingerprint avoids delimiter collisions", {
         S7::class_logical,
         default = FALSE
       ),
+      jarm_tolerate_duplicate_top_level_iss = S7::new_property(
+        S7::class_logical,
+        default = FALSE
+      ),
       token_auth_style = S7::new_property(
         S7::class_character,
         default = "body"
       ),
-      tls_client_certificate_bound_access_tokens = S7::new_property(
+      jwks_uri = S7::new_property(
+        S7::class_character,
+        default = NA_character_
+      ),
+      mtls_client_certificate_bound_access_tokens = S7::new_property(
         S7::class_logical,
         default = FALSE
       ),
@@ -161,7 +169,7 @@ test_that("provider_fingerprint changes when callback security policy changes", 
       ),
       userinfo_id_selector = S7::new_property(
         S7::class_any,
-        default = quote(function(userinfo) userinfo$sub)
+        default = quote(function(userinfo) userinfo[["sub"]])
       ),
       userinfo_id_token_match = S7::new_property(
         S7::class_logical,
@@ -183,11 +191,19 @@ test_that("provider_fingerprint changes when callback security policy changes", 
         S7::class_logical,
         default = FALSE
       ),
+      jarm_tolerate_duplicate_top_level_iss = S7::new_property(
+        S7::class_logical,
+        default = FALSE
+      ),
       token_auth_style = S7::new_property(
         S7::class_character,
         default = "body"
       ),
-      tls_client_certificate_bound_access_tokens = S7::new_property(
+      jwks_uri = S7::new_property(
+        S7::class_character,
+        default = NA_character_
+      ),
+      mtls_client_certificate_bound_access_tokens = S7::new_property(
         S7::class_logical,
         default = FALSE
       ),
@@ -236,9 +252,69 @@ test_that("provider_fingerprint changes when callback security policy changes", 
     userinfo_url = strict@userinfo_url,
     allowed_algs = "ES256"
   )
+  jwks_override <- DummyProvider(
+    issuer = strict@issuer,
+    auth_url = strict@auth_url,
+    token_url = strict@token_url,
+    userinfo_url = strict@userinfo_url,
+    jwks_uri = "https://issuer.example.com/jwks.json"
+  )
+  tolerant_duplicate_iss <- DummyProvider(
+    issuer = strict@issuer,
+    auth_url = strict@auth_url,
+    token_url = strict@token_url,
+    userinfo_url = strict@userinfo_url,
+    jarm_tolerate_duplicate_top_level_iss = TRUE
+  )
 
   expect_false(identical(
     shinyOAuth:::provider_fingerprint(strict),
     shinyOAuth:::provider_fingerprint(loose)
   ))
+  expect_false(identical(
+    shinyOAuth:::provider_fingerprint(strict),
+    shinyOAuth:::provider_fingerprint(jwks_override)
+  ))
+  expect_false(identical(
+    shinyOAuth:::provider_fingerprint(strict),
+    shinyOAuth:::provider_fingerprint(tolerant_duplicate_iss)
+  ))
+})
+
+test_that("provider_fingerprint binds token exchange, JAR, and PAR policy", {
+  make_provider <- function(...) {
+    args <- utils::modifyList(
+      list(
+        name = "fingerprint-policy",
+        auth_url = "https://issuer.example.com/authorize",
+        token_url = "https://issuer.example.com/token",
+        issuer = "https://issuer.example.com",
+        token_auth_style = "body",
+        use_pkce = TRUE
+      ),
+      list(...)
+    )
+    do.call(oauth_provider, args)
+  }
+
+  base <- shinyOAuth:::provider_fingerprint(make_provider())
+  encryption_key <- as.list(openssl::rsa_keygen())[["pubkey"]]
+  variants <- list(
+    make_provider(extra_token_params = list(audience = "api")),
+    make_provider(extra_token_headers = c(`X-Tenant` = "tenant-a")),
+    make_provider(
+      par_url = "https://issuer.example.com/par",
+      par_required = TRUE
+    ),
+    make_provider(signed_request_object_required = TRUE),
+    make_provider(request_parameter_supported = TRUE),
+    make_provider(request_object_encryption_jwk = encryption_key)
+  )
+
+  for (variant in variants) {
+    expect_false(identical(
+      base,
+      shinyOAuth:::provider_fingerprint(variant)
+    ))
+  }
 })

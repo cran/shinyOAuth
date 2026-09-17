@@ -16,7 +16,7 @@ testthat::test_that("get_userinfo preserves transport errors", {
   on.exit(options(old_opts), add = TRUE)
 
   err <- testthat::with_mocked_bindings(
-    req_perform = function(request) {
+    req_perform = function(request, ...) {
       stop("network down")
     },
     .package = "httr2",
@@ -28,7 +28,7 @@ testthat::test_that("get_userinfo preserves transport errors", {
   testthat::expect_true(inherits(err, "shinyOAuth_transport_error"))
   testthat::expect_false(inherits(err, "shinyOAuth_userinfo_error"))
 
-  types <- vapply(events, function(event) event$type %||% "", character(1))
+  types <- vapply(events, function(event) event[["type"]] %||% "", character(1))
   testthat::expect_true("transport_error" %in% types)
   testthat::expect_false("audit_userinfo" %in% types)
 })

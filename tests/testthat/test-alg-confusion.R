@@ -28,7 +28,7 @@ minimal_client <- function(
     issuer = issuer,
     id_token_validation = TRUE,
     id_token_required = TRUE,
-    allowed_algs = c("RS256", "ES256")
+    id_token_allowed_algs = c("RS256", "ES256")
   )
   shinyOAuth::oauth_client(
     prov,
@@ -59,7 +59,7 @@ test_that("'none' algorithm is rejected unless skipping signature", {
   # When explicitly skipping signature, claims still validated
   withr::with_options(list(shinyOAuth.skip_id_sig = TRUE), {
     dec <- shinyOAuth:::validate_id_token(client, jwt_none)
-    expect_identical(dec$aud, client@client_id)
+    expect_identical(dec[["aud"]], client@client_id)
   })
 })
 
@@ -116,7 +116,7 @@ test_that("HS* configuration enforces RFC 7518 HMAC secret lengths by alg", {
       issuer = "https://issuer.example.com",
       id_token_validation = TRUE,
       id_token_required = TRUE,
-      allowed_algs = c("HS512")
+      id_token_allowed_algs = c("HS512")
     )
 
     expect_error(

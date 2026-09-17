@@ -17,7 +17,7 @@ make_jwt_with_header <- function(header_list, payload_list) {
 make_signed_jwt_h <- function(payload_list, key, kid = NULL) {
   header <- list(typ = "JWT", alg = "RS256")
   if (!is.null(kid)) {
-    header$kid <- kid
+    header[["kid"]] <- kid
   }
   clm <- do.call(jose::jwt_claim, payload_list)
   jose::jwt_encode_sig(clm, key = key, header = header)
@@ -27,7 +27,7 @@ make_signed_jwt_h <- function(payload_list, key, kid = NULL) {
 mock_jwt_response <- function(jwt_body) {
   function(req, ...) {
     httr2::response(
-      url = as.character(req$url),
+      url = as.character(req[["url"]]),
       status = 200,
       headers = list("content-type" = "application/jwt"),
       body = charToRaw(jwt_body)
@@ -131,10 +131,10 @@ test_that("UserInfo JWT with malformed crit (empty array) is rejected", {
 
 test_that("UserInfo signed JWT without crit header still passes", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "kid-crit-ok"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "kid-crit-ok"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   claims <- list(
@@ -154,17 +154,17 @@ test_that("UserInfo signed JWT without crit header still passes", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-ok")
+  expect_equal(result[["sub"]], "user-ok")
 })
 
 # --- JWKS refresh-on-kid-miss tests ------------------------------------------
 
 test_that("UserInfo JWT triggers JWKS refresh when kid misses initially", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "rotated-kid"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "rotated-kid"
+  jwk[["use"]] <- "sig"
 
   # First JWKS: empty (simulates stale cache without the new kid)
   stale_jwks <- list(keys = list())
@@ -188,7 +188,7 @@ test_that("UserInfo JWT triggers JWKS refresh when kid misses initially", {
     fetch_jwks = function(...) {
       fetch_call_count <<- fetch_call_count + 1L
       args <- list(...)
-      if (isTRUE(args$force_refresh)) {
+      if (isTRUE(args[["force_refresh"]])) {
         fresh_jwks
       } else {
         stale_jwks
@@ -199,9 +199,47 @@ test_that("UserInfo JWT triggers JWKS refresh when kid misses initially", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-rotated")
+  expect_equal(result[["sub"]], "user-rotated")
   # Should have fetched twice: once stale, once forced refresh
   expect_equal(fetch_call_count, 2L)
+})
+
+test_that("UserInfo JWT refreshes rotated material with the same kid", {
+  old_key <- openssl::rsa_keygen(2048)
+  new_key <- openssl::rsa_keygen(2048)
+  as_public_jwk <- function(key) {
+    jwk <- jsonlite::fromJSON(
+      write_test_jwk(key[["pubkey"]]),
+      simplifyVector = TRUE
+    )
+    jwk[["kid"]] <- "stable-kid"
+    jwk[["use"]] <- "sig"
+    jwk
+  }
+  stale_jwks <- list(keys = list(as_public_jwk(old_key)))
+  fresh_jwks <- list(keys = list(as_public_jwk(new_key)))
+  claims <- list(
+    sub = "user-rotated",
+    iss = "https://issuer.example.com",
+    aud = "abc"
+  )
+  jwt_body <- make_signed_jwt_h(claims, new_key, kid = "stable-kid")
+  cli <- make_userinfo_client()
+  fetches <- 0L
+
+  testthat::local_mocked_bindings(
+    req_with_retry = mock_jwt_response(jwt_body),
+    fetch_jwks = function(..., force_refresh = FALSE) {
+      fetches <<- fetches + 1L
+      if (isTRUE(force_refresh)) fresh_jwks else stale_jwks
+    },
+    jwks_force_refresh_allowed = function(...) TRUE,
+    .package = "shinyOAuth"
+  )
+
+  result <- get_userinfo(cli, token = "access-token")
+  expect_identical(result[["sub"]], "user-rotated")
+  expect_identical(fetches, 2L)
 })
 
 test_that("UserInfo JWT fails closed when JWKS refresh is rate-limited", {
@@ -228,8 +266,7 @@ test_that("UserInfo JWT fails closed when JWKS refresh is rate-limited", {
   )
 })
 
-test_that("UserInfo JWT does not refresh JWKS when kid is NULL", {
-  # When there's no kid in the header, no refresh-on-miss should happen
+test_that("UserInfo JWT attempts throttled JWKS recovery when kid is NULL", {
   key <- openssl::rsa_keygen(2048)
 
   claims <- list(sub = "user-no-kid", name = "No Kid User")
@@ -238,7 +275,7 @@ test_that("UserInfo JWT does not refresh JWKS when kid is NULL", {
 
   cli <- make_userinfo_client()
 
-  # JWKS is empty — should fail without attempting refresh
+  # JWKS remains empty after refresh, so verification must still fail.
   stale_jwks <- list(keys = list())
   refresh_called <- FALSE
   testthat::local_mocked_bindings(
@@ -256,6 +293,5 @@ test_that("UserInfo JWT does not refresh JWKS when kid is NULL", {
     class = "shinyOAuth_userinfo_error",
     regexp = "no compatible keys"
   )
-  # jwks_force_refresh_allowed should NOT have been called (no kid)
-  expect_false(refresh_called)
+  expect_true(refresh_called)
 })

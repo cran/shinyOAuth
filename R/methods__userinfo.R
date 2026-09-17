@@ -8,35 +8,84 @@
 
 ## 1.1 Fetch and parse userinfo ------------------------------------------------
 
-#' Get user info from OAuth 2.0 provider
+#' Fetch a user's profile (UserInfo)
 #'
 #' @description
-#' Fetches user information from the provider's userinfo endpoint using the
-#' supplied access token. Emits an audit event with redacted details. When a
-#' validated ID token baseline is available, or when provider policy requires
-#' one, this helper also enforces OIDC UserInfo subject binding before
-#' returning.
+#' Retrieve profile information using the user's access token. Call this when
+#' fetching a profile on demand, reloading profile fields, or managing tokens
+#' outside the Shiny module. It returns the provider's profile as an R list.
+#' The Shiny module fetches and stores this information during login when
+#' `userinfo_required = TRUE`; that result is available as `auth[["token"]]@userinfo`.
 #'
-#' @param oauth_client [OAuthClient] object. The client must have a
+#' @details
+#' The provider must have a `userinfo_url`: the OpenID Connect (OIDC) UserInfo
+#' endpoint, or an OAuth provider's profile API. With OIDC, this function checks that
+#' userinfo belongs to the same user as a validated ID token when available.
+#' If provider policy requires that comparison, an absent validated ID token
+#' causes an error. Prefer passing the complete [OAuthToken], which carries
+#' the ID token needed for this check.
+#'
+#' Ordinary JSON profiles and signed JWT UserInfo responses are supported.
+#' Signed responses are verified using the provider's signing keys and
+#' `userinfo_allowed_algs`; encrypted UserInfo is not supported. Set
+#' `userinfo_signed_jwt_required` on the provider to require a signed response,
+#' and `userinfo_jwt_required_time_claims` on the client to require time claims
+#' such as `exp`. Present time claims are checked even when not required.
+#'
+#' For certificate-bound tokens (mTLS) and key-bound tokens (DPoP), the helper
+#' uses the client's certificate or signing key and checks the token binding.
+#' It handles one DPoP nonce challenge with a fresh-proof retry. See the
+#' [advanced security vignette](https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html)
+#' for configuration.
+#'
+#' @param client [OAuthClient] object. The client must have a
 #' `userinfo_url` configured in its [OAuthProvider].
 #' @param token Either an [OAuthToken] object or a raw access token string.
 #' @param token_type Optional override for the access token type when `token`
 #'   is provided as a raw string. Supported values are `Bearer` and `DPoP`.
-#' @param shiny_session Optional pre-captured Shiny session context (from
-#'   `capture_shiny_session_context()`) to include in audit events and span
-#'   attributes. Used when calling from async workers that lack access to the
-#'   reactive domain.
+#' @param shiny_session Optional captured Shiny session details for audit events.
+#'   Normally supplied by the module; leave `NULL` when calling directly.
 #'
 #' @return A list containing the user information returned by the provider.
+#'   For JSON responses, arrays are simplified to vectors or data frames where
+#'   possible. Signed JWT responses retain arrays as lists.
 #'
 #' @example inst/examples/token_methods.R
 #'
+#' @param oauth_client Compatibility alias for `client`. Supply only one spelling.
 #' @export
 get_userinfo <- function(
+  client,
+  token,
+  token_type = NULL,
+  shiny_session = NULL,
+  oauth_client = NULL
+) {
+  oauth_client <- resolve_argument_alias(
+    client,
+    oauth_client,
+    missing(client),
+    missing(oauth_client),
+    "client",
+    "oauth_client"
+  )
+  fetch_userinfo(
+    oauth_client,
+    token,
+    token_type = token_type,
+    shiny_session = shiny_session,
+    validate_claims = FALSE
+  )
+}
+
+# Login and refresh validate requested claims before JSON simplification can
+# erase the distinction between a scalar and a single-element array.
+fetch_userinfo <- function(
   oauth_client,
   token,
   token_type = NULL,
-  shiny_session = NULL
+  shiny_session = NULL,
+  validate_claims = TRUE
 ) {
   # Type checks/helpers --------------------------------------------------------
 
@@ -47,9 +96,6 @@ get_userinfo <- function(
   if (S7::S7_inherits(token, class = OAuthToken)) {
     baseline_token <- token
     access_token <- token@access_token
-    if (is_valid_string(token@token_type)) {
-      token_type <- token@token_type
-    }
   } else {
     access_token <- token
   }
@@ -66,8 +112,8 @@ get_userinfo <- function(
     token = token,
     token_type = token_type
   )
-  access_token <- token_info$access_token
-  effective_token_type <- token_info$token_type
+  access_token <- token_info[["access_token"]]
+  effective_token_type <- token_info[["token_type"]]
 
   userinfo_url <- resolve_provider_endpoint_url(
     oauth_client@provider,
@@ -86,7 +132,8 @@ get_userinfo <- function(
         req <- resource_req(
           token = token,
           url = userinfo_url,
-          oauth_client = oauth_client,
+          follow_redirect = NULL,
+          client = oauth_client,
           token_type = effective_token_type
         )
 
@@ -129,7 +176,7 @@ get_userinfo <- function(
         reject_redirect_response(resp, context = "userinfo")
 
         # HTTP status errors are userinfo endpoint failures, not transport failures.
-        if (httr2::resp_is_error(resp)) {
+        if (httr2::resp_status(resp) != 200L) {
           err_http(
             c("x" = "Failed to get user info"),
             resp,
@@ -138,12 +185,9 @@ get_userinfo <- function(
         }
 
         # Detect Content-Type to handle JWT-encoded userinfo (OIDC Core §5.3.2)
-        resp_ct <- try(httr2::resp_content_type(resp), silent = TRUE)
-        if (inherits(resp_ct, "try-error")) {
-          resp_ct <- NA_character_
-        }
+        resp_ct <- otel_http_content_type(resp = resp)
         is_jwt_response <- is_valid_string(resp_ct) &&
-          grepl("^application/jwt", resp_ct, ignore.case = TRUE)
+          identical(tolower(resp_ct), "application/jwt")
 
         otel_set_span_attributes(
           attributes = list(
@@ -197,18 +241,46 @@ get_userinfo <- function(
         } else {
           ui <- try(
             {
+              if (!response_has_json_media_type(resp)) {
+                err_parse("UserInfo response must use a JSON media type")
+              }
               body_txt <- httr2::resp_body_string(resp)
               reject_duplicate_json_object_members(
                 body_txt,
                 "UserInfo response JSON"
               )
               assert_json_text_is_object(body_txt, "UserInfo response JSON")
-              jsonlite::fromJSON(body_txt, simplifyVector = TRUE)
+              jsonlite::fromJSON(body_txt, simplifyVector = FALSE)
             },
             silent = TRUE
           )
         }
         if (inherits(ui, "try-error")) {
+          parser_error <- attr(ui, "condition", exact = TRUE)
+          if (
+            is_jwt_response &&
+              inherits(parser_error, "shinyOAuth_userinfo_error")
+          ) {
+            jwt_body <- try(httr2::resp_body_string(resp), silent = TRUE)
+            if (inherits(jwt_body, "try-error")) {
+              jwt_body <- NULL
+            }
+            audit_userinfo_event(
+              oauth_client,
+              status = "parse_error",
+              shiny_session = shiny_session,
+              extra = c(
+                list(parse = "jwt"),
+                safe_parse_failure_context(
+                  jwt_body,
+                  "userinfo_jwt",
+                  parser_error
+                )
+              )
+            )
+            stop(parser_error)
+          }
+
           # Extract non-sensitive context to aid debugging without leaking tokens
           url <- try(httr2::resp_url(resp), silent = TRUE)
           if (inherits(url, "try-error")) {
@@ -218,40 +290,34 @@ get_userinfo <- function(
           if (inherits(status, "try-error")) {
             status <- NA_integer_
           }
-          headers <- try(httr2::resp_headers(resp), silent = TRUE)
-          ct <- NA_character_
-          if (!inherits(headers, "try-error") && is.list(headers)) {
-            ct <- headers[["content-type"]] %||% NA_character_
-          }
+          ct <- resp_ct %||% NA_character_
           body_str <- try(httr2::resp_body_string(resp), silent = TRUE)
           if (inherits(body_str, "try-error")) {
             body_str <- NA_character_
           }
-          body_digest <- NA_character_
-          if (is_valid_string(body_str)) {
-            dig <- try(openssl::sha256(charToRaw(body_str)), silent = TRUE)
-            if (!inherits(dig, "try-error")) {
-              body_digest <- paste0(
-                sprintf("%02x", as.integer(dig)),
-                collapse = ""
-              )
-            }
-          }
+          parse_type <- if (is_jwt_response) "jwt" else "json"
+          parse_context <- safe_parse_failure_context(
+            body_str,
+            paste0("userinfo_", parse_type),
+            parser_error
+          )
 
           # Emit audit event even on parse failures
           audit_userinfo_event(
             oauth_client,
             status = "parse_error",
             shiny_session = shiny_session,
-            extra = list(
-              http_status = status,
-              url = url,
-              content_type = ct,
-              body_digest = body_digest
+            extra = c(
+              list(
+                http_status = status,
+                url = url,
+                content_type = ct,
+                parse = parse_type
+              ),
+              parse_context
             )
           )
 
-          parse_type <- if (is_jwt_response) "jwt" else "json"
           err_userinfo(
             c(
               "x" = if (is_jwt_response) {
@@ -259,48 +325,61 @@ get_userinfo <- function(
               } else {
                 "Failed to parse userinfo response as JSON"
               },
-              "!" = conditionMessage(attr(ui, "condition")),
               "i" = if (is_valid_string(ct)) {
                 paste0("Content-Type: ", ct)
               } else {
                 NULL
               },
               "i" = if (!is.na(status)) paste0("Status: ", status) else NULL,
-              "i" = if (is_valid_string(url)) paste0("URL: ", url) else NULL
+              "i" = if (allow_expose_error_body() && is_valid_string(url)) {
+                paste0("URL: ", otel_http_url_full(url))
+              } else {
+                NULL
+              }
             ),
-            context = list(
-              phase = "userinfo",
-              parse = parse_type,
-              http_status = status,
-              url = url,
-              content_type = ct,
-              body_digest = body_digest
+            context = c(
+              list(
+                parse = parse_type,
+                http_status = status,
+                url = url,
+                content_type = ct
+              ),
+              parse_context
             )
           )
         }
 
+        if (!is_jwt_response) {
+          validate_userinfo_json_claim_types(ui, oauth_client, shiny_session)
+        }
+        if (validate_claims) {
+          validate_essential_claims(oauth_client, ui, "userinfo")
+        }
+        if (!is_jwt_response) {
+          ui <- jsonlite::fromJSON(body_txt, simplifyVector = TRUE)
+        }
+
         otel_set_span_attributes(
           attributes = list(
-            oauth.userinfo.subject_present = isTRUE(is_valid_string(ui$sub))
+            oauth.userinfo.subject_present = isTRUE(
+              is_valid_string(ui[["sub"]])
+            )
           )
         )
 
         # OIDC Core §5.3: "The sub Claim MUST always be returned in the UserInfo
-        # Response." Enforce for OIDC providers (issuer configured); leave generic
-        # non-OIDC profile endpoints alone.
-        if (
-          is_valid_string(oauth_client@provider@issuer) &&
-            !is.na(oauth_client@provider@issuer)
-        ) {
-          if (!is_valid_string(ui$sub)) {
+        # Response." Enforce for OIDC providers; leave generic OAuth profile
+        # endpoints alone even when their RFC 8414 metadata has an issuer.
+        if (provider_uses_oidc(oauth_client@provider)) {
+          if (!is_valid_oidc_sub(ui[["sub"]])) {
             audit_userinfo_event(
               oauth_client,
               status = "userinfo_missing_sub",
               shiny_session = shiny_session
             )
             err_userinfo(c(
-              "x" = "UserInfo response missing required 'sub' claim (OIDC Core 5.3)",
-              "i" = "OIDC providers MUST always return a 'sub' claim in the UserInfo response"
+              "x" = "UserInfo response has a missing or invalid 'sub' claim",
+              "i" = "OIDC sub values must contain 1 to 255 ASCII characters"
             ))
           }
         }
@@ -393,6 +472,35 @@ audit_userinfo_event <- function(
   invisible(NULL)
 }
 
+#' Validate protocol-sensitive JSON UserInfo claim types
+#'
+#' Checks the subject and standard claim types before claim-policy validation.
+#' @param claims UserInfo claims parsed without simplifying JSON arrays.
+#' @param oauth_client OAuth client associated with the response.
+#' @param shiny_session Optional Shiny session context for audit events.
+#' @return Invisibly returns `TRUE`, or raises a UserInfo error.
+#' @keywords internal
+#' @noRd
+validate_userinfo_json_claim_types <- function(
+  claims,
+  oauth_client,
+  shiny_session = NULL
+) {
+  if (!provider_uses_oidc(oauth_client@provider)) {
+    return(invisible(TRUE))
+  }
+  if (!is_valid_oidc_sub(claims[["sub"]])) {
+    audit_userinfo_event(
+      oauth_client,
+      status = "userinfo_missing_sub",
+      shiny_session = shiny_session
+    )
+    err_userinfo("UserInfo response has a missing or invalid 'sub' claim")
+  }
+  validate_oidc_standard_claim_types(claims, err_userinfo, "UserInfo")
+  invisible(TRUE)
+}
+
 #' Internal: decode JWT-encoded userinfo response (OIDC Core §5.3.2)
 #'
 #' When the UserInfo endpoint returns Content-Type: application/jwt, the
@@ -406,7 +514,7 @@ audit_userinfo_event <- function(
 #' Encrypted JWTs (JWE, 5-part compact serialization) are detected and
 #' rejected with a clear error since JWE decryption is not supported.
 #'
-#' Signature verification uses the provider's `allowed_algs` (filtered to
+#' Signature verification uses the provider's `userinfo_allowed_algs` (filtered to
 #' asymmetric algorithms) and fail-closes unconditionally: if the JWKS
 #' cannot be fetched, no compatible keys exist, or all candidate keys fail
 #' verification, an error is raised.
@@ -417,7 +525,7 @@ audit_userinfo_event <- function(
 #' `alg=none` is always rejected unless the testing-only softener
 #' `allow_unsigned_userinfo_jwt()` permits it (requires test or interactive mode).
 #' Unparseable headers, missing issuer/JWKS infrastructure, and algorithms
-#' not in `allowed_algs` all raise errors with audit events.
+#' not in `userinfo_allowed_algs` all raise errors with audit events.
 #'
 #' @param resp An httr2 response object with a JWT body.
 #' @param oauth_client An OAuthClient object (used for JWKS-based verification).
@@ -462,20 +570,22 @@ decode_userinfo_jwt <- function(
   header <- try(parse_jwt_header(jwt_str), silent = TRUE)
 
   if (inherits(header, "try-error")) {
-    header_reason <- tryCatch(
-      conditionMessage(attr(header, "condition")),
-      error = function(e) as.character(header)
-    )
     audit_userinfo_event(
       oauth_client,
       status = "userinfo_jwt_header_parse_failed",
       shiny_session = shiny_session
     )
-    err_userinfo(c(
-      "x" = "UserInfo JWT header could not be parsed",
-      "i" = header_reason,
-      "i" = "A well-formed JWT header is required for verification (OIDC Core 5.3.2)"
-    ))
+    err_userinfo(
+      c(
+        "x" = "UserInfo JWT header could not be parsed",
+        "i" = "A well-formed JWT header is required for verification (OIDC Core 5.3.2)"
+      ),
+      context = safe_parse_failure_context(
+        jwt_str,
+        "userinfo_jwt_header",
+        attr(header, "condition", exact = TRUE)
+      )
+    )
   }
 
   header_fields <- tryCatch(
@@ -504,13 +614,13 @@ decode_userinfo_jwt <- function(
     }
   )
 
-  alg <- toupper(header_fields$alg)
-  kid <- header_fields$kid
+  alg <- header_fields[["alg"]]
+  kid <- header_fields[["kid"]]
 
   # Always reject alg=none — unsigned JWTs cannot be trusted for userinfo.
 
   # Testing-only escape hatch, gated via allow_unsigned_userinfo_jwt() softener
-  if (alg == "NONE") {
+  if (identical(alg, "none")) {
     if (allow_unsigned_userinfo_jwt()) {
       payload <- parse_jwt_payload(jwt_str)
       return(as.list(payload))
@@ -527,10 +637,14 @@ decode_userinfo_jwt <- function(
     ))
   }
 
-  # Use provider's allowed_algs for algorithm enforcement (filtering to
+  # Use provider's UserInfo signing policy for algorithm enforcement (filtering to
   # asymmetric only, since HMAC is not supported for userinfo JWTs)
   asymmetric_algs <- intersect(
-    toupper(prov@allowed_algs),
+    vapply(
+      prov@userinfo_allowed_algs %||% prov@allowed_algs,
+      canonicalize_jws_alg,
+      character(1)
+    ),
     c(
       "RS256",
       "RS384",
@@ -538,7 +652,8 @@ decode_userinfo_jwt <- function(
       "ES256",
       "ES384",
       "ES512",
-      "EDDSA"
+      "Ed25519",
+      "EdDSA"
     )
   )
 
@@ -551,16 +666,15 @@ decode_userinfo_jwt <- function(
       extra = list(jwt_alg = alg)
     )
     err_userinfo(c(
-      "x" = paste0(
-        "UserInfo JWT algorithm '",
-        alg,
-        "' is not in provider's allowed asymmetric algorithms"
+      protocol_diagnostic_message(
+        "UserInfo JWT algorithm is not in provider's allowed asymmetric algorithms",
+        alg
       ),
       "i" = paste0(
         "Allowed algorithms: ",
         paste(asymmetric_algs, collapse = ", ")
       ),
-      "i" = "Adjust the provider's allowed_algs if this algorithm should be permitted"
+      "i" = "Adjust the provider's userinfo_allowed_algs if this algorithm should be permitted"
     ))
   }
 
@@ -580,7 +694,8 @@ decode_userinfo_jwt <- function(
 
   # Verify signature against JWKS
   jwks <- try(
-    fetch_jwks(
+    fetch_client_jwks(
+      oauth_client,
       prov@issuer,
       prov@jwks_cache,
       pins = prov@jwks_pins %||% character(),
@@ -608,7 +723,8 @@ decode_userinfo_jwt <- function(
     kid = kid,
     pins = prov@jwks_pins %||% character()
   )
-  keys <- filter_jwks_for_alg(keys, alg)
+  keys <- filter_jwks_for_alg(keys, alg, asymmetric_algs)
+  did_force_refresh <- FALSE
 
   # One-shot JWKS refresh-on-kid-miss: if kid is present but no candidate keys
   # match, force-refresh JWKS once then re-select (mirrors validate_id_token()).
@@ -628,11 +744,14 @@ decode_userinfo_jwt <- function(
         jwks_host_allow_only = {
           ao <- try(prov@jwks_host_allow_only, silent = TRUE)
           if (inherits(ao, "try-error")) NA_character_ else ao
-        }
+        },
+        jwks_uri_override = provider_jwks_uri(prov)
       ))
     ) {
+      did_force_refresh <- TRUE
       jwks <- try(
-        fetch_jwks(
+        fetch_client_jwks(
+          oauth_client,
           prov@issuer,
           prov@jwks_cache,
           force_refresh = TRUE,
@@ -649,52 +768,74 @@ decode_userinfo_jwt <- function(
           kid = kid,
           pins = prov@jwks_pins %||% character()
         )
-        keys <- filter_jwks_for_alg(keys, alg)
+        keys <- filter_jwks_for_alg(keys, alg, asymmetric_algs)
       }
     }
   }
 
-  if (length(keys) > 0L) {
-    for (jk in keys) {
-      pub <- try(jwk_to_pubkey(jk), silent = TRUE)
-      if (inherits(pub, "try-error")) {
-        next
-      }
-      if (!isTRUE(verify_jws_signature_no_time(jwt_str, pub, alg))) {
-        next
-      }
+  verified_key <- verify_jwt_with_jwks(jwt_str, keys, alg)
+  if (
+    is.null(verified_key) &&
+      !isTRUE(did_force_refresh)
+  ) {
+    refreshed_jwks <- try(
+      force_refresh_client_jwks(
+        oauth_client,
+        prov@issuer,
+        prov@jwks_cache,
+        pins = prov@jwks_pins %||% character(),
+        pin_mode = prov@jwks_pin_mode %||% "any",
+        provider = prov
+      ),
+      silent = TRUE
+    )
+    if (!inherits(refreshed_jwks, "try-error") && !is.null(refreshed_jwks)) {
+      keys <- select_candidate_jwks(
+        refreshed_jwks,
+        header_alg = alg,
+        kid = kid,
+        pins = prov@jwks_pins %||% character()
+      )
+      keys <- filter_jwks_for_alg(keys, alg, asymmetric_algs)
+      verified_key <- verify_jwt_with_jwks(jwt_str, keys, alg)
+    }
+  }
 
-      claims <- try(parse_jwt_payload(jwt_str), silent = TRUE)
-      if (inherits(claims, "try-error")) {
-        audit_userinfo_event(
-          oauth_client,
-          status = "userinfo_jwt_payload_parse_failed",
-          shiny_session = shiny_session
-        )
-        err_userinfo(c(
-          "x" = "UserInfo JWT payload could not be parsed",
-          "i" = tryCatch(
-            conditionMessage(attr(claims, "condition")),
-            error = function(e) as.character(claims)
-          )
-        ))
-      }
-
-      claims <- as.list(claims)
-      # §5.3.2 MUST: signed userinfo MUST contain iss matching the
-      # OP's Issuer Identifier and aud matching/including the RP's
-      # Client ID. Temporal validation is delegated here so provider leeway
-      # is applied consistently across signed UserInfo JWT verification.
-      validate_signed_userinfo_claims(
-        claims,
-        expected_issuer = prov@issuer,
-        expected_client_id = oauth_client@client_id,
-        oauth_client = oauth_client,
+  if (!is.null(verified_key)) {
+    claims <- try(parse_jwt_payload(jwt_str), silent = TRUE)
+    if (inherits(claims, "try-error")) {
+      audit_userinfo_event(
+        oauth_client,
+        status = "userinfo_jwt_payload_parse_failed",
         shiny_session = shiny_session
       )
-      return(claims)
+      err_userinfo(
+        "UserInfo JWT payload could not be parsed",
+        context = safe_parse_failure_context(
+          jwt_str,
+          "userinfo_jwt_payload",
+          attr(claims, "condition", exact = TRUE)
+        )
+      )
     }
 
+    claims <- as.list(claims)
+    # §5.3.2 MUST: signed userinfo MUST contain iss matching the
+    # OP's Issuer Identifier and aud matching/including the RP's
+    # Client ID. Temporal validation is delegated here so provider leeway
+    # is applied consistently across signed UserInfo JWT verification.
+    validate_signed_userinfo_claims(
+      claims,
+      expected_issuer = prov@issuer,
+      expected_client_id = oauth_client@client_id,
+      oauth_client = oauth_client,
+      shiny_session = shiny_session
+    )
+    validate_userinfo_json_claim_types(claims, oauth_client, shiny_session)
+    return(claims)
+  }
+
+  if (length(keys) > 0L) {
     # Candidate keys existed but none verified the signature —
     # this indicates tampering or serious misconfiguration.
     audit_userinfo_event(
@@ -753,8 +894,8 @@ validate_signed_userinfo_claims <- function(
   }
 
   # sub MUST always be returned in the UserInfo Response (OIDC Core §5.3)
-  sub <- claims$sub
-  if (!is_valid_string(sub)) {
+  sub <- claims[["sub"]]
+  if (!is_valid_oidc_sub(sub)) {
     if (!is.null(oauth_client)) {
       audit_userinfo_event(
         oauth_client,
@@ -763,12 +904,12 @@ validate_signed_userinfo_claims <- function(
       )
     }
     err_userinfo(c(
-      "x" = "Signed UserInfo JWT missing required 'sub' claim (OIDC Core 5.3)"
+      "x" = "Signed UserInfo JWT has a missing or invalid 'sub' claim"
     ))
   }
 
   # iss MUST be present and match the OP's Issuer Identifier
-  iss <- claims$iss
+  iss <- claims[["iss"]]
   if (!is_valid_string(iss)) {
     if (!is.null(oauth_client)) {
       audit_userinfo_event(
@@ -790,15 +931,17 @@ validate_signed_userinfo_claims <- function(
         shiny_session = shiny_session
       )
     }
-    err_userinfo(c(
-      "x" = "Signed UserInfo JWT 'iss' claim does not match provider issuer (OIDC Core 5.3.2)",
-      "i" = paste0("Expected: ", expected_issuer),
-      "i" = paste0("Got: ", iss)
-    ))
+    err_claim_validation(
+      "Signed UserInfo JWT 'iss' claim does not match provider issuer (OIDC Core 5.3.2)",
+      claim = "iss",
+      expected = expected_issuer,
+      received = iss,
+      error = err_userinfo
+    )
   }
 
   # aud MUST be or include the RP's Client ID
-  aud <- claims$aud
+  aud <- normalize_jwt_audience(claims[["aud"]])
   if (
     is.null(aud) ||
       (is.character(aud) && (length(aud) == 0L || !any(nzchar(aud))))
@@ -822,23 +965,26 @@ validate_signed_userinfo_claims <- function(
         shiny_session = shiny_session
       )
     }
-    err_userinfo(c(
-      "x" = "Signed UserInfo JWT 'aud' claim does not include client_id (OIDC Core 5.3.2)",
-      "i" = paste0("Expected client_id: ", expected_client_id),
-      "i" = paste0("Got aud: ", paste(aud, collapse = ", "))
-    ))
+    err_claim_validation(
+      "Signed UserInfo JWT 'aud' claim does not include client_id (OIDC Core 5.3.2)",
+      claim = "aud",
+      expected = expected_client_id,
+      received = aud,
+      error = err_userinfo
+    )
   }
 
   required_temporal_claims <- if (!is.null(oauth_client)) {
     unique(tolower(
-      oauth_client@userinfo_jwt_required_temporal_claims %||% character(0)
+      oauth_client@userinfo_jwt_required_time_claims %||% character(0)
     ))
   } else {
     character(0)
   }
+  claim_names <- names(claims) %||% character(0)
   missing_temporal_claims <- setdiff(
     required_temporal_claims,
-    names(claims) %||% character(0)
+    claim_names
   )
   if (length(missing_temporal_claims) > 0) {
     fail_signed_userinfo_claim_validation(
@@ -849,7 +995,7 @@ validate_signed_userinfo_claims <- function(
           paste(missing_temporal_claims, collapse = ", ")
         ),
         "i" = paste(
-          "Configure userinfo_jwt_required_temporal_claims = character(0) to accept signed UserInfo JWTs without those temporal claims."
+          "Configure userinfo_jwt_required_time_claims = character(0) to accept signed UserInfo JWTs without those temporal claims."
         )
       ),
       oauth_client = oauth_client,
@@ -857,8 +1003,8 @@ validate_signed_userinfo_claims <- function(
     )
   }
 
-  if (!is.null(claims$exp)) {
-    if (!jwt_is_single_finite_number(claims$exp)) {
+  if ("exp" %in% claim_names) {
+    if (!jwt_is_single_finite_number(claims[["exp"]])) {
       fail_signed_userinfo_claim_validation(
         status = "userinfo_jwt_invalid_exp",
         bullets = c(
@@ -869,8 +1015,8 @@ validate_signed_userinfo_claims <- function(
       )
     }
 
-    exp_val <- as.numeric(claims$exp)
-    if (exp_val < (now - lwe)) {
+    exp_val <- as.numeric(claims[["exp"]])
+    if (exp_val <= (now - lwe)) {
       fail_signed_userinfo_claim_validation(
         status = "userinfo_jwt_expired",
         bullets = c(
@@ -891,8 +1037,8 @@ validate_signed_userinfo_claims <- function(
     }
   }
 
-  if (!is.null(claims$iat)) {
-    if (!jwt_is_single_finite_number(claims$iat)) {
+  if ("iat" %in% claim_names) {
+    if (!jwt_is_single_finite_number(claims[["iat"]])) {
       fail_signed_userinfo_claim_validation(
         status = "userinfo_jwt_invalid_iat",
         bullets = c(
@@ -903,7 +1049,17 @@ validate_signed_userinfo_claims <- function(
       )
     }
 
-    iat_val <- as.numeric(claims$iat)
+    iat_val <- as.numeric(claims[["iat"]])
+    if ("exp" %in% claim_names && iat_val > exp_val) {
+      fail_signed_userinfo_claim_validation(
+        status = "userinfo_jwt_invalid_iat",
+        bullets = c(
+          "x" = "Signed UserInfo JWT iat claim must not be after exp"
+        ),
+        oauth_client = oauth_client,
+        shiny_session = shiny_session
+      )
+    }
     if (iat_val > (now + lwe)) {
       fail_signed_userinfo_claim_validation(
         status = "userinfo_jwt_iat_future",
@@ -925,8 +1081,8 @@ validate_signed_userinfo_claims <- function(
     }
   }
 
-  if (!is.null(claims$nbf)) {
-    if (!jwt_is_single_finite_number(claims$nbf)) {
+  if ("nbf" %in% claim_names) {
+    if (!jwt_is_single_finite_number(claims[["nbf"]])) {
       fail_signed_userinfo_claim_validation(
         status = "userinfo_jwt_invalid_nbf",
         bullets = c(
@@ -937,7 +1093,17 @@ validate_signed_userinfo_claims <- function(
       )
     }
 
-    nbf_val <- as.numeric(claims$nbf)
+    nbf_val <- as.numeric(claims[["nbf"]])
+    if ("exp" %in% claim_names && nbf_val > exp_val) {
+      fail_signed_userinfo_claim_validation(
+        status = "userinfo_jwt_invalid_nbf",
+        bullets = c(
+          "x" = "Signed UserInfo JWT nbf claim must not be after exp"
+        ),
+        oauth_client = oauth_client,
+        shiny_session = shiny_session
+      )
+    }
     if (nbf_val > (now + lwe)) {
       fail_signed_userinfo_claim_validation(
         status = "userinfo_jwt_nbf_future",
@@ -994,10 +1160,9 @@ fail_signed_userinfo_claim_validation <- function(
 
 #' Verify UserInfo and ID token subject consistency
 #'
-#' Used once both the ID token and UserInfo payload are available. The
-#' comparison uses the provider's `userinfo_id_selector`, so custom selector
-#' policies also define the subject that gets matched against the validated ID
-#' token baseline.
+#' Used once both the ID token and UserInfo payload are available. OIDC requires
+#' the actual `sub` claims to match; provider-specific identity selectors are
+#' reserved for application identity and audit fields.
 #'
 #' @param oauth_client OAuth client carrying provider policy.
 #' @param userinfo UserInfo claim list.
@@ -1056,10 +1221,9 @@ normalize_userinfo_subject_value <- function(ui_val, strict = FALSE) {
 
 #' Verify UserInfo and ID token subject consistency
 #'
-#' Used once both the ID token and UserInfo payload are available. The
-#' comparison uses the provider's `userinfo_id_selector`, so custom selector
-#' policies also define the subject that gets matched against the validated ID
-#' token baseline.
+#' Used once both the ID token and UserInfo payload are available. OIDC requires
+#' the actual `sub` claims to match; provider-specific identity selectors are
+#' reserved for application identity and audit fields.
 #'
 #' @param oauth_client OAuth client carrying provider policy.
 #' @param userinfo UserInfo claim list.
@@ -1085,13 +1249,6 @@ verify_userinfo_id_token_subject_match <- function(
     err_input("id_token must be a valid string")
   }
 
-  if (
-    is.null(oauth_client@provider@userinfo_id_selector) ||
-      !is.function(oauth_client@provider@userinfo_id_selector)
-  ) {
-    err_config("provider userinfo_id_selector is not configured")
-  }
-
   # Compare -----------------------------------------------------------------
 
   # Parse id_token payload without re-validating signature
@@ -1105,12 +1262,11 @@ verify_userinfo_id_token_subject_match <- function(
     ))
   }
 
-  id_sub <- id_payload$sub
-  ui_val <- oauth_client@provider@userinfo_id_selector(userinfo)
-  ui_sub <- normalize_userinfo_subject_value(ui_val, strict = TRUE)
+  id_sub <- id_payload[["sub"]]
+  ui_sub <- userinfo[["sub"]]
 
-  if (!is_valid_string(id_sub) || !is_valid_string(ui_sub)) {
-    err_userinfo("Missing sub claim in id_token or invalid userinfo subject")
+  if (!is_valid_oidc_sub(id_sub) || !is_valid_oidc_sub(ui_sub)) {
+    err_userinfo("Missing or invalid sub claim in id_token or userinfo")
   }
 
   if (!identical(id_sub, ui_sub)) {

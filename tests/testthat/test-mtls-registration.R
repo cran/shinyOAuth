@@ -1,7 +1,14 @@
+test_that("OIDC registration JWKS URIs require HTTPS even on loopback", {
+  for (uri in c("http://localhost/keys", "http://127.0.0.1/keys")) {
+    expect_error(validate_mtls_registration_jwks_uri(uri), "HTTPS")
+  }
+  expect_silent(validate_mtls_registration_jwks_uri("https://example.com/keys"))
+})
+
 make_mtls_registration_client <- function(
   token_auth_style,
-  tls_client_certificate_bound_access_tokens = FALSE,
-  mtls_request_certificate_bound_access_tokens = FALSE
+  mtls_client_certificate_bound_access_tokens = FALSE,
+  mtls_certificate_bound_access_tokens = FALSE
 ) {
   provider <- oauth_provider(
     name = "example",
@@ -12,7 +19,7 @@ make_mtls_registration_client <- function(
     id_token_required = FALSE,
     id_token_validation = FALSE,
     token_auth_style = token_auth_style,
-    tls_client_certificate_bound_access_tokens = tls_client_certificate_bound_access_tokens
+    mtls_client_certificate_bound_access_tokens = mtls_client_certificate_bound_access_tokens
   )
 
   oauth_client(
@@ -21,10 +28,10 @@ make_mtls_registration_client <- function(
     client_secret = "",
     redirect_uri = "http://localhost:8100/callback",
     scopes = character(0),
-    tls_client_cert_file = mtls_pem_fixture("client-cert.pem"),
-    tls_client_key_file = mtls_pem_fixture("client-key.pem"),
-    tls_client_ca_file = mtls_pem_fixture("ca-cert.pem"),
-    mtls_request_certificate_bound_access_tokens = mtls_request_certificate_bound_access_tokens
+    mtls_client_cert_file = mtls_pem_fixture("client-cert.pem"),
+    mtls_client_key_file = mtls_pem_fixture("client-key.pem"),
+    mtls_client_ca_file = mtls_pem_fixture("ca-cert.pem"),
+    mtls_certificate_bound_access_tokens = mtls_certificate_bound_access_tokens
   )
 }
 
@@ -33,9 +40,9 @@ test_that("oauth_client_mtls_registration derives subject DN metadata", {
 
   metadata <- shinyOAuth::oauth_client_mtls_registration(client)
 
-  expect_identical(metadata$token_endpoint_auth_method, "tls_client_auth")
+  expect_identical(metadata[["token_endpoint_auth_method"]], "tls_client_auth")
   expect_identical(
-    metadata$tls_client_auth_subject_dn,
+    metadata[["tls_client_auth_subject_dn"]],
     "CN=shiny-mtls-client,OU=Tests,O=shinyOAuth,L=Local,ST=NA,C=US"
   )
 })
@@ -65,13 +72,62 @@ test_that("oauth_client_mtls_registration supports explicit SAN identifiers", {
     metadata <- shinyOAuth::oauth_client_mtls_registration(
       client,
       tls_client_auth_type = identifier,
-      tls_client_auth_value = identifiers[[identifier]]$value
+      tls_client_auth_value = identifiers[[identifier]][["value"]]
     )
 
-    expect_identical(metadata$token_endpoint_auth_method, "tls_client_auth")
     expect_identical(
-      metadata[[identifiers[[identifier]]$field]],
-      identifiers[[identifier]]$value
+      metadata[["token_endpoint_auth_method"]],
+      "tls_client_auth"
+    )
+    expect_identical(
+      metadata[[identifiers[[identifier]][["field"]]]],
+      identifiers[[identifier]][["value"]]
+    )
+  }
+})
+
+test_that("explicit mTLS identifiers are validated after normalization", {
+  client <- make_mtls_registration_client("tls_client_auth")
+  for (type in c("subject_dn", "san_dns", "san_uri", "san_ip", "san_email")) {
+    for (value in c(" ", "\t", "client\nname", "client\r", "client\x01name")) {
+      expect_error(
+        oauth_client_mtls_registration(
+          client,
+          tls_client_auth_type = type,
+          tls_client_auth_value = value
+        ),
+        class = "shinyOAuth_input_error"
+      )
+    }
+  }
+  for (value in c(
+    "not-an-ip",
+    "256.0.0.1",
+    "192.0.2.1.",
+    "2001:::1",
+    "fe80::1%eth0"
+  )) {
+    expect_error(
+      oauth_client_mtls_registration(
+        client,
+        tls_client_auth_type = "san_ip",
+        tls_client_auth_value = value
+      ),
+      class = "shinyOAuth_input_error"
+    )
+  }
+  for (value in c(
+    " 192.000.002.010 ",
+    " 2001:0DB8:0000:0000:0000:0000:0000:0001 "
+  )) {
+    metadata <- oauth_client_mtls_registration(
+      client,
+      tls_client_auth_type = "san_ip",
+      tls_client_auth_value = value
+    )
+    expect_identical(
+      metadata[["tls_client_auth_san_ip"]],
+      if (grepl(":", value)) "2001:db8::1" else "192.0.2.10"
     )
   }
 })
@@ -79,16 +135,16 @@ test_that("oauth_client_mtls_registration supports explicit SAN identifiers", {
 test_that("oauth_client_mtls_registration emits certificate-bound token intent", {
   client <- make_mtls_registration_client(
     token_auth_style = "tls_client_auth",
-    tls_client_certificate_bound_access_tokens = TRUE,
-    mtls_request_certificate_bound_access_tokens = TRUE
+    mtls_client_certificate_bound_access_tokens = TRUE,
+    mtls_certificate_bound_access_tokens = TRUE
   )
 
   metadata <- shinyOAuth::oauth_client_mtls_registration(client)
 
-  expect_identical(metadata$token_endpoint_auth_method, "tls_client_auth")
-  expect_true(isTRUE(metadata$tls_client_certificate_bound_access_tokens))
+  expect_identical(metadata[["token_endpoint_auth_method"]], "tls_client_auth")
+  expect_true(isTRUE(metadata[["tls_client_certificate_bound_access_tokens"]]))
   expect_identical(
-    metadata$tls_client_auth_subject_dn,
+    metadata[["tls_client_auth_subject_dn"]],
     "CN=shiny-mtls-client,OU=Tests,O=shinyOAuth,L=Local,ST=NA,C=US"
   )
 })
@@ -96,21 +152,22 @@ test_that("oauth_client_mtls_registration emits certificate-bound token intent",
 test_that("oauth_client_mtls_registration supports public certificate-bound clients", {
   client <- make_mtls_registration_client(
     token_auth_style = "public",
-    tls_client_certificate_bound_access_tokens = TRUE,
-    mtls_request_certificate_bound_access_tokens = TRUE
+    mtls_client_certificate_bound_access_tokens = TRUE,
+    mtls_certificate_bound_access_tokens = TRUE
   )
 
   metadata <- shinyOAuth::oauth_client_mtls_registration(client)
 
-  expect_identical(metadata$token_endpoint_auth_method, "none")
-  expect_true(isTRUE(metadata$tls_client_certificate_bound_access_tokens))
+  expect_identical(metadata[["token_endpoint_auth_method"]], "none")
+  expect_true(isTRUE(metadata[["tls_client_certificate_bound_access_tokens"]]))
   expect_false(any(grepl("^tls_client_auth_", names(metadata))))
-  expect_null(metadata[["jwks", exact = TRUE]])
-  expect_null(metadata[["jwks_uri", exact = TRUE]])
+  expect_null(metadata[["jwks"]])
+  expect_null(metadata[["jwks_uri"]])
 })
 
 test_that("SAN helpers classify unique certificate alt names", {
   cert_info <- list(
+    alt_names_typed = TRUE,
     alt_names = c(
       "DNS:client.example.com",
       "URI:spiffe://example/client",
@@ -138,7 +195,10 @@ test_that("SAN helpers classify unique certificate alt names", {
 
   expect_error(
     shinyOAuth:::resolve_certificate_alt_name_value(
-      list(alt_names = c("DNS:a.example.com", "DNS:b.example.com")),
+      list(
+        alt_names_typed = TRUE,
+        alt_names = c("DNS:a.example.com", "DNS:b.example.com")
+      ),
       "san_dns"
     ),
     regexp = "multiple candidate values"
@@ -158,11 +218,47 @@ test_that("SAN helpers normalize IP literals for registration metadata", {
   )
   expect_identical(
     shinyOAuth:::resolve_certificate_alt_name_value(
-      list(alt_names = c("IP Address:2001:0DB8:0000:0000:0001:0000:0000:0001")),
+      list(
+        alt_names_typed = TRUE,
+        alt_names = c("IP Address:2001:0DB8:0000:0000:0001:0000:0000:0001")
+      ),
       "san_ip"
     ),
     "2001:db8::1:0:0:1"
   )
+
+  ipv6_cases <- c(
+    "::1" = "::1",
+    "2001:0DB8::1" = "2001:db8::1",
+    "2001:0DB8::" = "2001:db8::",
+    "2001:db8:1:2:3:4:5::" = "2001:db8:1:2:3:4:5:0",
+    "::ffff:192.0.2.1" = "::ffff:c000:201",
+    "::" = "::"
+  )
+  for (input in names(ipv6_cases)) {
+    expect_identical(
+      shinyOAuth:::normalize_mtls_registration_ipv6_literal(input),
+      unname(ipv6_cases[[input]])
+    )
+  }
+
+  for (input in c(
+    "2001::db8::1",
+    "2001:db8:::",
+    ":::",
+    "2001:db8:1:2:3:4:5:6:",
+    ":2001:db8:1:2:3:4:5:6",
+    "2001:db8::1:",
+    ":2001:db8::1",
+    "::1:",
+    ":1::"
+  )) {
+    expect_error(
+      shinyOAuth:::normalize_mtls_registration_ipv6_literal(input),
+      class = "shinyOAuth_input_error",
+      regexp = "Invalid IPv6 SAN literal"
+    )
+  }
 })
 
 test_that("oauth_client_mtls_registration builds inline self-signed jwks", {
@@ -175,15 +271,18 @@ test_that("oauth_client_mtls_registration builds inline self-signed jwks", {
   )))
 
   expect_identical(
-    metadata$token_endpoint_auth_method,
+    metadata[["token_endpoint_auth_method"]],
     "self_signed_tls_client_auth"
   )
-  expect_true(is.list(metadata$jwks))
-  expect_silent(shinyOAuth:::validate_jwks(metadata$jwks))
-  expect_identical(as.vector(metadata$jwks$keys[[1]]$x5c)[[1]], leaf_der_b64)
+  expect_true(is.list(metadata[["jwks"]]))
+  expect_silent(shinyOAuth:::validate_jwks(metadata[["jwks"]]))
+  expect_identical(
+    as.vector(metadata[["jwks"]][["keys"]][[1]][["x5c"]])[[1]],
+    leaf_der_b64
+  )
   expect_match(encoded, '"x5c":\\[')
   expect_false(any(
-    names(metadata$jwks$keys[[1]]) %in%
+    names(metadata[["jwks"]][["keys"]][[1]]) %in%
       c(
         "d",
         "p",
@@ -206,9 +305,57 @@ test_that("oauth_client_mtls_registration supports self-signed jwks_uri", {
   )
 
   expect_identical(
-    metadata$token_endpoint_auth_method,
+    metadata[["token_endpoint_auth_method"]],
     "self_signed_tls_client_auth"
   )
-  expect_identical(metadata$jwks_uri, "https://example.com/jwks.json")
-  expect_null(metadata[["jwks", exact = TRUE]])
+  expect_identical(metadata[["jwks_uri"]], "https://example.com/jwks.json")
+  expect_null(metadata[["jwks"]])
+})
+test_that("self-signed registration requires and retains a leaf-first chain", {
+  client <- make_mtls_registration_client("self_signed_tls_client_auth")
+  bundle <- withr::local_tempfile(fileext = ".pem")
+  leaf <- mtls_pem_fixture("client-cert.pem")
+  issuer <- mtls_pem_fixture("ca-cert.pem")
+  writeLines(c(readLines(issuer), readLines(leaf), readLines(issuer)), bundle)
+  client@mtls_client_cert_file <- bundle
+  expect_error(
+    oauth_client_mtls_registration(client),
+    "must put the client certificate.*first"
+  )
+  writeLines(c(readLines(leaf), readLines(issuer), readLines(issuer)), bundle)
+  metadata <- oauth_client_mtls_registration(client)
+  expected <- vapply(
+    c(leaf, issuer),
+    function(path) {
+      as.character(openssl::base64_encode(openssl::write_der(openssl::read_cert(
+        path
+      ))))
+    },
+    character(1),
+    USE.NAMES = FALSE
+  )
+  expect_identical(
+    as.vector(metadata[["jwks"]][["keys"]][[1]][["x5c"]]),
+    expected
+  )
+})
+
+test_that("real certificates cannot have their SAN type inferred from text", {
+  for (fixture in c("numeric-dns-cert.pem", "typed-san-cert.pem")) {
+    client <- make_mtls_registration_client("tls_client_auth")
+    client@mtls_client_cert_file <- mtls_pem_fixture(fixture)
+    for (type in c("san_dns", "san_ip", "san_uri", "san_email")) {
+      expect_error(
+        oauth_client_mtls_registration(client, tls_client_auth_type = type),
+        "SAN types are unavailable"
+      )
+    }
+    metadata <- oauth_client_mtls_registration(
+      client,
+      tls_client_auth_type = "san_dns",
+      tls_client_auth_value = "192.0.2.10"
+    )
+    expect_identical(metadata[["tls_client_auth_san_dns"]], "192.0.2.10")
+    expect_null(metadata[["tls_client_auth_san_ip"]])
+  }
 })

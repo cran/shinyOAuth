@@ -26,8 +26,8 @@ testthat::test_that("private_key_jwt picks EC-compatible default alg", {
       provider = prov,
       client_id = "abc",
       client_secret = "",
-      client_private_key = key_ec,
-      client_private_key_kid = NA_character_,
+      client_assertion_private_key = key_ec,
+      client_assertion_private_key_kid = NA_character_,
       redirect_uri = "http://localhost:8100",
       scopes = c("openid")
     )
@@ -58,14 +58,22 @@ testthat::test_that("private_key_jwt picks EC-compatible default alg", {
       code = "code",
       code_verifier = "ver"
     )
-    testthat::expect_equal(ts$access_token, "at", info = curve)
-    assertion <- captured$client_assertion
+    testthat::expect_equal(ts[["access_token"]], "at", info = curve)
+    assertion <- captured[["client_assertion"]]
     header_json <- shinyOAuth:::base64url_decode(
       strsplit(assertion, ".", fixed = TRUE)[[1]][1]
     )
     hdr <- shinyOAuth:::parse_jwt_header(assertion)
-    testthat::expect_identical(toupper(hdr$typ), "JWT", info = curve)
-    testthat::expect_identical(toupper(hdr$alg), curves[[curve]], info = curve)
+    testthat::expect_identical(
+      toupper(hdr[["typ"]]),
+      "JWT",
+      info = curve
+    )
+    testthat::expect_identical(
+      toupper(hdr[["alg"]]),
+      curves[[curve]],
+      info = curve
+    )
     testthat::expect_false(
       grepl('"kid"', header_json, fixed = TRUE),
       info = curve
@@ -93,7 +101,7 @@ testthat::test_that("JWT client assertions fall back to token_url without issuer
     provider = prov,
     client_id = "abc",
     client_secret = "",
-    client_private_key = openssl::rsa_keygen(),
+    client_assertion_private_key = openssl::rsa_keygen(),
     redirect_uri = "http://localhost:8100",
     scopes = c("openid")
   )
@@ -125,9 +133,11 @@ testthat::test_that("JWT client assertions fall back to token_url without issuer
     code_verifier = "ver"
   )
 
-  testthat::expect_equal(ts$access_token, "at")
+  testthat::expect_equal(ts[["access_token"]], "at")
   testthat::expect_identical(
-    shinyOAuth:::parse_jwt_payload(captured$client_assertion)$aud,
+    shinyOAuth:::parse_jwt_payload(
+      captured[["client_assertion"]]
+    )[["aud"]],
     prov@token_url
   )
 })

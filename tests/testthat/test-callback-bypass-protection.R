@@ -38,19 +38,19 @@ test_that("handle_callback always consumes state store even when attacker suppli
   pre_payload <- shinyOAuth:::state_decrypt_gcm(enc, key = cli@state_key)
   shinyOAuth:::payload_verify_issued_at(cli, pre_payload)
   shinyOAuth:::payload_verify_client_binding(cli, pre_payload)
-  key <- shinyOAuth:::state_cache_key(pre_payload$state)
-  pre_state <- cli@state_store$get(key, missing = NULL)
+  key <- shinyOAuth:::state_cache_key(pre_payload[["state"]])
+  pre_state <- cli@state_store[["get"]](key, missing = NULL)
 
   # Now REMOVE the state from the store to simulate single-use consumption
-  cli@state_store$remove(key)
+  cli@state_store[["remove"]](key)
 
   # Attempting to pass bypass args should fail because handle_callback()
   # ignores them and tries to decrypt/consume itself — state is already gone
   expect_error(
     shinyOAuth::handle_callback(
-      oauth_client = cli,
+      client = cli,
       code = "attacker_code",
-      payload = enc,
+      state = enc,
       browser_token = tok,
       decrypted_payload = pre_payload,
       state_store_values = pre_state
@@ -78,7 +78,7 @@ test_that("handle_callback enforces state-store consume on every call (replay bl
       t1 <- shinyOAuth::handle_callback(
         cli,
         code = "c1",
-        payload = enc,
+        state = enc,
         browser_token = tok
       )
       expect_true(
@@ -92,7 +92,7 @@ test_that("handle_callback enforces state-store consume on every call (replay bl
     shinyOAuth::handle_callback(
       cli,
       code = "c2",
-      payload = enc,
+      state = enc,
       browser_token = tok
     ),
     class = "shinyOAuth_state_error",
@@ -106,7 +106,7 @@ test_that("replayed callback does not emit callback validation success", {
   url <- shinyOAuth:::prepare_call(cli, browser_token = tok)
   enc <- parse_query_param(url, "state")
   payload <- shinyOAuth:::state_decrypt_gcm(enc, key = cli@state_key)
-  key <- shinyOAuth:::state_cache_key(payload$state)
+  key <- shinyOAuth:::state_cache_key(payload[["state"]])
 
   events <- list()
   old <- options(shinyOAuth.audit_hook = function(e) {
@@ -114,20 +114,20 @@ test_that("replayed callback does not emit callback validation success", {
   })
   on.exit(options(old), add = TRUE)
 
-  cli@state_store$remove(key)
+  cli@state_store[["remove"]](key)
 
   expect_error(
     shinyOAuth::handle_callback(
       cli,
       code = "c1",
-      payload = enc,
+      state = enc,
       browser_token = tok
     ),
     class = "shinyOAuth_state_error",
     regexp = "State access failed|state"
   )
 
-  event_types <- vapply(events, function(e) e$type %||% "", character(1))
+  event_types <- vapply(events, function(e) e[["type"]] %||% "", character(1))
   expect_false("audit_callback_validation_success" %in% event_types)
 })
 

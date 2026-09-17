@@ -8,6 +8,66 @@
 
 ## 1.1 Select candidate keys ---------------------------------------------------
 
+#' Normalize a JWK key_ops array
+#'
+#' `jsonlite` represents JSON arrays as unnamed lists when parsing with
+#' `simplifyVector = FALSE`. Accept that representation only when every array
+#' element is a scalar string. Character vectors remain supported for callers
+#' that already hold normalized JWKs.
+#'
+#' @param value A JWK `key_ops` value.
+#' @return A character vector, or `NULL` when the value is malformed.
+#' @keywords internal
+#' @noRd
+normalize_jwk_key_ops <- function(value) {
+  if (is.character(value)) {
+    return(value)
+  }
+  if (
+    !is.list(value) ||
+      !is.null(names(value))
+  ) {
+    return(NULL)
+  }
+
+  scalar_strings <- vapply(
+    value,
+    function(operation) {
+      is.character(operation) &&
+        length(operation) == 1L &&
+        !is.na(operation)
+    },
+    logical(1)
+  )
+  if (!all(scalar_strings)) {
+    return(NULL)
+  }
+
+  vapply(value, identity, character(1))
+}
+
+# RFC 7517 section 4.3 requires use and key_ops to agree when both are present.
+jwk_key_ops_consistent <- function(key, operations) {
+  use <- key[["use"]]
+  if (identical(use, "sig")) {
+    return(all(operations %in% c("sign", "verify")))
+  }
+  if (identical(use, "enc")) {
+    return(all(
+      operations %in%
+        c(
+          "encrypt",
+          "decrypt",
+          "wrapKey",
+          "unwrapKey",
+          "deriveKey",
+          "deriveBits"
+        )
+    ))
+  }
+  TRUE
+}
+
 #' Internal: Select candidate JWKs for signature verification
 #'
 #' Filters keys that declare use != "sig" while retaining keys that omit `use`.
@@ -15,7 +75,7 @@
 #' keys whose JWK `alg` matches the JWT header algorithm when provided. Used
 #' before JWT signature verification begins.
 #'
-#' @param jwks_or_keys A JWKS list (with $keys) or a normalized list of JWKs
+#' @param jwks_or_keys A JWKS list (with `jwks_or_keys[["keys"]]`) or a normalized list of JWKs
 #' @param header_alg Optional JWT header alg (character)
 #' @param kid Optional key id to restrict candidates to
 #' @param pins Optional character vector of JWK thumbprints (base64url, RFC 7638)
@@ -34,8 +94,11 @@ select_candidate_jwks <- function(
 ) {
   # Normalize input to a list of key objects
   keys <- jwks_or_keys
-  if (is.list(jwks_or_keys) && !is.null(jwks_or_keys$keys)) {
-    keys <- jwks_or_keys$keys
+  if (
+    is.list(jwks_or_keys) &&
+      !is.null(jwks_or_keys[["keys"]])
+  ) {
+    keys <- jwks_or_keys[["keys"]]
   }
   if (is.data.frame(keys)) {
     keys <- unname(lapply(seq_len(nrow(keys)), function(i) {
@@ -60,11 +123,11 @@ select_candidate_jwks <- function(
   keep_use <- vapply(
     keys,
     function(k) {
-      u <- try(k$use, silent = TRUE)
+      u <- try(k[["use"]], silent = TRUE)
       if (inherits(u, "try-error") || is.null(u)) {
         return(TRUE)
       }
-      is.character(u) && length(u) == 1L && identical(tolower(u), "sig")
+      is.character(u) && length(u) == 1L && identical(u, "sig")
     },
     logical(1)
   )
@@ -80,28 +143,29 @@ select_candidate_jwks <- function(
         "verify",
         "encrypt",
         "decrypt",
-        "wrapkey",
-        "unwrapkey",
-        "derivekey",
-        "derivebits"
+        "wrapKey",
+        "unwrapKey",
+        "deriveKey",
+        "deriveBits"
       )
-      ops <- try(k$key_ops, silent = TRUE)
+      ops <- try(k[["key_ops"]], silent = TRUE)
       if (inherits(ops, "try-error") || is.null(ops)) {
         return(TRUE)
       }
-      if (!is.character(ops) || length(ops) == 0L || anyNA(ops)) {
+      ops <- normalize_jwk_key_ops(ops)
+      if (is.null(ops) || length(ops) == 0L || anyNA(ops)) {
         return(FALSE)
       }
-      ops_norm <- tolower(ops)
       if (
         !all(nzchar(ops)) ||
-          anyDuplicated(ops_norm) > 0L ||
-          !all(ops_norm %in% valid_key_ops)
+          anyDuplicated(ops) > 0L ||
+          !all(ops %in% valid_key_ops) ||
+          !jwk_key_ops_consistent(k, ops)
       ) {
         return(FALSE)
       }
       # For signature verification, the key must support "verify"
-      "verify" %in% ops_norm
+      "verify" %in% ops
     },
     logical(1)
   )
@@ -111,7 +175,7 @@ select_candidate_jwks <- function(
   if (!is.null(kid)) {
     keys <- Filter(
       function(k) {
-        kk <- k$kid %||% NA_character_
+        kk <- k[["kid"]] %||% NA_character_
         is.character(kk) && length(kk) == 1L && !is.na(kk) && identical(kk, kid)
       },
       keys
@@ -125,18 +189,18 @@ select_candidate_jwks <- function(
       length(header_alg) == 1L &&
       nzchar(header_alg)
   ) {
-    ha <- toupper(header_alg)
+    ha <- header_alg
     ord_score <- vapply(
       keys,
       function(k) {
-        ka <- try(k$alg, silent = TRUE)
+        ka <- try(k[["alg"]], silent = TRUE)
         if (inherits(ka, "try-error") || is.null(ka)) {
           return(1L)
         }
         if (!is.character(ka) || length(ka) != 1L || !nzchar(ka)) {
           return(1L)
         }
-        if (identical(toupper(ka), ha)) 0L else 1L
+        if (identical(ka, ha)) 0L else 1L
       },
       integer(1)
     )
@@ -172,22 +236,42 @@ select_candidate_jwks <- function(
 #'
 #' @param keys Candidate JWK list.
 #' @param alg JWT algorithm name.
+#' @param allowed_algs Trusted algorithm policy for this token context. An
+#'   unlabelled RSA key uses the sole permitted RSA algorithm, or RS256 when
+#'   several are permitted. The JWT header never selects this binding.
 #' @return Filtered key list.
 #' @keywords internal
 #' @noRd
-filter_jwks_for_alg <- function(keys, alg) {
+filter_jwks_for_alg <- function(
+  keys,
+  alg,
+  allowed_algs = c("RS256", "ES256", "ES384", "ES512", "Ed25519", "EdDSA")
+) {
   if (!is.list(keys) || length(keys) == 0L) {
     return(list())
   }
 
-  alg <- toupper(alg %||% "")
-
+  if (!is_valid_string(alg)) {
+    return(list())
+  }
   keys <- Filter(function(k) jwk_is_compatible_with_alg(k, alg), keys)
 
   Filter(
     function(k) {
-      ka <- k$alg %||% NULL
-      is.null(ka) || toupper(ka) == alg
+      ka <- k[["alg"]] %||% NULL
+      if (!is.null(ka)) {
+        return(is_valid_string(ka) && identical(ka, alg))
+      }
+      # RSA keys support several distinct hashes. Bind bare keys using only
+      # trusted policy, never the unverified header (RFC 8725 section 3.1).
+      # EC curves select one supported algorithm; EdDSA with Ed25519 is the
+      # legacy spelling of the same operation as the Ed25519 algorithm.
+      if (identical(k[["kty"]], "RSA")) {
+        permitted <- intersect(allowed_algs, c("RS256", "RS384", "RS512"))
+        bound <- if (length(permitted) == 1L) permitted else "RS256"
+        return(bound %in% permitted && identical(alg, bound))
+      }
+      TRUE
     },
     keys
   )
@@ -205,8 +289,12 @@ filter_jwks_for_alg <- function(keys, alg) {
 #' @keywords internal
 #' @noRd
 jwk_is_compatible_with_alg <- function(jwk, alg) {
-  kty <- toupper(jwk$kty %||% "")
-  crv <- toupper(jwk$crv %||% "")
+  if (!is.list(jwk) || !is_valid_string(jwk[["kty"]] %||% NULL)) {
+    return(FALSE)
+  }
+  kty <- jwk[["kty"]]
+  crv_value <- jwk[["crv"]] %||% NULL
+  crv <- if (is_valid_string(crv_value)) crv_value else ""
   switch(
     alg,
     RS256 = kty == "RSA",
@@ -215,7 +303,8 @@ jwk_is_compatible_with_alg <- function(jwk, alg) {
     ES256 = (kty == "EC" && crv == "P-256"),
     ES384 = (kty == "EC" && crv == "P-384"),
     ES512 = (kty == "EC" && crv == "P-521"),
-    EDDSA = (kty == "OKP" && crv %in% c("ED25519", "ED448")),
+    Ed25519 = (kty == "OKP" && crv == "Ed25519"),
+    EdDSA = (kty == "OKP" && crv %in% c("Ed25519", "Ed448")),
     FALSE
   )
 }
@@ -231,17 +320,69 @@ jwk_is_compatible_with_alg <- function(jwk, alg) {
 #' @keywords internal
 #' @noRd
 jwk_to_pubkey <- function(jwk) {
-  kty <- jwk$kty %||% err_parse("JWK missing kty")
+  kty <- jwk[["kty"]] %||% err_parse("JWK missing kty")
   if (!kty %in% c("RSA", "EC", "OKP")) {
     err_parse(paste0("Unsupported JWK kty: ", kty))
   }
-  # jose::read_jwk takes a JSON string or file path
-  jwk_json <- jsonlite::toJSON(jwk, auto_unbox = TRUE, null = "null")
+  if (identical(kty, "RSA")) {
+    # Importing a key does not validate its RSA public parameters.
+    validate_jwk_rsa_public_key(jwk)
+  }
+  if (identical(kty, "OKP")) {
+    if (!identical(jwk[["crv"]], "Ed25519")) {
+      err_parse("Unsupported OKP signing curve; only Ed25519 is supported")
+    }
+    public_bytes <- strict_decode_jwk_base64url_uint(
+      jwk[["x"]],
+      "OKP JWK x",
+      minimal = FALSE
+    )
+    if (length(public_bytes) != 32L) {
+      err_parse("Ed25519 JWK x must decode to 32 bytes")
+    }
+    return(openssl::read_ed25519_pubkey(public_bytes))
+  }
+  # RFC 7517 requires ignoring unrecognized members. Give jose only exact
+  # public parameters: its partial member lookup for `d` can mistake extensions such as
+  # "description" for private key material. Keep the original JWK for selection
+  # metadata and pinning in the caller.
+  public_jwk <- if (identical(kty, "RSA")) {
+    list(kty = kty, n = jwk[["n"]], e = jwk[["e"]])
+  } else {
+    list(kty = kty, crv = jwk[["crv"]], x = jwk[["x"]], y = jwk[["y"]])
+  }
+  jwk_json <- jsonlite::toJSON(public_jwk, auto_unbox = TRUE, null = "null")
   key <- try(jose::read_jwk(jwk_json), silent = TRUE)
   if (inherits(key, "try-error")) {
     err_parse("Failed to parse JWK")
   }
   key
+}
+
+#' Verify a JWT against candidate JWKS keys
+#'
+#' Tries each already-selected candidate key and returns the matching JWK and
+#' parsed public key. Used by ID token, JARM, and signed UserInfo validation so
+#' they can retry once after a JWKS refresh without duplicating verification
+#' logic.
+#'
+#' @param jwt Compact JWT string.
+#' @param keys Candidate JWK list.
+#' @param alg Expected signing algorithm.
+#' @return A list containing `jwk` and `key`, or `NULL` when none verify.
+#' @keywords internal
+#' @noRd
+verify_jwt_with_jwks <- function(jwt, keys, alg) {
+  for (jwk in keys) {
+    key <- try(jwk_to_pubkey(jwk), silent = TRUE)
+    if (inherits(key, "try-error")) {
+      next
+    }
+    if (isTRUE(verify_jws_signature_no_time(jwt, key, alg))) {
+      return(list(jwk = jwk, key = key))
+    }
+  }
+  NULL
 }
 
 #' Internal: Compute RFC 7638 JWK thumbprint (SHA-256, base64url, no padding)
@@ -261,28 +402,30 @@ compute_jwk_thumbprint <- function(jwk) {
   if (!is.list(jwk)) {
     err_parse("JWK must be a list")
   }
-  kty <- jwk$kty %||% err_parse("JWK missing kty")
+  kty <- jwk[["kty"]] %||% err_parse("JWK missing kty")
   if (kty == "RSA") {
-    e <- jwk$e %||% err_parse("RSA JWK missing e")
-    n <- jwk$n %||% err_parse("RSA JWK missing n")
+    e <- jwk[["e"]] %||% err_parse("RSA JWK missing e")
+    n <- jwk[["n"]] %||% err_parse("RSA JWK missing n")
     if (!is.character(e) || !is.character(n)) {
       err_parse("RSA JWK e/n must be character")
     }
+    strict_decode_jwk_base64url_uint(e, "RSA JWK e")
+    strict_decode_jwk_base64url_uint(n, "RSA JWK n")
     canon <- list(e = e, kty = "RSA", n = n)
     # Order keys explicitly as required by RFC 7638 (lexicographic)
     canon <- canon[c("e", "kty", "n")]
   } else if (kty == "EC") {
-    crv <- jwk$crv %||% err_parse("EC JWK missing crv")
-    x <- jwk$x %||% err_parse("EC JWK missing x")
-    y <- jwk$y %||% err_parse("EC JWK missing y")
+    crv <- jwk[["crv"]] %||% err_parse("EC JWK missing crv")
+    x <- jwk[["x"]] %||% err_parse("EC JWK missing x")
+    y <- jwk[["y"]] %||% err_parse("EC JWK missing y")
     if (!is.character(crv) || !is.character(x) || !is.character(y)) {
       err_parse("EC JWK crv/x/y must be character")
     }
     canon <- list(crv = crv, kty = "EC", x = x, y = y)
     canon <- canon[c("crv", "kty", "x", "y")]
   } else if (kty == "OKP") {
-    crv <- jwk$crv %||% err_parse("OKP JWK missing crv")
-    x <- jwk$x %||% err_parse("OKP JWK missing x")
+    crv <- jwk[["crv"]] %||% err_parse("OKP JWK missing crv")
+    x <- jwk[["x"]] %||% err_parse("OKP JWK missing x")
     if (!is.character(crv) || !is.character(x)) {
       err_parse("OKP JWK crv/x must be character")
     }
@@ -298,20 +441,48 @@ compute_jwk_thumbprint <- function(jwk) {
   base64url_encode(digest)
 }
 
+#' Canonicalize a locally serialized public key
+#'
+#' Some JOSE serializers retain the ASN.1 sign octet of RSA integers. Remove
+#' it only for trusted local key serialization, before publishing or hashing.
+#' @param jwk Public JWK serialized from a local OpenSSL key.
+#' @return JWK with minimal unsigned RSA integers.
+#' @keywords internal
+#' @noRd
+canonicalize_local_public_jwk <- function(jwk) {
+  if (identical(jwk[["kty"]], "RSA")) {
+    for (field in c("n", "e")) {
+      bytes <- base64url_decode_raw(jwk[[field]])
+      while (length(bytes) > 1L && bytes[[1L]] == as.raw(0)) {
+        bytes <- bytes[-1L]
+      }
+      jwk[[field]] <- base64url_encode(bytes)
+    }
+  }
+  jwk
+}
+
 # 2 JWK decoding helpers -------------------------------------------------------
 
 ## 2.1 Decode and size-check key fields ----------------------------------------
 
 #' Strictly decode a JWK base64urlUInt field
 #'
-#' Used when RSA and EC key material is decoded from JWKS data.
+#' Used when RSA, EC, and OKP key material is decoded from JWKS data. EC and
+#' OKP fields contain fixed-width bytes rather than minimal integers.
 #'
 #' @param value Encoded field value.
 #' @param field_name Field name used in parse errors.
+#' @param minimal Require a minimal unsigned integer representation. Set to
+#'   `FALSE` for fixed-width EC coordinates and OKP public keys.
 #' @return Raw decoded bytes.
 #' @keywords internal
 #' @noRd
-strict_decode_jwk_base64url_uint <- function(value, field_name) {
+strict_decode_jwk_base64url_uint <- function(
+  value,
+  field_name,
+  minimal = TRUE
+) {
   if (
     !is.character(value) ||
       length(value) != 1L ||
@@ -329,8 +500,50 @@ strict_decode_jwk_base64url_uint <- function(value, field_name) {
   if (is.null(decoded) || !is.raw(decoded) || length(decoded) == 0L) {
     err_parse(paste0(field_name, " must be a valid base64urlUInt"))
   }
+  if (!identical(base64url_encode(decoded), value)) {
+    err_parse(paste0(field_name, " must be a canonical base64urlUInt"))
+  }
+  if (minimal && length(decoded) > 1L && decoded[[1]] == as.raw(0)) {
+    err_parse(paste0(field_name, " must be a minimal base64urlUInt"))
+  }
 
   decoded
+}
+
+#' Validate RSA public parameters before accepting or importing a JWK
+#'
+#' Enforces the public checks from RFC 8017 Section 3.1 and the minimum key
+#' size from RFC 7518 Section 3.3. The R openssl API does not expose a public-key
+#' validation primitive. Coprimality with lambda(n) cannot be checked without
+#' the private prime factors.
+#'
+#' @param jwk Parsed RSA JWK object.
+#' @return Invisibly returns `TRUE` on success; otherwise raises a parse error.
+#' @keywords internal
+#' @noRd
+validate_jwk_rsa_public_key <- function(jwk) {
+  if (!is.character(jwk[["n"]]) || !is.character(jwk[["e"]])) {
+    err_parse("RSA JWK missing n/e")
+  }
+  modulus_raw <- strict_decode_jwk_base64url_uint(jwk[["n"]], "RSA JWK n")
+  exponent_raw <- strict_decode_jwk_base64url_uint(jwk[["e"]], "RSA JWK e")
+  if (jwk_rsa_modulus_bits(modulus_raw) < 2048L) {
+    err_parse("RSA JWK modulus must be at least 2048 bits")
+  }
+
+  # Use OpenSSL big integers to avoid rounding large exponents or moduli.
+  modulus <- openssl::bignum(modulus_raw)
+  exponent <- openssl::bignum(exponent_raw)
+  if (modulus %% openssl::bignum(2) == 0) {
+    err_parse("RSA JWK modulus must be odd")
+  }
+  if (
+    exponent < 3 || exponent %% openssl::bignum(2) == 0 || exponent >= modulus
+  ) {
+    err_parse("RSA JWK exponent must be odd and satisfy 3 <= e < n")
+  }
+
+  invisible(TRUE)
 }
 
 #' Compute RSA modulus size in bits
@@ -364,7 +577,11 @@ jwk_rsa_modulus_bits <- function(modulus_raw) {
 #' @keywords internal
 #' @noRd
 strict_decode_jwk_ec_coordinate <- function(value, field_name, curve) {
-  decoded <- strict_decode_jwk_base64url_uint(value, field_name)
+  decoded <- strict_decode_jwk_base64url_uint(
+    value,
+    field_name,
+    minimal = FALSE
+  )
   expected_len <- switch(
     as.character(curve %||% ""),
     "P-256" = 32L,
@@ -395,17 +612,24 @@ strict_decode_jwk_ec_coordinate <- function(value, field_name, curve) {
 #'   to pin against.
 #' @param pin_mode Either "any" (at least one key matches a pin) or "all"
 #'   (every RSA/EC/OKP key must match a pin).
+#' @param wire Whether the input was parsed directly from network JSON with
+#'   `simplifyVector = FALSE`, so JSON array types must still be preserved.
 #'
 #' @return Invisibly returns `TRUE` on success. Otherwise this function raises a
 #'   parse error.
 #' @keywords internal
 #' @noRd
-validate_jwks <- function(jwks, pins = NULL, pin_mode = c("any", "all")) {
+validate_jwks <- function(
+  jwks,
+  pins = NULL,
+  pin_mode = c("any", "all"),
+  wire = FALSE
+) {
   pin_mode <- match.arg(pin_mode)
   if (!is.list(jwks)) {
     err_parse("Invalid JWKS structure")
   }
-  ks <- jwks$keys
+  ks <- jwks[["keys"]]
   if (is.null(ks)) {
     err_parse("JWKS missing keys array")
   }
@@ -413,66 +637,110 @@ validate_jwks <- function(jwks, pins = NULL, pin_mode = c("any", "all")) {
     ks <- unname(lapply(seq_len(nrow(ks)), function(i) {
       as.list(ks[i, , drop = FALSE])
     }))
-  } else if (is.list(ks)) {
-    nm <- names(ks)
-    if (
-      !is.null(nm) && any(nm %in% c("kty", "n", "e", "crv", "x", "y", "kid"))
-    ) {
-      ks <- list(ks)
-    }
-  } else {
+  } else if (!is.list(ks)) {
     err_parse("JWKS keys malformed")
   }
-  if (!is.list(ks)) {
-    err_parse("JWKS keys must be a list")
+  if (!is.list(ks) || !is.null(names(ks))) {
+    err_parse("JWKS keys must be a JSON array")
   }
   if (length(ks) > 100) {
     err_parse("JWKS contains excessive keys")
   }
 
+  # Deliberate whole-set policy: malformed supported public entries reject the
+  # set before candidate filtering, even when unrelated to the requested kid.
+  # See the provider key-set validation section in advanced-security.Rmd.
   # Validate each key minimally and ensure no private params leaked
   supported_seen <- 0L
-  private_params <- c("d", "p", "q", "dp", "dq", "qi", "oth")
+  private_params <- c("d", "p", "q", "dp", "dq", "qi", "oth", "k")
   thumbprints <- character()
   for (i in seq_along(ks)) {
     k <- ks[[i]]
     if (!is.list(k)) {
       err_parse("JWK entry must be an object")
     }
-    kty <- k$kty %||% err_parse("JWK missing kty")
-    kid <- k$kid %||% NA_character_
-    if (!is.na(kid)) {
-      if (!is.character(kid) || length(kid) != 1 || nchar(kid) > 128) {
+    kty <- k[["kty"]] %||% err_parse("JWK missing kty")
+    if (!is_valid_string(kty)) {
+      err_parse("JWK kty must be a non-empty character scalar")
+    }
+    kid <- k[["kid"]] %||% NULL
+    if (!is.null(kid)) {
+      if (
+        !is.character(kid) ||
+          length(kid) != 1L ||
+          is.na(kid) ||
+          nchar(kid) > 128L
+      ) {
         err_parse("JWK kid invalid")
       }
     }
+    for (field in c("use", "alg")) {
+      value <- k[[field]] %||% NULL
+      if (!is.null(value) && !is_valid_string(value)) {
+        err_parse(paste0(
+          "JWK ",
+          field,
+          " must be a non-empty character scalar"
+        ))
+      }
+    }
+    if ("key_ops" %in% names(k)) {
+      value <- k[["key_ops"]]
+      if (wire && (!is.list(value) || !is.null(names(value)))) {
+        err_parse("JWK key_ops must be a JSON array")
+      }
+      operations <- normalize_jwk_key_ops(value)
+      if (
+        is.null(operations) ||
+          anyNA(operations) ||
+          !all(nzchar(operations)) ||
+          anyDuplicated(operations)
+      ) {
+        err_parse("JWK key_ops must contain unique operation strings")
+      }
+      if (!jwk_key_ops_consistent(k, operations)) {
+        err_parse("JWK use and key_ops are inconsistent")
+      }
+    }
     # No private key parameters in a JWKS
-    if (any(names(k) %in% private_params)) {
+    if (identical(kty, "oct") || any(names(k) %in% private_params)) {
       err_parse("JWKS contains private key material")
     }
     if (kty %in% c("RSA", "EC", "OKP")) {
       supported_seen <- supported_seen + 1L
       # Minimal member presence
       if (kty == "RSA") {
-        if (!is.character(k$n) || !is.character(k$e)) {
-          err_parse("RSA JWK missing n/e")
-        }
-        modulus_raw <- strict_decode_jwk_base64url_uint(k$n, "RSA JWK n")
-        strict_decode_jwk_base64url_uint(k$e, "RSA JWK e")
-        if (jwk_rsa_modulus_bits(modulus_raw) < 2048L) {
-          err_parse("RSA JWK modulus must be at least 2048 bits")
-        }
+        validate_jwk_rsa_public_key(k)
       } else if (kty == "EC") {
-        if (!is.character(k$crv) || !is.character(k$x) || !is.character(k$y)) {
+        if (
+          !is_valid_string(k[["crv"]]) ||
+            !is.character(k[["x"]]) ||
+            !is.character(k[["y"]])
+        ) {
           err_parse("EC JWK missing crv/x/y")
         }
-        strict_decode_jwk_ec_coordinate(k$x, "EC JWK x", k$crv)
-        strict_decode_jwk_ec_coordinate(k$y, "EC JWK y", k$crv)
+        strict_decode_jwk_ec_coordinate(
+          k[["x"]],
+          "EC JWK x",
+          k[["crv"]]
+        )
+        strict_decode_jwk_ec_coordinate(
+          k[["y"]],
+          "EC JWK y",
+          k[["crv"]]
+        )
       } else if (kty == "OKP") {
-        if (!is.character(k$crv) || !is.character(k$x)) {
+        if (
+          !is_valid_string(k[["crv"]]) ||
+            !is.character(k[["x"]])
+        ) {
           err_parse("OKP JWK missing crv/x")
         }
-        strict_decode_jwk_base64url_uint(k$x, "OKP JWK x")
+        strict_decode_jwk_base64url_uint(
+          k[["x"]],
+          "OKP JWK x",
+          minimal = FALSE
+        )
       }
       # Compute thumbprint for pinning
       tp <- try(compute_jwk_thumbprint(k), silent = TRUE)
@@ -494,6 +762,11 @@ validate_jwks <- function(jwks, pins = NULL, pin_mode = c("any", "all")) {
       }
     } else if (pin_mode == "all") {
       # All supported keys must be pinned
+      if (length(thumbprints) != supported_seen) {
+        err_parse(
+          "JWKS pinning failed: could not compute every supported key thumbprint"
+        )
+      }
       missed <- setdiff(thumbprints, pins)
       if (length(missed) > 0) {
         err_parse("JWKS pinning failed: unpinned key(s) present")

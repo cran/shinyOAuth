@@ -52,16 +52,13 @@
 #' @param x Value to render.
 #' @param secret Whether `x` should be redacted.
 #' @param max_items Maximum number of vector or list entries to preview.
-#' @param preview_chars Number of leading and trailing characters to keep in
-#'   redacted scalar strings.
 #' @return A length-1 display string.
 #' @keywords internal
 #' @noRd
 .shinyoauth_format_field <- function(
   x,
   secret = FALSE,
-  max_items = 4L,
-  preview_chars = 4L
+  max_items = 4L
 ) {
   if (is.null(x)) {
     return("NULL")
@@ -85,6 +82,9 @@
       if (is.na(value)) {
         return("NA")
       }
+      if (!nzchar(value)) {
+        return("<redacted>")
+      }
 
       pem_header <- strsplit(value, "\n", fixed = TRUE)[[1]][[1]]
       pem_header <- sub("\r$", "", pem_header)
@@ -106,23 +106,7 @@
         return(paste0("<redacted ", toupper(key_label), ">"))
       }
 
-      chars <- nchar(value, type = "chars")
-      if (chars <= (preview_chars * 2L + 3L)) {
-        return("<redacted>")
-      }
-
-      return(paste0(
-        "<redacted ",
-        encodeString(
-          paste0(
-            substr(value, 1L, preview_chars),
-            "...",
-            substr(value, chars - preview_chars + 1L, chars)
-          ),
-          quote = '"'
-        ),
-        ">"
-      ))
+      return("<redacted>")
     }
 
     return(paste0("<redacted ", .shinyoauth_object_label(x), ">"))
@@ -203,7 +187,18 @@
       )
     }
 
-    shown <- utils::head(entry_names, max_items)
+    # Provider-controlled member names can contain terminal controls, URL
+    # credentials, or very long strings. Bound and quote each displayed name.
+    shown <- vapply(
+      utils::head(entry_names, max_items),
+      function(name) {
+        encodeString(
+          sanitize_diagnostic_text(name, max_bytes = 80L) %||% "<invalid name>",
+          quote = '"'
+        )
+      },
+      character(1)
+    )
     suffix <- if (length(entry_names) > max_items) ", ..." else ""
 
     return(paste0(
@@ -238,8 +233,22 @@
   rendered <- vapply(
     names(fields),
     function(name) {
+      value <- fields[[name]]
+      if (
+        is.character(value) &&
+          grepl("(_urls?|_uris?|issuers?|audiences?)$", name)
+      ) {
+        value <- vapply(
+          value,
+          function(url) {
+            otel_http_url_full(url) %||% NA_character_
+          },
+          character(1),
+          USE.NAMES = FALSE
+        )
+      }
       .shinyoauth_format_field(
-        fields[[name]],
+        value,
         secret = name %in% secret_fields
       )
     },
@@ -281,6 +290,33 @@
 
 # 2 S7 format and print methods ------------------------------------------------
 
+# Keep provider output explicit: arbitrary custom values may be credentials.
+method(format, OAuthProvider) <- function(x, ...) {
+  .shinyoauth_format_object(
+    "OAuthProvider",
+    list(
+      name = x@name,
+      auth_url = x@auth_url,
+      token_url = x@token_url,
+      issuer = x@issuer,
+      userinfo_url = x@userinfo_url,
+      jwks_uri = x@jwks_uri,
+      introspection_url = x@introspection_url,
+      revocation_url = x@revocation_url,
+      token_auth_style = x@token_auth_style,
+      use_pkce = x@use_pkce,
+      use_nonce = x@use_nonce,
+      extra_auth_params = x@extra_auth_params,
+      extra_token_params = x@extra_token_params,
+      extra_token_headers = as.list(x@extra_token_headers)
+    )
+  )
+}
+
+method(print, OAuthProvider) <- function(x, ...) {
+  .shinyoauth_print_object(x, ...)
+}
+
 ## 2.1 OAuthToken methods ------------------------------------------------------
 
 #' Internal OAuthToken formatter
@@ -305,9 +341,17 @@ method(format, OAuthToken) <- function(x, ...) {
       userinfo = x@userinfo,
       granted_scopes = x@granted_scopes,
       granted_scopes_verified = x@granted_scopes_verified,
-      id_token_validated = x@id_token_validated
+      id_token_validated = x@id_token_validated,
+      extra_fields = x@extra_fields,
+      initial_extra_fields = x@initial_extra_fields
     ),
-    secret_fields = c("access_token", "refresh_token", "id_token")
+    secret_fields = c(
+      "access_token",
+      "refresh_token",
+      "id_token",
+      "extra_fields",
+      "initial_extra_fields"
+    )
   )
 }
 
@@ -343,21 +387,35 @@ method(format, OAuthClient) <- function(x, ...) {
       provider = x@provider,
       client_id = x@client_id,
       client_secret = x@client_secret,
-      client_private_key = x@client_private_key,
-      client_private_key_kid = x@client_private_key_kid,
+      client_assertion_private_key = x@client_assertion_private_key,
+      client_assertion_private_key_kid = x@client_assertion_private_key_kid,
       client_assertion_alg = x@client_assertion_alg,
       client_assertion_audience = x@client_assertion_audience,
+      client_assertion_typ = x@client_assertion_typ,
       dpop_private_key = x@dpop_private_key,
       dpop_private_key_kid = x@dpop_private_key_kid,
       dpop_signing_alg = x@dpop_signing_alg,
       dpop_require_access_token = x@dpop_require_access_token,
-      mtls_request_certificate_bound_access_tokens = x@mtls_request_certificate_bound_access_tokens,
+      dpop_require_observed_cnf = x@dpop_require_observed_cnf,
+      mtls_certificate_bound_access_tokens = x@mtls_certificate_bound_access_tokens,
+      mtls_require_observed_cnf = x@mtls_require_observed_cnf,
       redirect_uri = x@redirect_uri,
       enforce_callback_issuer = x@enforce_callback_issuer,
+      compare_callback_issuer = x@compare_callback_issuer,
+      authorization_server_mode = x@authorization_server_mode,
+      authorization_server_redirect_uris = x@authorization_server_redirect_uris,
       scopes = x@scopes,
-      claims = x@claims,
+      claims = if (is.character(x@claims) && is_valid_string(x@claims)) {
+        tryCatch(
+          jsonlite::fromJSON(x@claims, simplifyVector = FALSE),
+          error = function(...) list()
+        )
+      } else {
+        x@claims
+      },
       state_store = x@state_store,
       state_payload_max_age = x@state_payload_max_age,
+      jarm_max_lifetime = x@jarm_max_lifetime,
       state_entropy = x@state_entropy,
       state_key = x@state_key,
       scope_validation = x@scope_validation,
@@ -368,7 +426,7 @@ method(format, OAuthClient) <- function(x, ...) {
     ),
     secret_fields = c(
       "client_secret",
-      "client_private_key",
+      "client_assertion_private_key",
       "dpop_private_key",
       "state_key"
     )

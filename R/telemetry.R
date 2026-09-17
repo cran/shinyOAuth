@@ -22,16 +22,45 @@ otel_tracer_name <- "io.github.lukakoning.shinyOAuth" # nolint
 #' @keywords internal
 #' @noRd
 otel_telemetry_warning <- function(context, error) {
-  warn_pkg(
+  warn_event_sink_failure(
     "OpenTelemetry disabled for this operation",
     c(
       "!" = paste0(
         "OpenTelemetry ",
         context,
         " was disabled for this operation: ",
-        conditionMessage(error)
+        otel_setup_error_detail(error)
       )
     )
+  )
+}
+
+# Keep setup diagnostics useful for correlation without exposing exporter
+# credentials or configuration in ordinary warnings.
+otel_setup_error_detail <- function(error) {
+  message <- conditionMessage(error)
+  summary <- paste0(
+    class(error)[[1L]],
+    " (diagnostic digest: ",
+    string_digest(message),
+    ")"
+  )
+  if (allow_expose_error_body()) {
+    summary <- paste(summary, sanitize_diagnostic_text(message), sep = ": ")
+  }
+  summary
+}
+
+# The SDK may report setup/exporter failures as classified messages and return
+# a no-op object. Apply the same diagnostic policy as for thrown SDK errors.
+# Scope this handler to SDK calls so application messages keep their semantics.
+otel_sdk_call <- function(code, context) {
+  withCallingHandlers(
+    force(code),
+    otel_error_message = function(condition) {
+      otel_telemetry_warning(context, condition)
+      tryInvokeRestart("muffleMessage")
+    }
   )
 }
 
@@ -71,8 +100,10 @@ otel_logging_enabled <- function() {
 #' @noRd
 warn_about_async_otel_workers <- function() {
   otel_active <-
-    (otel_tracing_enabled() && isTRUE(otel::is_tracing_enabled())) ||
-    (otel_logging_enabled() && isTRUE(otel::is_logging_enabled()))
+    (otel_tracing_enabled() &&
+      isTRUE(otel_sdk_call(otel::is_tracing_enabled(), "tracing setup"))) ||
+    (otel_logging_enabled() &&
+      isTRUE(otel_sdk_call(otel::is_logging_enabled(), "logging setup")))
 
   if (!isTRUE(otel_active)) {
     return(invisible(FALSE))
@@ -82,7 +113,7 @@ warn_about_async_otel_workers <- function() {
     "Verify OpenTelemetry is configured in async workers",
     c(
       "!" = paste(
-        "{.code oauth_module_server(async = TRUE)} will emit telemetry from",
+        "`oauth_module_server(async = TRUE)` will emit telemetry from",
         "background worker processes as well as the main R process"
       ),
       "i" = paste(
@@ -187,6 +218,7 @@ otel_attributes <- function(x) {
     return(NULL)
   }
 
+  x <- sanitize_event_url_fields(x)
   attrs <- list()
   for (nm in names(x)) {
     if (!is_valid_string(nm)) {
@@ -224,12 +256,12 @@ otel_http_host <- function(url) {
     return(NULL)
   }
 
-  host <- parsed$hostname %||% NULL
+  host <- parsed[["hostname"]] %||% NULL
   if (!is_valid_string(host)) {
     return(NULL)
   }
 
-  tolower(host)
+  bounded_http_text(tolower(host), 255L)
 }
 
 #' Extract an HTTP port for telemetry
@@ -250,12 +282,12 @@ otel_http_port <- function(url) {
     return(NULL)
   }
 
-  port <- parsed$port %||% NULL
+  port <- parsed[["port"]] %||% NULL
   if (!is.null(port) && !is.na(port) && nzchar(as.character(port))) {
     return(as.integer(port))
   }
 
-  scheme <- tolower(as.character(parsed$scheme %||% ""))
+  scheme <- tolower(as.character(parsed[["scheme"]] %||% ""))
   if (identical(scheme, "https")) {
     return(443L)
   }
@@ -269,7 +301,8 @@ otel_http_port <- function(url) {
 #' Sanitize an HTTP URL for telemetry
 #'
 #' Used by HTTP attribute builders to preserve the request target without
-#' logging query strings, fragments, or userinfo.
+#' logging query strings, fragments, or userinfo. Paths are omitted unless the
+#' application's telemetry_path_scrubber returns an approved route.
 #'
 #' @param url URL string to inspect.
 #' @return Sanitized absolute URL string, or `NULL` when the URL cannot be
@@ -286,19 +319,29 @@ otel_http_url_full <- function(url) {
     return(NULL)
   }
 
-  parsed$query <- NULL
-  parsed$fragment <- NULL
-  parsed$username <- NULL
-  parsed$password <- NULL
-  parsed$scheme <- tolower(parsed$scheme %||% "")
-  parsed$hostname <- tolower(parsed$hostname %||% "")
+  if (
+    !is_valid_string(parsed[["scheme"]]) ||
+      !is_valid_string(parsed[["hostname"]])
+  ) {
+    return(NULL)
+  }
+
+  parsed[["query"]] <- NULL
+  parsed[["fragment"]] <- NULL
+  parsed[["username"]] <- NULL
+  parsed[["password"]] <- NULL
+  parsed[["path"]] <- telemetry_safe_path(parsed[["path"]]) %||% ""
+  parsed[["scheme"]] <- tolower(parsed[["scheme"]] %||% "")
+  parsed[["hostname"]] <- tolower(
+    parsed[["hostname"]] %||% ""
+  )
 
   sanitized <- tryCatch(httr2::url_build(parsed), error = function(...) NULL)
   if (!is_valid_string(sanitized)) {
     return(NULL)
   }
 
-  sanitized
+  bounded_http_text(sanitized, 1024L)
 }
 
 #' Count telemetry items
@@ -409,7 +452,7 @@ otel_scope_tokens <- function(
   if (
     isTRUE(ensure_openid) &&
       !is.null(provider) &&
-      is_valid_string(provider@issuer) &&
+      provider_uses_oidc(provider) &&
       !("openid" %in% tokens)
   ) {
     tokens <- c("openid", tokens)
@@ -437,6 +480,9 @@ otel_scope_string <- function(
   ensure_openid = FALSE,
   allow_commas = FALSE
 ) {
+  if (!otel_authorization_details_enabled()) {
+    return(NULL)
+  }
   otel_join_values(
     otel_scope_tokens(
       scopes = scopes,
@@ -507,6 +553,21 @@ otel_claims_requested <- function(claims) {
 #' @keywords internal
 #' @noRd
 otel_claim_targets <- function(claims) {
+  if (!otel_authorization_details_enabled()) {
+    return(NULL)
+  }
+  otel_join_values(
+    otel_claim_target_names(claims),
+    sep = ",",
+    sort_values = TRUE
+  )
+}
+
+otel_claim_target_count <- function(claims) {
+  as.integer(length(otel_claim_target_names(claims)))
+}
+
+otel_claim_target_names <- function(claims) {
   if (is.null(claims)) {
     return(NULL)
   }
@@ -526,7 +587,7 @@ otel_claim_targets <- function(claims) {
     return(NULL)
   }
 
-  otel_join_values(names(claims), sep = ",", sort_values = TRUE)
+  unique(names(claims))
 }
 
 #' Read a provider max_age value for telemetry
@@ -534,15 +595,22 @@ otel_claim_targets <- function(claims) {
 #' Used by login telemetry helpers.
 #'
 #' @param provider Provider object whose `extra_auth_params` are inspected.
+#' @param requested_max_age Effective transaction override, or `NULL` to read
+#'   the provider configuration.
 #' @return Non-negative numeric `max_age`, or `NULL` when absent or invalid.
 #' @keywords internal
 #' @noRd
-otel_requested_max_age <- function(provider) {
+otel_requested_max_age <- function(provider, requested_max_age = NULL) {
+  if (!is.null(requested_max_age)) {
+    return(inspect_auth_max_age(list(
+      max_age = requested_max_age
+    ))[["value"]])
+  }
   if (is.null(provider)) {
     return(NULL)
   }
 
-  inspect_auth_max_age(provider@extra_auth_params)$value
+  inspect_auth_max_age(provider@extra_auth_params)[["value"]]
 }
 
 #' Read the client auth style for telemetry
@@ -588,7 +656,8 @@ otel_browser_cookie_path_root <- function(browser_cookie_path) {
 #'
 #' @param content_type Optional explicit content type string.
 #' @param resp Optional httr2 response used when `content_type` is missing.
-#' @return Lowercase media type without parameters, or `NULL`.
+#' @return Bounded lowercase media type without parameters, `"<invalid>"`
+#'   for a malformed value, or `NULL` when unavailable.
 #' @keywords internal
 #' @noRd
 otel_http_content_type <- function(content_type = NULL, resp = NULL) {
@@ -604,10 +673,18 @@ otel_http_content_type <- function(content_type = NULL, resp = NULL) {
     return(NULL)
   }
 
-  content_type <- tolower(trimws(as.character(content_type)[[1]]))
-  content_type <- trimws(strsplit(content_type, ";", fixed = TRUE)[[1]][1])
-  if (!nzchar(content_type)) {
-    return(NULL)
+  content_type <- tolower(trimws(sub(";.*$", "", content_type, perl = TRUE)))
+  # RFC 6838 restricted type/subtype names are each at most 127 characters.
+  # Never truncate malformed values into diagnostics or retain raw parameters.
+  if (
+    nchar(content_type, type = "bytes") > 255L ||
+      !grepl(
+        "^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$",
+        content_type,
+        perl = TRUE
+      )
+  ) {
+    return("<invalid>")
   }
 
   content_type
@@ -622,7 +699,16 @@ otel_http_content_type <- function(content_type = NULL, resp = NULL) {
 #' @keywords internal
 #' @noRd
 otel_required_acr_values <- function(values) {
+  if (!otel_authorization_details_enabled()) {
+    return(NULL)
+  }
   otel_join_values(values, sep = " ", sort_values = FALSE)
+}
+
+# Authorization names can reveal tenant or privilege information and produce
+# unbounded telemetry cardinality. Counts remain available without this opt-in.
+otel_authorization_details_enabled <- function() {
+  isTRUE(getOption("shinyOAuth.otel_include_authorization_details", FALSE))
 }
 
 #' Join introspection elements for telemetry
@@ -686,9 +772,10 @@ otel_sender_constraint_token_attributes <- function(
   explicit_token_type <- NA_character_
 
   if (is.list(token_set)) {
-    access_token <- token_set$access_token %||% NULL
-    cnf <- token_set$cnf %||% NULL
-    explicit_token_type <- token_set$token_type %||% NA_character_
+    access_token <- token_set[["access_token"]] %||% NULL
+    cnf <- token_set[["cnf"]] %||% NULL
+    explicit_token_type <- token_set[["token_type"]] %||%
+      NA_character_
   } else if (S7::S7_inherits(token, class = OAuthToken)) {
     access_token <- token@access_token
     cnf <- token@cnf
@@ -800,23 +887,28 @@ otel_token_response_attributes <- function(
   }
 
   scope_tokens <- otel_scope_tokens(
-    token_set$scope %||% NULL,
+    token_set[["scope"]] %||% NULL,
     allow_commas = TRUE
   )
-  expires_in_present <- !is.null(token_set$expires_in)
+  expires_in_present <- !is.null(token_set[["expires_in"]])
 
   compact_list(c(
     list(
-      oauth.token_type = otel_scalar_attribute(token_set$token_type %||% NULL),
-      oauth.received_id_token = isTRUE(is_valid_string(token_set$id_token)),
+      oauth.token_type = otel_token_type_attribute(
+        token_set[["token_type"]] %||% NULL
+      ),
+      oauth.received_id_token = isTRUE(is_valid_string(
+        token_set[["id_token"]]
+      )),
       oauth.received_refresh_token = isTRUE(is_valid_string(
-        token_set$refresh_token
+        token_set[["refresh_token"]]
       )),
       oauth.expires_in_present = isTRUE(expires_in_present),
       oauth.expires_in_synthesized = !isTRUE(expires_in_present),
       oauth.scope.present = length(scope_tokens) > 0L,
+      oauth.scopes.granted_count = as.integer(length(scope_tokens)),
       oauth.scopes.granted = otel_scope_string(
-        token_set$scope %||% NULL,
+        token_set[["scope"]] %||% NULL,
         allow_commas = TRUE
       )
     ),
@@ -826,6 +918,18 @@ otel_token_response_attributes <- function(
       effective_token_type = effective_token_type
     )
   ))
+}
+
+# Token response attributes can be recorded before validation fails. Export a
+# bounded classification, never an untrusted scheme or provider-supplied detail.
+otel_token_type_attribute <- function(value) {
+  if (is.null(value)) {
+    return(NULL)
+  }
+  if (!is_valid_string(value) || nchar(value, type = "bytes") > 6L) {
+    return("unknown")
+  }
+  switch(tolower(value), bearer = "Bearer", dpop = "DPoP", "unknown")
 }
 
 # 4 Request and session attributes ---------------------------------------------
@@ -843,7 +947,7 @@ otel_current_shiny_session <- function() {
   event <- tryCatch(augment_with_shiny_context(list()), error = function(...) {
     list()
   })
-  event$shiny_session %||% NULL
+  event[["shiny_session"]] %||% NULL
 }
 
 #' Build Shiny session telemetry attributes
@@ -862,22 +966,24 @@ otel_shiny_attributes <- function(shiny_session = NULL) {
     return(list())
   }
 
-  http <- shiny_session$http %||% NULL
+  http <- shiny_session[["http"]] %||% NULL
   server_address <- NULL
   http_method <- NULL
   if (is.list(http)) {
-    server_address <- http$host %||% NULL
-    http_method <- http$method %||% NULL
+    server_address <- http[["host"]] %||% NULL
+    http_method <- http[["method"]] %||% NULL
   }
 
   compact_list(list(
-    shiny.session_token_digest = string_digest(shiny_session$token %||% NULL),
-    shiny.session.is_async = isTRUE(shiny_session$is_async),
+    shiny.session_token_digest = string_digest(
+      shiny_session[["token"]] %||% NULL
+    ),
+    shiny.session.is_async = isTRUE(shiny_session[["is_async"]]),
     shiny.session.main_process_id = as.integer(
-      shiny_session$main_process_id %||% NA_integer_
+      shiny_session[["main_process_id"]] %||% NA_integer_
     ),
     shiny.session.process_id = as.integer(
-      shiny_session$process_id %||% NA_integer_
+      shiny_session[["process_id"]] %||% NA_integer_
     ),
     http.request.method = http_method,
     server.address = server_address
@@ -939,6 +1045,7 @@ otel_client_attributes <- function(
     list(
       oauth.provider.name = provider,
       oauth.provider.issuer = issuer,
+      oauth.provider.issuer_digest = string_digest(issuer),
       oauth.client_id_digest = client_id_digest,
       shiny.module_id = module_id,
       oauth.async = async,
@@ -1014,7 +1121,7 @@ otel_http_attributes <- function(
 
   compact_list(c(
     list(
-      http.request.method = method,
+      http.request.method = bounded_http_text(method, 32L),
       url.full = otel_http_url_full(url),
       http.response.status_code = as.integer(status_code %||% NA_integer_),
       http.response.content_type = otel_http_content_type(
@@ -1045,7 +1152,7 @@ otel_set_span_attributes <- function(span = NULL, attributes = list()) {
     return(invisible(NULL))
   }
 
-  attributes <- compact_list(attributes)
+  attributes <- compact_list(sanitize_event_url_fields(attributes))
   if (!length(attributes)) {
     return(invisible(NULL))
   }
@@ -1054,7 +1161,7 @@ otel_set_span_attributes <- function(span = NULL, attributes = list()) {
   for (nm in names(attributes)) {
     value <- otel_scalar_attribute(attributes[[nm]])
     if (!is.null(value)) {
-      try(span$set_attribute(nm, value), silent = TRUE)
+      try(span[["set_attribute"]](nm, value), silent = TRUE)
     }
   }
 
@@ -1075,7 +1182,48 @@ otel_mark_span_ok <- function(span = NULL) {
   }
 
   span <- span %||% otel::get_active_span()
-  try(span$set_status("ok"), silent = TRUE)
+  try(span[["set_status"]]("ok"), silent = TRUE)
+  invisible(NULL)
+}
+
+# Classify normalized revocation/introspection outcomes without inventing an
+# exception. Inactive is a successful introspection result; an unavailable
+# endpoint or absent token means no operation was attempted.
+otel_record_token_operation_result <- function(result, span = NULL) {
+  if (!otel_tracing_enabled()) {
+    return(invisible(NULL))
+  }
+  span <- span %||% otel::get_active_span()
+  outcome <- result[["status"]] %||% "unknown"
+  status <- if (identical(outcome, "ok")) {
+    "ok"
+  } else if (
+    outcome %in%
+      c("missing_token", "revocation_unsupported", "introspection_unsupported")
+  ) {
+    "unset"
+  } else {
+    "error"
+  }
+  otel_set_span_attributes(
+    span,
+    compact_list(list(
+      oauth.status = outcome,
+      oauth.supported = result[["supported"]],
+      oauth.active = result[["active"]],
+      oauth.revoked = result[["revoked"]],
+      error.type = if (status == "error") outcome else NULL
+    ))
+  )
+  if (status != "unset") {
+    try(
+      span[["set_status"]](
+        status,
+        description = if (status == "error") outcome else NULL
+      ),
+      silent = TRUE
+    )
+  }
   invisible(NULL)
 }
 
@@ -1110,7 +1258,7 @@ otel_note_error <- function(error, span = NULL, attributes = list()) {
     "error"
   }
   exception_message <- if (isTRUE(allow_expose_error_body())) {
-    conditionMessage(error)
+    sanitize_diagnostic_text(conditionMessage(error))
   } else {
     NULL
   }
@@ -1131,14 +1279,14 @@ otel_note_error <- function(error, span = NULL, attributes = list()) {
 
   otel_set_span_attributes(span = span, attributes = span_attrs)
   try(
-    span$add_event(
+    span[["add_event"]](
       "exception",
       attributes = otel_attributes(event_attrs)
     ),
     silent = TRUE
   )
   try(
-    span$set_status(
+    span[["set_status"]](
       "error",
       description = error_type
     ),
@@ -1186,11 +1334,15 @@ otel_record_http_result <- function(resp, span = NULL) {
     return(invisible(NULL))
   }
 
-  if (status_code < 300L) {
-    try(span$set_status("ok"), silent = TRUE)
-  } else {
+  # HTTP client spans leave ordinary successes and redirects unset. OAuth
+  # operation spans independently decide whether the protocol result succeeded.
+  if (status_code >= 400L) {
+    otel_set_span_attributes(
+      span = span,
+      attributes = list(error.type = as.character(status_code))
+    )
     try(
-      span$set_status("error", description = paste0("HTTP ", status_code)),
+      span[["set_status"]]("error"),
       silent = TRUE
     )
   }
@@ -1226,17 +1378,22 @@ with_otel_span <- function(
 
   span_options <- options %||% list()
   if (!is.null(parent) || (length(parent) == 1L && is.na(parent))) {
-    span_options$parent <- parent
+    span_options[["parent"]] <- parent
   }
 
   span_started <- FALSE
+  span <- NULL
   tryCatch(
     {
-      otel::start_local_active_span(
-        name = name,
-        attributes = otel_attributes(otel_with_trace_attribute(attributes)),
-        options = span_options,
-        activation_scope = environment()
+      span <- otel_sdk_call(
+        otel::start_local_active_span(
+          name = name,
+          attributes = otel_attributes(otel_with_trace_attribute(attributes)),
+          options = span_options,
+          activation_scope = environment(),
+          end_on_exit = FALSE
+        ),
+        "span"
       )
       span_started <- TRUE
     },
@@ -1251,10 +1408,13 @@ with_otel_span <- function(
     {
       if (isTRUE(span_started)) {
         if (isTRUE(ok) && isTRUE(mark_ok)) {
-          otel_mark_span_ok()
+          otel_mark_span_ok(span)
         } else if (!is.null(err)) {
-          otel_note_error(err)
+          otel_note_error(err, span = span)
         }
+        # End explicitly: the SDK's automatic scope finalizer marks an unset
+        # status OK even when mark_ok = FALSE (including HTTP client spans).
+        try(otel_sdk_call(span[["end"]](), "span completion"), silent = TRUE)
       }
     },
     add = TRUE
@@ -1289,10 +1449,13 @@ otel_with_active_span <- function(span, code) {
   }
 
   tryCatch(
-    otel::local_active_span(
-      span,
-      end_on_exit = FALSE,
-      activation_scope = environment()
+    otel_sdk_call(
+      otel::local_active_span(
+        span,
+        end_on_exit = FALSE,
+        activation_scope = environment()
+      ),
+      "span activation"
     ),
     error = function(e) {
       otel_telemetry_warning("span activation", e)
@@ -1319,7 +1482,7 @@ otel_capture_context <- function(span = NULL) {
   headers <- tryCatch(
     {
       if (!is.null(span)) {
-        span$get_context()$to_http_headers()
+        span[["get_context"]]()[["to_http_headers"]]()
       } else {
         otel::pack_http_context()
       }
@@ -1386,7 +1549,9 @@ otel_span_context_from_headers <- function(otel_headers) {
     return(NULL)
   }
 
-  if (!isTRUE(tryCatch(parent_ctx$is_valid(), error = function(...) FALSE))) {
+  if (
+    !isTRUE(tryCatch(parent_ctx[["is_valid"]](), error = function(...) FALSE))
+  ) {
     return(NULL)
   }
 
@@ -1414,10 +1579,13 @@ otel_start_async_parent <- function(
 
   span <- tryCatch(
     {
-      otel::start_span(
-        name = name,
-        attributes = otel_attributes(otel_with_trace_attribute(attributes)),
-        options = list(parent = parent)
+      otel_sdk_call(
+        otel::start_span(
+          name = name,
+          attributes = otel_attributes(otel_with_trace_attribute(attributes)),
+          options = list(parent = parent)
+        ),
+        "async parent span"
       )
     },
     error = function(e) {
@@ -1473,10 +1641,13 @@ otel_restore_parent_in_worker <- function(
 
   span <- tryCatch(
     {
-      otel::start_span(
-        name = name,
-        attributes = otel_attributes(otel_with_trace_attribute(attributes)),
-        options = list(parent = parent_ctx)
+      otel_sdk_call(
+        otel::start_span(
+          name = name,
+          attributes = otel_attributes(otel_with_trace_attribute(attributes)),
+          options = list(parent = parent_ctx)
+        ),
+        "worker span"
       )
     },
     error = function(e) {
@@ -1495,26 +1666,33 @@ otel_restore_parent_in_worker <- function(
 #' @param parent Parent-span bundle returned by `otel_start_async_parent()`.
 #' @param status Outcome status to record.
 #' @param error Optional condition to record for error outcomes.
+#' @param result Optional normalized revocation or introspection result.
 #' @return Invisibly returns `NULL`.
 #' @keywords internal
 #' @noRd
 otel_end_async_parent <- function(
   parent,
   status = c("ok", "error"),
-  error = NULL
+  error = NULL,
+  result = NULL
 ) {
-  if (is.null(parent) || is.null(parent$span)) {
+  if (is.null(parent) || is.null(parent[["span"]])) {
     return(invisible(NULL))
   }
 
   status <- match.arg(status)
-  if (identical(status, "ok")) {
-    otel_mark_span_ok(parent$span)
+  if (!is.null(result) && is.null(error)) {
+    otel_record_token_operation_result(result, span = parent[["span"]])
+  } else if (identical(status, "ok")) {
+    otel_mark_span_ok(parent[["span"]])
   } else {
-    otel_note_error(error, span = parent$span)
+    otel_note_error(error, span = parent[["span"]])
   }
 
-  try(otel::end_span(parent$span), silent = TRUE)
+  try(
+    otel_sdk_call(otel::end_span(parent[["span"]]), "async span completion"),
+    silent = TRUE
+  )
   invisible(NULL)
 }
 
@@ -1579,6 +1757,7 @@ otel_event_severity <- function(type, status = NULL, reason = NULL) {
         "audit_callback_iss_missing",
         "audit_callback_iss_mismatch",
         "audit_callback_query_rejected",
+        "audit_callback_routing_rejected",
         "audit_refresh_failed_but_kept_session",
         "audit_state_parse_failure",
         "audit_state_store_lookup_failed",
@@ -1641,37 +1820,120 @@ otel_translate_event_key <- function(name) {
   )
 }
 
-#' Detect sensitive OTEL event field names
+#' Detect allowed OTEL event field names
 #'
-#' Used to keep secrets and request artifacts out of OTEL log attributes.
+#' OpenTelemetry event attributes use a closed allowlist so a newly added or
+#' misspelled context field cannot silently export credentials or personal
+#' data. Used by `otel_event_attributes()`.
 #'
 #' @param name Event field name.
-#' @return `TRUE` when the field name should be filtered; otherwise `FALSE`.
+#' @return `TRUE` when the field name is an approved event attribute.
 #' @keywords internal
 #' @noRd
-otel_is_sensitive_event_field <- function(name) {
+otel_is_allowed_event_field <- function(name) {
   if (!is_valid_string(name)) {
     return(FALSE)
   }
 
-  normalized_name <- tolower(gsub("[^A-Za-z0-9]+", "_", trimws(name)))
-
-  normalized_name %in%
+  name %in%
     c(
-      "access_token",
-      "refresh_token",
-      "id_token",
-      "code",
-      "state",
-      "browser_token"
-    ) ||
-    grepl("(^|_)client_secret$", normalized_name) ||
-    grepl("(^|_)client_assertion$", normalized_name) ||
-    grepl("(^|_)code_verifier$", normalized_name) ||
-    grepl("(^|_)nonce$", normalized_name) ||
-    grepl("(^|_)dpop_proof$", normalized_name) ||
-    grepl("(^|_)request_uri$", normalized_name) ||
-    grepl("(^|_)request$", normalized_name)
+      "type",
+      "trace_id",
+      "message",
+      "provider",
+      "client_provider",
+      "issuer",
+      "client_issuer",
+      "client_id_digest",
+      "owner_digest",
+      "connection_id_digest",
+      "connection_count",
+      "retention",
+      "local_outcome",
+      "remote_refresh_outcome",
+      "remote_access_outcome",
+      "revoke_requested",
+      "module_id",
+      "phase",
+      "status",
+      "active",
+      "actual_bytes",
+      "alg",
+      "jwt_alg",
+      "authenticated",
+      "body_bytes",
+      "body_digest",
+      "browser_token_digest",
+      "code_digest",
+      "callback_error",
+      "callback_issuer",
+      "compact_jwe_failure",
+      "component",
+      "content_type",
+      "discovery_url",
+      "endpoint",
+      "endpoint_host",
+      "error_class",
+      "expected_issuer",
+      "expires_at",
+      "expires_in_synthesized",
+      "handle_digest",
+      "http_status",
+      "introspected_client_id_digest",
+      "issuer_host",
+      "jwks_host",
+      "jwks_host_allow_only",
+      "jwks_uri",
+      "kept_token",
+      "length",
+      "max_age",
+      "max_bytes",
+      "method",
+      "min_chars",
+      "mirai_error_type",
+      "new_expires_at",
+      "nonce_present",
+      "ns_prefix",
+      "oauth_error",
+      "oauth_error_digest",
+      "oauth_error_detail",
+      "oauth_error_description",
+      "oauth_error_uri",
+      "par_used",
+      "param",
+      "parameter",
+      "pkce_method",
+      "previous_authenticated",
+      "reason",
+      "received_id_token",
+      "received_refresh_token",
+      "redirect_blocked",
+      "redirect_uri",
+      "refresh_token_present",
+      "refresh_token_rotated",
+      "request_object_used",
+      "request_uri_used",
+      "requested_pkce_method",
+      "requested_token_auth_style",
+      "revoked",
+      "scope_digest",
+      "scopes_count",
+      "state_digest",
+      "style",
+      "sub_digest",
+      "sub_source",
+      "supported",
+      "target_module_id",
+      "token_digest",
+      "token_endpoint",
+      "transport_error",
+      "url",
+      "url_protocol",
+      "used_pkce",
+      "was_authenticated",
+      "where",
+      "which"
+    )
 }
 
 #' Build OTEL-safe event attributes
@@ -1687,13 +1949,14 @@ otel_event_attributes <- function(event) {
   if (!is.list(event) || !length(event)) {
     return(NULL)
   }
+  event <- sanitize_event_diagnostics(sanitize_event_url_fields(event))
 
   attrs <- list()
   for (nm in names(event)) {
     if (!is_valid_string(nm) || nm %in% c("timestamp", "shiny_session")) {
       next
     }
-    if (otel_is_sensitive_event_field(nm)) {
+    if (!otel_is_allowed_event_field(nm)) {
       next
     }
     if (is.list(event[[nm]])) {
@@ -1709,7 +1972,10 @@ otel_event_attributes <- function(event) {
     }
   }
 
-  c(attrs, otel_shiny_attributes(event$shiny_session %||% NULL))
+  c(
+    attrs,
+    otel_shiny_attributes(event[["shiny_session"]] %||% NULL)
+  )
 }
 
 #' Emit an OTEL log record
@@ -1729,18 +1995,22 @@ otel_emit_log <- function(event) {
     return(invisible(NULL))
   }
 
+  event <- sanitize_event_diagnostics(sanitize_event_url_fields(event))
   severity <- otel_event_severity(
-    event$type %||% NULL,
-    status = event$status %||% NULL,
-    reason = event$reason %||% NULL
+    event[["type"]] %||% NULL,
+    status = event[["status"]] %||% NULL,
+    reason = event[["reason"]] %||% NULL
   )
-  msg <- otel_scalar_attribute(event$message %||% NULL) %||%
-    otel_scalar_attribute(event$type %||% NULL) %||%
+  msg <- otel_scalar_attribute(event[["message"]] %||% NULL) %||%
+    otel_scalar_attribute(event[["type"]] %||% NULL) %||%
     "shinyOAuth"
-  otel::log(
-    msg = msg,
-    severity = severity,
-    attributes = otel_attributes(otel_event_attributes(event))
+  otel_sdk_call(
+    otel::log(
+      msg = msg,
+      severity = severity,
+      attributes = otel_attributes(otel_event_attributes(event))
+    ),
+    "logging"
   )
 
   invisible(NULL)

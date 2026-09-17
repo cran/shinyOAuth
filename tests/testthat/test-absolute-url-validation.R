@@ -37,6 +37,40 @@ testthat::test_that("OAuthProvider requires endpoint URLs to be absolute", {
   )
 })
 
+testthat::test_that("OAuthProvider preserves endpoint path semantics", {
+  endpoints <- list(
+    auth_url = "https://example.com/tenant//authorize",
+    token_url = "https://example.com/tenant//token",
+    userinfo_url = "https://example.com/tenant//userinfo",
+    introspection_url = "https://example.com/tenant//introspect",
+    revocation_url = "https://example.com/tenant//revoke",
+    par_url = "https://example.com/tenant//par",
+    jwks_uri = "https://example.com/tenant//jwks"
+  )
+  alias <- "https://mtls.example.com/tenant//token"
+
+  provider <- do.call(
+    oauth_provider,
+    c(
+      list(name = "preserve-path"),
+      endpoints,
+      list(mtls_endpoint_aliases = list(token_endpoint = alias))
+    )
+  )
+
+  for (name in names(endpoints)) {
+    testthat::expect_identical(
+      S7::prop(provider, name),
+      endpoints[[name]],
+      info = name
+    )
+  }
+  testthat::expect_identical(
+    provider@mtls_endpoint_aliases[["token_endpoint"]],
+    alias
+  )
+})
+
 testthat::test_that("OAuthProvider rejects endpoint URLs with fragments", {
   base_args <- list(
     name = "t",
@@ -102,8 +136,8 @@ testthat::test_that("OAuthProvider rejects endpoint URLs with fragments", {
 
   for (case in fragment_cases) {
     testthat::expect_error(
-      do.call(oauth_provider, case$args),
-      regexp = case$regexp
+      do.call(oauth_provider, case[["args"]]),
+      regexp = case[["regexp"]]
     )
   }
 })
@@ -169,6 +203,40 @@ testthat::test_that("OIDC discovery issuer must be absolute", {
   )
 })
 
+testthat::test_that("OIDC HTTP loopback URLs require explicit development opt-in", {
+  testthat::expect_error(
+    shinyOAuth:::.discover_assert_valid_issuer("http://127.0.0.1:8080"),
+    class = "shinyOAuth_input_error",
+    regexp = "must use HTTPS"
+  )
+
+  withr::local_options(shinyOAuth.allow_insecure_oidc_loopback = TRUE)
+  testthat::expect_no_error(
+    shinyOAuth:::.discover_assert_valid_issuer("http://127.0.0.1:8080")
+  )
+  testthat::expect_no_error(
+    shinyOAuth:::.discover_validate_endpoints(
+      list(
+        auth_url = "http://localhost:8080/auth",
+        token_url = "http://localhost:8080/token",
+        userinfo_url = NA_character_,
+        introspection_url = NA_character_,
+        revocation_url = NA_character_,
+        par_url = NA_character_
+      ),
+      NULL
+    )
+  )
+  testthat::expect_error(
+    shinyOAuth:::.discover_require_https(
+      "http://provider.example.com/token",
+      "OIDC token endpoint"
+    ),
+    class = "shinyOAuth_config_error",
+    regexp = "must use HTTPS"
+  )
+})
+
 testthat::test_that("OIDC discovery rejects issuer query component", {
   f <- shinyOAuth:::.discover_assert_valid_issuer
 
@@ -212,4 +280,31 @@ testthat::test_that("validate_endpoint rejects non-scalar endpoint values", {
 
   testthat::expect_no_error(f(NA_character_, "example.com"))
   testthat::expect_no_error(f("", "example.com"))
+})
+test_that("endpoint validation rejects even empty fragment components", {
+  for (suffix in c("#", "#fragment")) {
+    url <- paste0("https://example.test/path", suffix)
+    expect_error(validate_endpoint(url, "example.test"), "fragment")
+    expect_error(
+      oauth_provider(
+        name = "test",
+        auth_url = "https://example.test/auth",
+        token_url = "https://example.test/token",
+        issuer = url
+      ),
+      "fragment"
+    )
+    expect_error(
+      oauth_client(
+        provider = make_test_provider(),
+        client_id = "test",
+        redirect_uri = url
+      ),
+      "fragment"
+    )
+  }
+  expect_silent(validate_endpoint(
+    "https://example.test/path%23part",
+    "example.test"
+  ))
 })

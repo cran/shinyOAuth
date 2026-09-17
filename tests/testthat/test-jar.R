@@ -30,15 +30,15 @@ oauth_request_url_param_names <- function(
 }
 
 request_body_text <- function(req) {
-  body <- req$body %||% NULL
+  body <- req[["body"]] %||% NULL
   if (is.null(body)) {
     return(NA_character_)
   }
-  if (identical(body$type, "raw")) {
-    return(rawToChar(body$data))
+  if (identical(body[["type"]], "raw")) {
+    return(rawToChar(body[["data"]]))
   }
-  if (identical(body$type, "form")) {
-    data <- body$data %||% list()
+  if (identical(body[["type"]], "form")) {
+    data <- body[["data"]] %||% list()
     if (!length(data)) {
       return("")
     }
@@ -63,7 +63,7 @@ request_body_text <- function(req) {
 make_jar_test_provider <- function(
   issuer = "https://issuer.example.com",
   par_url = NA_character_,
-  require_pushed_authorization_requests = FALSE,
+  par_required = FALSE,
   token_auth_style = "body",
   use_nonce = FALSE,
   extra_auth_params = list(),
@@ -73,8 +73,8 @@ make_jar_test_provider <- function(
   request_object_encryption_enc_values_supported = character(0),
   request_object_encryption_jwk = NULL,
   request_uri_parameter_supported = NA,
-  require_request_uri_registration = NA,
-  require_signed_request_object = FALSE,
+  request_uri_registration_required = NA,
+  signed_request_object_required = FALSE,
   authorization_request_front_channel_mode = "compat"
 ) {
   do.call(
@@ -85,14 +85,14 @@ make_jar_test_provider <- function(
       token_url = "https://example.com/token",
       issuer = issuer,
       par_url = par_url,
-      require_pushed_authorization_requests = require_pushed_authorization_requests,
+      par_required = par_required,
       request_object_signing_alg_values_supported = request_object_signing_alg_values_supported,
       request_object_encryption_alg_values_supported = request_object_encryption_alg_values_supported,
       request_object_encryption_enc_values_supported = request_object_encryption_enc_values_supported,
       request_object_encryption_jwk = request_object_encryption_jwk,
       request_uri_parameter_supported = request_uri_parameter_supported,
-      require_request_uri_registration = require_request_uri_registration,
-      require_signed_request_object = require_signed_request_object,
+      request_uri_registration_required = request_uri_registration_required,
+      signed_request_object_required = signed_request_object_required,
       authorization_request_front_channel_mode = authorization_request_front_channel_mode,
       use_nonce = use_nonce,
       use_pkce = TRUE,
@@ -108,20 +108,20 @@ make_jar_test_provider <- function(
 make_jar_test_client <- function(
   provider = make_jar_test_provider(),
   client_secret = paste(rep("s", 32), collapse = ""),
-  client_private_key = NULL,
-  client_private_key_kid = NULL,
+  client_assertion_private_key = NULL,
+  client_assertion_private_key_kid = NULL,
   dpop_private_key = NULL,
   dpop_private_key_kid = NULL,
   dpop_signing_alg = NULL,
-  authorization_request_mode = "request",
+  request_object_mode = "request",
   response_mode = NULL,
-  authorization_request_signing_alg = NULL,
-  authorization_request_audience = NULL,
-  authorization_request_encryption_alg = NULL,
-  authorization_request_encryption_enc = NULL,
-  authorization_request_encryption_kid = NULL,
-  authorization_request_ttl = 45,
-  authorization_request_nbf_skew = NULL,
+  request_object_signing_alg = NULL,
+  request_object_audience = NULL,
+  request_object_encryption_alg = NULL,
+  request_object_encryption_enc = NULL,
+  request_object_encryption_kid = NULL,
+  request_object_ttl = 45,
+  request_object_nbf_skew = NULL,
   scopes = c("openid", "profile"),
   resource = character(0),
   claims = NULL,
@@ -141,25 +141,70 @@ make_jar_test_client <- function(
         "0123456789abcdefghijklmnopqrstuvwxyz",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
       ),
-      client_private_key = client_private_key,
-      client_private_key_kid = client_private_key_kid,
+      client_assertion_private_key = client_assertion_private_key,
+      client_assertion_private_key_kid = client_assertion_private_key_kid,
       dpop_private_key = dpop_private_key,
       dpop_private_key_kid = dpop_private_key_kid,
       dpop_signing_alg = dpop_signing_alg,
-      authorization_request_mode = authorization_request_mode,
+      request_object_mode = request_object_mode,
       response_mode = response_mode,
-      authorization_request_signing_alg = authorization_request_signing_alg,
-      authorization_request_audience = authorization_request_audience,
-      authorization_request_encryption_alg = authorization_request_encryption_alg,
-      authorization_request_encryption_enc = authorization_request_encryption_enc,
-      authorization_request_encryption_kid = authorization_request_encryption_kid,
-      authorization_request_ttl = authorization_request_ttl,
-      authorization_request_nbf_skew = authorization_request_nbf_skew,
+      request_object_signing_alg = request_object_signing_alg,
+      request_object_audience = request_object_audience,
+      request_object_encryption_alg = request_object_encryption_alg,
+      request_object_encryption_enc = request_object_encryption_enc,
+      request_object_encryption_kid = request_object_encryption_kid,
+      request_object_ttl = request_object_ttl,
+      request_object_nbf_skew = request_object_nbf_skew,
       resource = resource,
       claims = claims,
       claims_validation = claims_validation,
       required_acr_values = required_acr_values
     )
+  )
+}
+
+as_pkcs1_public_pem <- function(public_key) {
+  encode_length <- function(length_value) {
+    if (length_value < 128L) {
+      return(as.raw(length_value))
+    }
+
+    length_bytes <- raw()
+    while (length_value > 0L) {
+      length_bytes <- c(as.raw(length_value %% 256L), length_bytes)
+      length_value <- length_value %/% 256L
+    }
+    c(as.raw(0x80L + length(length_bytes)), length_bytes)
+  }
+
+  encode_integer <- function(value) {
+    value <- as.raw(value)
+    while (
+      length(value) > 1L &&
+        identical(value[[1]], as.raw(0)) &&
+        as.integer(value[[2]]) < 0x80L
+    ) {
+      value <- value[-1]
+    }
+    if (as.integer(value[[1]]) >= 0x80L) {
+      value <- c(as.raw(0), value)
+    }
+    c(as.raw(0x02), encode_length(length(value)), value)
+  }
+
+  key_data <- as.list(public_key)[["data"]]
+  body <- c(
+    encode_integer(key_data[["n"]]),
+    encode_integer(key_data[["e"]])
+  )
+  der <- c(as.raw(0x30), encode_length(length(body)), body)
+  encoded <- openssl::base64_encode(der, linebreak = TRUE)
+
+  paste0(
+    "-----BEGIN RSA PUBLIC KEY-----\n",
+    encoded,
+    if (endsWith(encoded, "\n")) "" else "\n",
+    "-----END RSA PUBLIC KEY-----\n"
   )
 }
 
@@ -182,20 +227,26 @@ test_that("prepare_call emits a signed request object instead of raw auth params
   hdr <- shinyOAuth:::parse_jwt_header(request_jwt)
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
-  expect_identical(hdr$typ, "oauth-authz-req+jwt")
-  expect_identical(hdr$alg, "HS256")
-  expect_identical(pl$iss, "abc")
-  expect_identical(pl$aud, "https://issuer.example.com")
+  expect_identical(hdr[["typ"]], "oauth-authz-req+jwt")
+  expect_identical(hdr[["alg"]], "HS256")
+  expect_identical(pl[["iss"]], "abc")
+  expect_identical(pl[["aud"]], "https://issuer.example.com")
   expect_false("sub" %in% names(pl))
-  expect_identical(pl$response_type, "code")
-  expect_identical(pl$client_id, "abc")
-  expect_identical(pl$redirect_uri, "http://localhost:8100")
-  expect_identical(pl$scope, "openid profile")
-  expect_identical(pl$code_challenge_method, "S256")
-  expect_true(is.character(pl$state) && nzchar(pl$state))
-  expect_true(is.character(pl$code_challenge) && nzchar(pl$code_challenge))
-  expect_true(is.numeric(pl$iat) && is.numeric(pl$exp) && pl$exp > pl$iat)
-  expect_true(is.character(pl$jti) && nzchar(pl$jti))
+  expect_identical(pl[["response_type"]], "code")
+  expect_identical(pl[["client_id"]], "abc")
+  expect_identical(pl[["redirect_uri"]], "http://localhost:8100")
+  expect_identical(pl[["scope"]], "openid profile")
+  expect_identical(pl[["code_challenge_method"]], "S256")
+  expect_true(is.character(pl[["state"]]) && nzchar(pl[["state"]]))
+  expect_true(
+    is.character(pl[["code_challenge"]]) && nzchar(pl[["code_challenge"]])
+  )
+  expect_true(
+    is.numeric(pl[["iat"]]) &&
+      is.numeric(pl[["exp"]]) &&
+      pl[["exp"]] > pl[["iat"]]
+  )
+  expect_true(is.character(pl[["jti"]]) && nzchar(pl[["jti"]]))
 })
 
 test_that("request mode includes dpop_jkt inside the signed request object", {
@@ -210,7 +261,7 @@ test_that("request mode includes dpop_jkt inside the signed request object", {
   )
 
   expect_false("dpop_jkt" %in% query_param_names(auth_url))
-  expect_identical(pl$dpop_jkt, expected_jkt)
+  expect_identical(pl[["dpop_jkt"]], expected_jkt)
 })
 
 test_that("request mode includes form_post response_mode inside request object", {
@@ -221,16 +272,16 @@ test_that("request mode includes form_post response_mode inside request object",
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
   expect_false("response_mode" %in% query_param_names(auth_url))
-  expect_identical(pl$response_mode, "form_post")
+  expect_identical(pl[["response_mode"]], "form_post")
 })
 
 test_that("request objects default to private-key signing and honor audience overrides", {
   key <- openssl::rsa_keygen()
   cli <- make_jar_test_client(
     client_secret = "",
-    client_private_key = key,
-    client_private_key_kid = "kid-123",
-    authorization_request_audience = "https://example.com/custom-aud"
+    client_assertion_private_key = key,
+    client_assertion_private_key_kid = "kid-123",
+    request_object_audience = "https://example.com/custom-aud"
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
@@ -238,10 +289,10 @@ test_that("request objects default to private-key signing and honor audience ove
   hdr <- shinyOAuth:::parse_jwt_header(request_jwt)
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
-  expect_identical(hdr$typ, "oauth-authz-req+jwt")
-  expect_identical(hdr$alg, "RS256")
-  expect_identical(hdr$kid, "kid-123")
-  expect_identical(pl$aud, "https://example.com/custom-aud")
+  expect_identical(hdr[["typ"]], "oauth-authz-req+jwt")
+  expect_identical(hdr[["alg"]], "RS256")
+  expect_identical(hdr[["kid"]], "kid-123")
+  expect_identical(pl[["aud"]], "https://example.com/custom-aud")
 })
 
 test_that("prepare_call encrypts signed request objects when configured", {
@@ -250,11 +301,11 @@ test_that("prepare_call encrypts signed request objects when configured", {
     provider = make_jar_test_provider(
       request_object_encryption_alg_values_supported = "RSA-OAEP",
       request_object_encryption_enc_values_supported = "A256CBC-HS512",
-      request_object_encryption_jwk = encryption_key$pubkey
+      request_object_encryption_jwk = encryption_key[["pubkey"]]
     ),
-    authorization_request_encryption_alg = "RSA-OAEP",
-    authorization_request_encryption_enc = "A256CBC-HS512",
-    authorization_request_encryption_kid = "enc-kid"
+    request_object_encryption_alg = "RSA-OAEP",
+    request_object_encryption_enc = "A256CBC-HS512",
+    request_object_encryption_kid = "enc-kid"
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
@@ -267,19 +318,19 @@ test_that("prepare_call encrypts signed request objects when configured", {
   expect_length(strsplit(request_jwe, ".", fixed = TRUE)[[1]], 5L)
 
   outer <- shinyOAuth:::jwe_compact_decrypt(request_jwe, encryption_key)
-  inner_hdr <- shinyOAuth:::parse_jwt_header(outer$plaintext)
-  inner_pl <- shinyOAuth:::parse_jwt_payload(outer$plaintext)
+  inner_hdr <- shinyOAuth:::parse_jwt_header(outer[["plaintext"]])
+  inner_pl <- shinyOAuth:::parse_jwt_payload(outer[["plaintext"]])
 
-  expect_identical(outer$header$alg, "RSA-OAEP")
-  expect_identical(outer$header$enc, "A256CBC-HS512")
-  expect_identical(outer$header$kid, "enc-kid")
-  expect_identical(outer$header$typ, "oauth-authz-req+jwt")
-  expect_identical(outer$header$cty, "JWT")
-  expect_identical(inner_hdr$alg, "HS256")
-  expect_identical(inner_hdr$typ, "oauth-authz-req+jwt")
-  expect_identical(inner_pl$iss, "abc")
-  expect_identical(inner_pl$aud, "https://issuer.example.com")
-  expect_identical(inner_pl$client_id, "abc")
+  expect_identical(outer[["header"]][["alg"]], "RSA-OAEP")
+  expect_identical(outer[["header"]][["enc"]], "A256CBC-HS512")
+  expect_identical(outer[["header"]][["kid"]], "enc-kid")
+  expect_identical(outer[["header"]][["typ"]], "oauth-authz-req+jwt")
+  expect_identical(outer[["header"]][["cty"]], "JWT")
+  expect_identical(inner_hdr[["alg"]], "HS256")
+  expect_identical(inner_hdr[["typ"]], "oauth-authz-req+jwt")
+  expect_identical(inner_pl[["iss"]], "abc")
+  expect_identical(inner_pl[["aud"]], "https://issuer.example.com")
+  expect_identical(inner_pl[["client_id"]], "abc")
 })
 
 test_that("request objects require issuer or explicit audience binding", {
@@ -287,12 +338,12 @@ test_that("request objects require issuer or explicit audience binding", {
     make_jar_test_client(
       provider = make_jar_test_provider(issuer = NA_character_)
     ),
-    "authorization_request_audience|issuer"
+    "request_object_audience|issuer"
   )
 
   cli <- make_jar_test_client(
     provider = make_jar_test_provider(issuer = NA_character_),
-    authorization_request_audience = "https://issuer.example.com"
+    request_object_audience = "https://issuer.example.com"
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
@@ -300,10 +351,10 @@ test_that("request objects require issuer or explicit audience binding", {
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
   expect_identical(
-    shinyOAuth:::resolve_authorization_request_audience(cli),
+    shinyOAuth:::resolve_request_object_audience(cli),
     "https://issuer.example.com"
   )
-  expect_identical(pl$aud, "https://issuer.example.com")
+  expect_identical(pl[["aud"]], "https://issuer.example.com")
   expect_setequal(
     query_param_names(auth_url),
     oauth_request_url_param_names("request")
@@ -312,16 +363,16 @@ test_that("request objects require issuer or explicit audience binding", {
 
 test_that("request objects honor ttl and optional nbf skew controls", {
   cli <- make_jar_test_client(
-    authorization_request_ttl = 300,
-    authorization_request_nbf_skew = 15
+    request_object_ttl = 300,
+    request_object_nbf_skew = 15
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
   request_jwt <- parse_query_param(auth_url, "request", decode = TRUE)
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
-  expect_equal(pl$exp - pl$iat, 300)
-  expect_equal(pl$iat - pl$nbf, 15)
+  expect_equal(pl[["exp"]] - pl[["iat"]], 300)
+  expect_equal(pl[["iat"]] - pl[["nbf"]], 15)
 })
 
 test_that("oauth_client validates request-object ttl and nbf skew", {
@@ -339,10 +390,10 @@ test_that("oauth_client validates request-object ttl and nbf skew", {
         "0123456789abcdefghijklmnopqrstuvwxyz",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
       ),
-      authorization_request_mode = "request",
-      authorization_request_ttl = 0
+      request_object_mode = "request",
+      request_object_ttl = 0
     ),
-    regexp = "authorization_request_ttl must be greater than 0"
+    regexp = "request_object_ttl must be greater than 0"
   )
 
   expect_error(
@@ -357,10 +408,10 @@ test_that("oauth_client validates request-object ttl and nbf skew", {
         "0123456789abcdefghijklmnopqrstuvwxyz",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
       ),
-      authorization_request_mode = "request",
-      authorization_request_nbf_skew = -1
+      request_object_mode = "request",
+      request_object_nbf_skew = -1
     ),
-    regexp = "authorization_request_nbf_skew must be greater than or equal to 0"
+    regexp = "request_object_nbf_skew must be greater than or equal to 0"
   )
 })
 
@@ -379,11 +430,11 @@ test_that("request mode requires signing material", {
         "0123456789abcdefghijklmnopqrstuvwxyz",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
       ),
-      authorization_request_mode = "request"
+      request_object_mode = "request"
     ),
     regexp = paste(
-      "authorization_request_mode = 'request' or 'request_uri' requires",
-      "client_private_key or client_secret"
+      "request_object_mode = 'request' or 'request_uri' requires",
+      "client_assertion_private_key or client_secret"
     )
   )
 })
@@ -391,7 +442,7 @@ test_that("request mode requires signing material", {
 test_that("request_uri mode publishes signed request objects", {
   published <- NULL
   cli <- make_jar_test_client(
-    authorization_request_mode = "request_uri"
+    request_object_mode = "request_uri"
   )
 
   auth_url <- shinyOAuth:::prepare_call(
@@ -424,18 +475,20 @@ test_that("request_uri mode publishes signed request objects", {
   )
   expect_true(is.list(published))
   expect_true(
-    is.character(published$request_handle_id) &&
-      length(published$request_handle_id) == 1L &&
-      !is.na(published$request_handle_id) &&
-      nzchar(published$request_handle_id)
+    is.character(published[["request_handle_id"]]) &&
+      length(published[["request_handle_id"]]) == 1L &&
+      !is.na(published[["request_handle_id"]]) &&
+      nzchar(published[["request_handle_id"]])
   )
-  expect_identical(published$client_id, "abc")
+  expect_identical(published[["client_id"]], "abc")
 
-  request_payload <- shinyOAuth:::parse_jwt_payload(published$request_object)
-  expect_identical(request_payload$client_id, "abc")
-  expect_identical(request_payload$redirect_uri, "http://localhost:8100")
+  request_payload <- shinyOAuth:::parse_jwt_payload(published[[
+    "request_object"
+  ]])
+  expect_identical(request_payload[["client_id"]], "abc")
+  expect_identical(request_payload[["redirect_uri"]], "http://localhost:8100")
   expect_lt(
-    as.numeric(difftime(published$expires_at, Sys.time(), units = "secs")),
+    as.numeric(difftime(published[["expires_at"]], Sys.time(), units = "secs")),
     60
   )
 })
@@ -447,12 +500,12 @@ test_that("request_uri mode publishes encrypted request objects", {
     provider = make_jar_test_provider(
       request_object_encryption_alg_values_supported = "RSA-OAEP",
       request_object_encryption_enc_values_supported = "A256CBC-HS512",
-      request_object_encryption_jwk = encryption_key$pubkey
+      request_object_encryption_jwk = encryption_key[["pubkey"]]
     ),
-    authorization_request_mode = "request_uri",
-    authorization_request_encryption_alg = "RSA-OAEP",
-    authorization_request_encryption_enc = "A256CBC-HS512",
-    authorization_request_encryption_kid = "enc-kid"
+    request_object_mode = "request_uri",
+    request_object_encryption_alg = "RSA-OAEP",
+    request_object_encryption_enc = "A256CBC-HS512",
+    request_object_encryption_kid = "enc-kid"
   )
 
   auth_url <- shinyOAuth:::prepare_call(
@@ -484,31 +537,34 @@ test_that("request_uri mode publishes encrypted request objects", {
     "https://client.example.com/encrypted-request-object"
   )
   expect_true(is.list(published))
-  expect_identical(published$client_id, "abc")
-  expect_length(strsplit(published$request_object, ".", fixed = TRUE)[[1]], 5L)
+  expect_identical(published[["client_id"]], "abc")
+  expect_length(
+    strsplit(published[["request_object"]], ".", fixed = TRUE)[[1]],
+    5L
+  )
 
   outer <- shinyOAuth:::jwe_compact_decrypt(
-    published$request_object,
+    published[["request_object"]],
     encryption_key
   )
-  inner_hdr <- shinyOAuth:::parse_jwt_header(outer$plaintext)
-  inner_pl <- shinyOAuth:::parse_jwt_payload(outer$plaintext)
+  inner_hdr <- shinyOAuth:::parse_jwt_header(outer[["plaintext"]])
+  inner_pl <- shinyOAuth:::parse_jwt_payload(outer[["plaintext"]])
 
-  expect_identical(outer$header$alg, "RSA-OAEP")
-  expect_identical(outer$header$enc, "A256CBC-HS512")
-  expect_identical(outer$header$kid, "enc-kid")
-  expect_identical(outer$header$typ, "oauth-authz-req+jwt")
-  expect_identical(outer$header$cty, "JWT")
-  expect_identical(inner_hdr$alg, "HS256")
-  expect_identical(inner_hdr$typ, "oauth-authz-req+jwt")
-  expect_identical(inner_pl$iss, "abc")
-  expect_identical(inner_pl$aud, "https://issuer.example.com")
-  expect_identical(inner_pl$client_id, "abc")
+  expect_identical(outer[["header"]][["alg"]], "RSA-OAEP")
+  expect_identical(outer[["header"]][["enc"]], "A256CBC-HS512")
+  expect_identical(outer[["header"]][["kid"]], "enc-kid")
+  expect_identical(outer[["header"]][["typ"]], "oauth-authz-req+jwt")
+  expect_identical(outer[["header"]][["cty"]], "JWT")
+  expect_identical(inner_hdr[["alg"]], "HS256")
+  expect_identical(inner_hdr[["typ"]], "oauth-authz-req+jwt")
+  expect_identical(inner_pl[["iss"]], "abc")
+  expect_identical(inner_pl[["aud"]], "https://issuer.example.com")
+  expect_identical(inner_pl[["client_id"]], "abc")
 })
 
 test_that("request_uri mode requires a publisher", {
   cli <- make_jar_test_client(
-    authorization_request_mode = "request_uri"
+    request_object_mode = "request_uri"
   )
 
   expect_error(
@@ -517,38 +573,21 @@ test_that("request_uri mode requires a publisher", {
   )
 })
 
-test_that("request_uri mode warns once for non-HTTPS publisher results", {
-  rlang::reset_warning_verbosity("shinyOAuth_request_uri_non_https")
-
+test_that("request_uri mode rejects non-HTTPS publisher results", {
   cli <- make_jar_test_client(
-    authorization_request_mode = "request_uri"
+    request_object_mode = "request_uri"
   )
-  auth_url <- NULL
 
-  expect_warning(
-    auth_url <- shinyOAuth:::prepare_call(
+  expect_error(
+    shinyOAuth:::prepare_call(
       cli,
       valid_browser_token(),
       request_uri_publisher = function(...) {
         "http://localhost:8100/request-object"
       }
     ),
-    regexp = "RFC 9101|Non-HTTPS request_uri"
-  )
-
-  expect_identical(
-    parse_query_param(auth_url, "request_uri", decode = TRUE),
-    "http://localhost:8100/request-object"
-  )
-
-  expect_no_warning(
-    shinyOAuth:::prepare_call(
-      cli,
-      valid_browser_token(),
-      request_uri_publisher = function(...) {
-        "http://localhost:8100/request-object-second"
-      }
-    )
+    class = "shinyOAuth_config_error",
+    regexp = "must use HTTPS"
   )
 })
 
@@ -558,22 +597,22 @@ test_that("request_uri mode rejects unsupported transport but allows registered 
       provider = make_jar_test_provider(
         request_uri_parameter_supported = FALSE
       ),
-      authorization_request_mode = "request_uri"
+      request_object_mode = "request_uri"
     ),
     regexp = paste(
       "request_uri parameter transport is not supported;",
-      "authorization_request_mode = 'request_uri' cannot be used"
+      "request_object_mode = 'request_uri' cannot be used"
     )
   )
 
   registered_cli <- make_jar_test_client(
     provider = make_jar_test_provider(
-      require_request_uri_registration = TRUE
+      request_uri_registration_required = TRUE
     ),
-    authorization_request_mode = "request_uri"
+    request_object_mode = "request_uri"
   )
 
-  expect_true(isTRUE(registered_cli@provider@require_request_uri_registration))
+  expect_true(isTRUE(registered_cli@provider@request_uri_registration_required))
   expect_true(
     S7::S7_inherits(registered_cli, shinyOAuth::OAuthClient)
   )
@@ -583,7 +622,7 @@ test_that("request_uri mode bypasses optional PAR and publishes by reference", {
   published <- NULL
   cli <- make_jar_test_client(
     provider = make_jar_test_provider(par_url = "https://example.com/par"),
-    authorization_request_mode = "request_uri"
+    request_object_mode = "request_uri"
   )
 
   testthat::local_mocked_bindings(
@@ -622,16 +661,16 @@ test_that("request_uri mode bypasses optional PAR and publishes by reference", {
     "https://client.example.com/published-request-object"
   )
   expect_true(is.list(published))
-  expect_identical(published$client_id, "abc")
+  expect_identical(published[["client_id"]], "abc")
 })
 
 test_that("request_uri mode rejects providers that require PAR", {
   cli <- make_jar_test_client(
     provider = make_jar_test_provider(
       par_url = "https://example.com/par",
-      require_pushed_authorization_requests = TRUE
+      par_required = TRUE
     ),
-    authorization_request_mode = "request_uri"
+    request_object_mode = "request_uri"
   )
 
   expect_error(
@@ -643,7 +682,7 @@ test_that("request_uri mode rejects providers that require PAR", {
       }
     ),
     regexp = paste(
-      "authorization_request_mode = 'request_uri' cannot",
+      "request_object_mode = 'request_uri' cannot",
       "be used when the provider requires PAR"
     )
   )
@@ -651,7 +690,7 @@ test_that("request_uri mode rejects providers that require PAR", {
 
 test_that("request_uri mode warns when request_uri exceeds RFC 9101 guidance", {
   cli <- make_jar_test_client(
-    authorization_request_mode = "request_uri"
+    request_object_mode = "request_uri"
   )
   long_request_uri <- paste0(
     "https://client.example.com/",
@@ -691,7 +730,7 @@ test_that("request mode pushes signed request objects through PAR when available
     req_with_retry = function(req, ...) {
       body_text <<- request_body_text(req)
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -720,21 +759,32 @@ test_that("request mode pushes signed request objects through PAR when available
   expect_match(body_text, "client_id=abc")
   expect_match(body_text, "request=")
   expect_false(grepl("response_type=code", body_text, fixed = TRUE))
-  expect_identical(pl$client_id, "abc")
-  expect_identical(pl$redirect_uri, "http://localhost:8100")
-  expect_true(is.character(pl$state) && nzchar(pl$state))
+  expect_identical(pl[["client_id"]], "abc")
+  expect_identical(pl[["redirect_uri"]], "http://localhost:8100")
+  expect_true(is.character(pl[["state"]]) && nzchar(pl[["state"]]))
 })
 
-test_that("OAuth request_uri mode keeps the front channel minimal without an issuer", {
-  cli <- make_jar_test_client(
-    provider = make_jar_test_provider(issuer = NA_character_),
-    authorization_request_mode = "request_uri",
-    authorization_request_audience = "https://issuer.example.com",
+test_that("generic issuer keeps request-object front channels minimal", {
+  provider <- make_jar_test_provider(
+    authorization_request_front_channel_mode = "minimal"
+  )
+  provider@infer_oidc_from_issuer <- FALSE
+  request_cli <- make_jar_test_client(
+    provider = provider,
+    scopes = "profile"
+  )
+  request_uri_cli <- make_jar_test_client(
+    provider = provider,
+    request_object_mode = "request_uri",
     scopes = "profile"
   )
 
-  auth_url <- shinyOAuth:::prepare_call(
-    cli,
+  request_url <- shinyOAuth:::prepare_call(
+    request_cli,
+    valid_browser_token()
+  )
+  request_uri_url <- shinyOAuth:::prepare_call(
+    request_uri_cli,
     valid_browser_token(),
     request_uri_publisher = function(...) {
       "https://client.example.com/request-object"
@@ -742,7 +792,11 @@ test_that("OAuth request_uri mode keeps the front channel minimal without an iss
   )
 
   expect_setequal(
-    query_param_names(auth_url),
+    query_param_names(request_url),
+    oauth_request_url_param_names("request")
+  )
+  expect_setequal(
+    query_param_names(request_uri_url),
     oauth_request_url_param_names("request_uri")
   )
 })
@@ -757,9 +811,9 @@ test_that("request mode through PAR keeps dpop_jkt inside the request object", {
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
-      body_data <<- req$body$data %||% list()
+      body_data <<- req[["body"]][["data"]] %||% list()
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -771,7 +825,7 @@ test_that("request mode through PAR keeps dpop_jkt inside the request object", {
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
-  pl <- shinyOAuth:::parse_jwt_payload(body_data$request)
+  pl <- shinyOAuth:::parse_jwt_payload(body_data[["request"]])
   expected_jkt <- shinyOAuth:::compute_jwk_thumbprint(
     shinyOAuth:::dpop_public_jwk(key)
   )
@@ -781,7 +835,7 @@ test_that("request mode through PAR keeps dpop_jkt inside the request object", {
     oidc_request_url_param_names("request_uri")
   )
   expect_false("dpop_jkt" %in% names(body_data))
-  expect_identical(pl$dpop_jkt, expected_jkt)
+  expect_identical(pl[["dpop_jkt"]], expected_jkt)
 })
 
 test_that("request mode through PAR pushes encrypted request objects", {
@@ -791,18 +845,18 @@ test_that("request mode through PAR pushes encrypted request objects", {
       par_url = "https://example.com/par",
       request_object_encryption_alg_values_supported = "RSA-OAEP",
       request_object_encryption_enc_values_supported = "A256CBC-HS512",
-      request_object_encryption_jwk = encryption_key$pubkey
+      request_object_encryption_jwk = encryption_key[["pubkey"]]
     ),
-    authorization_request_encryption_alg = "RSA-OAEP",
-    authorization_request_encryption_enc = "A256CBC-HS512"
+    request_object_encryption_alg = "RSA-OAEP",
+    request_object_encryption_enc = "A256CBC-HS512"
   )
   body_data <- NULL
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
-      body_data <<- req$body$data %||% list()
+      body_data <<- req[["body"]][["data"]] %||% list()
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -814,20 +868,278 @@ test_that("request mode through PAR pushes encrypted request objects", {
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
-  outer <- shinyOAuth:::jwe_compact_decrypt(body_data$request, encryption_key)
-  inner_pl <- shinyOAuth:::parse_jwt_payload(outer$plaintext)
+  outer <- shinyOAuth:::jwe_compact_decrypt(
+    body_data[["request"]],
+    encryption_key
+  )
+  inner_pl <- shinyOAuth:::parse_jwt_payload(outer[["plaintext"]])
 
   expect_setequal(
     query_param_names(auth_url),
     oidc_request_url_param_names("request_uri")
   )
   expect_false(grepl("[?&]request=", auth_url))
-  expect_length(strsplit(body_data$request, ".", fixed = TRUE)[[1]], 5L)
-  expect_identical(outer$header$alg, "RSA-OAEP")
-  expect_identical(outer$header$enc, "A256CBC-HS512")
-  expect_identical(outer$header$cty, "JWT")
-  expect_identical(inner_pl$client_id, "abc")
-  expect_identical(inner_pl$redirect_uri, "http://localhost:8100")
+  expect_length(strsplit(body_data[["request"]], ".", fixed = TRUE)[[1]], 5L)
+  expect_identical(outer[["header"]][["alg"]], "RSA-OAEP")
+  expect_identical(outer[["header"]][["enc"]], "A256CBC-HS512")
+  expect_identical(outer[["header"]][["cty"]], "JWT")
+  expect_identical(inner_pl[["client_id"]], "abc")
+  expect_identical(inner_pl[["redirect_uri"]], "http://localhost:8100")
+})
+
+test_that("encrypted request objects accept SPKI and PKCS#1 public PEM", {
+  encryption_key <- openssl::rsa_keygen(bits = 2048)
+  public_pems <- list(
+    spki = openssl::write_pem(encryption_key[["pubkey"]]),
+    pkcs1 = as_pkcs1_public_pem(encryption_key[["pubkey"]])
+  )
+
+  for (public_pem in public_pems) {
+    provider <- expect_no_error(make_jar_test_provider(
+      request_object_encryption_alg_values_supported = "RSA-OAEP",
+      request_object_encryption_enc_values_supported = "A128CBC-HS256",
+      request_object_encryption_jwk = public_pem
+    ))
+    client <- make_jar_test_client(
+      provider = provider,
+      request_object_encryption_alg = "RSA-OAEP",
+      request_object_encryption_enc = "A128CBC-HS256"
+    )
+
+    auth_url <- shinyOAuth:::prepare_call(client, valid_browser_token())
+    request_jwe <- parse_query_param(auth_url, "request", decode = TRUE)
+    decrypted <- shinyOAuth:::jwe_compact_decrypt(request_jwe, encryption_key)
+
+    expect_identical(decrypted[["header"]][["alg"]], "RSA-OAEP")
+    expect_identical(decrypted[["header"]][["enc"]], "A128CBC-HS256")
+    expect_identical(
+      shinyOAuth:::parse_jwt_payload(decrypted[["plaintext"]])[["client_id"]],
+      "abc"
+    )
+  }
+})
+
+test_that("request object encryption only selects pinned recipient keys", {
+  local_mocked_bindings(
+    force_refresh_provider_jwks = function(...) NULL,
+    .package = "shinyOAuth"
+  )
+  signing_key <- openssl::rsa_keygen(bits = 2048)
+  encryption_key <- openssl::rsa_keygen(bits = 2048)
+  signing_jwk <- jsonlite::fromJSON(
+    write_test_jwk(signing_key[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  signing_jwk[["kid"]] <- "pinned-signing-key"
+  signing_jwk[["use"]] <- "sig"
+  encryption_jwk <- jsonlite::fromJSON(
+    write_test_jwk(encryption_key[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  encryption_jwk[["kid"]] <- "unpinned-encryption-key"
+  encryption_jwk[["use"]] <- "enc"
+  encryption_jwk[["alg"]] <- "RSA-OAEP"
+  jwks <- list(keys = list(signing_jwk, encryption_jwk))
+  signing_pin <- shinyOAuth:::compute_jwk_thumbprint(signing_jwk)
+  encryption_pin <- shinyOAuth:::compute_jwk_thumbprint(encryption_jwk)
+
+  expect_length(
+    shinyOAuth:::select_candidate_jwks_for_encryption(
+      jwks,
+      alg = "RSA-OAEP",
+      pins = signing_pin
+    ),
+    0L
+  )
+  expect_identical(
+    shinyOAuth:::select_candidate_jwks_for_encryption(
+      jwks,
+      alg = "RSA-OAEP",
+      pins = encryption_pin
+    )[[1]][["kid"]],
+    "unpinned-encryption-key"
+  )
+
+  issuer <- "https://issuer.example.com"
+  jwks_uri <- paste0(issuer, "/jwks")
+  jwks_cache <- cachem::cache_mem(max_age = 3600)
+  provider <- make_jar_test_provider(
+    issuer = issuer,
+    request_object_encryption_alg_values_supported = "RSA-OAEP",
+    request_object_encryption_enc_values_supported = "A128CBC-HS256"
+  )
+  provider@jwks_uri <- jwks_uri
+  provider@jwks_cache <- jwks_cache
+  provider@jwks_pins <- signing_pin
+  provider@jwks_pin_mode <- "any"
+  cache_key <- shinyOAuth:::jwks_cache_key(
+    issuer,
+    pins = signing_pin,
+    pin_mode = "any",
+    issuer_match = provider@issuer_match,
+    jwks_host_issuer_match = provider@jwks_host_issuer_match,
+    jwks_host_allow_only = provider@jwks_host_allow_only,
+    jwks_uri_override = jwks_uri
+  )
+  jwks_cache[["set"]](
+    cache_key,
+    list(
+      jwks = jwks,
+      fetched_at = as.numeric(Sys.time()),
+      discovery_issuer = issuer,
+      jwks_uri = jwks_uri,
+      jwks_uri_host = "issuer.example.com"
+    )
+  )
+  client <- make_jar_test_client(
+    provider = provider,
+    request_object_encryption_alg = "RSA-OAEP",
+    request_object_encryption_enc = "A128CBC-HS256",
+    request_object_encryption_kid = "unpinned-encryption-key"
+  )
+
+  expect_error(
+    shinyOAuth:::prepare_call(client, valid_browser_token()),
+    class = "shinyOAuth_config_error",
+    regexp = "No provider Request Object encryption key matched"
+  )
+})
+
+test_that("JAR encryption recovers from a rotated key with a throttled refresh", {
+  old_key <- openssl::rsa_keygen()
+  new_key <- openssl::rsa_keygen()
+  as_enc_jwk <- function(key, kid) {
+    jwk <- jsonlite::fromJSON(write_test_jwk(key[["pubkey"]]))
+    c(jwk, list(kid = kid, use = "enc", alg = "RSA-OAEP"))
+  }
+  old <- as_enc_jwk(old_key, "old")
+  fresh <- as_enc_jwk(new_key, "new")
+  provider <- make_jar_test_provider()
+  provider@jwks_cache <- cachem::cache_mem()
+  client <- make_jar_test_client(
+    provider = provider,
+    request_object_encryption_alg = "RSA-OAEP",
+    request_object_encryption_enc = "A128CBC-HS256",
+    request_object_encryption_kid = "new"
+  )
+  refreshes <- 0L
+  local_mocked_bindings(
+    fetch_jwks = function(..., force_refresh = FALSE) {
+      if (force_refresh) {
+        refreshes <<- refreshes + 1L
+        return(list(keys = list(old, fresh)))
+      }
+      list(keys = list(old))
+    },
+    .package = "shinyOAuth"
+  )
+  url <- prepare_call(client, valid_browser_token())
+  encrypted <- parse_query_param(url, "request", decode = TRUE)
+  decrypted <- jwe_compact_decrypt(encrypted, new_key)
+  expect_identical(decrypted[["header"]][["kid"]], "new")
+  expect_identical(
+    parse_jwt_payload(decrypted[["plaintext"]])[["client_id"]],
+    "abc"
+  )
+  expect_identical(refreshes, 1L)
+  # A persistent cache/key miss must not trigger unbounded fetches.
+  expect_error(
+    prepare_call(client, valid_browser_token()),
+    "No provider Request Object encryption key matched"
+  )
+  expect_identical(refreshes, 1L)
+})
+
+test_that("JWK list and JSON encryption inputs enforce alg metadata", {
+  encryption_key <- openssl::rsa_keygen(bits = 2048)
+  encryption_jwk <- jsonlite::fromJSON(
+    write_test_jwk(encryption_key[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  encryption_jwk[["kid"]] <- "encryption-key-7"
+  encryption_jwk[["alg"]] <- "RSA1_5"
+
+  representations <- list(
+    jwk = encryption_jwk,
+    json = jsonlite::toJSON(encryption_jwk, auto_unbox = TRUE)
+  )
+  for (representation in representations) {
+    provider <- make_jar_test_provider(
+      request_object_encryption_alg_values_supported = "RSA-OAEP",
+      request_object_encryption_enc_values_supported = "A128CBC-HS256",
+      request_object_encryption_jwk = representation
+    )
+    client <- make_jar_test_client(
+      provider = provider,
+      request_object_encryption_alg = "RSA-OAEP",
+      request_object_encryption_enc = "A128CBC-HS256"
+    )
+
+    expect_error(
+      shinyOAuth:::prepare_call(client, valid_browser_token()),
+      class = "shinyOAuth_config_error",
+      regexp = "advertises JWE alg 'RSA1_5' but the client requested 'RSA-OAEP'"
+    )
+  }
+})
+
+test_that("JWK list and JSON encryption inputs retain kid and key policy", {
+  encryption_key <- openssl::rsa_keygen(bits = 2048)
+  encryption_jwk <- jsonlite::fromJSON(
+    write_test_jwk(encryption_key[["pubkey"]]),
+    simplifyVector = FALSE
+  )
+  encryption_jwk[["kid"]] <- "encryption-key-7"
+  encryption_jwk[["alg"]] <- "RSA-OAEP"
+  encryption_jwk[["use"]] <- "enc"
+  encryption_jwk[["key_ops"]] <- list("encrypt", "wrapKey")
+
+  representations <- list(
+    jwk = encryption_jwk,
+    json = jsonlite::toJSON(encryption_jwk, auto_unbox = TRUE)
+  )
+  for (representation in representations) {
+    provider <- make_jar_test_provider(
+      request_object_encryption_alg_values_supported = "RSA-OAEP",
+      request_object_encryption_enc_values_supported = "A128CBC-HS256",
+      request_object_encryption_jwk = representation
+    )
+    client <- make_jar_test_client(
+      provider = provider,
+      request_object_encryption_alg = "RSA-OAEP",
+      request_object_encryption_enc = "A128CBC-HS256"
+    )
+
+    auth_url <- shinyOAuth:::prepare_call(client, valid_browser_token())
+    request_jwe <- parse_query_param(auth_url, "request", decode = TRUE)
+    decrypted <- shinyOAuth:::jwe_compact_decrypt(request_jwe, encryption_key)
+
+    expect_identical(decrypted[["header"]][["kid"]], "encryption-key-7")
+  }
+
+  encryption_jwk[["use"]] <- "sig"
+  restricted_representations <- list(
+    jwk = encryption_jwk,
+    json = jsonlite::toJSON(encryption_jwk, auto_unbox = TRUE)
+  )
+  for (representation in restricted_representations) {
+    provider <- make_jar_test_provider(
+      request_object_encryption_alg_values_supported = "RSA-OAEP",
+      request_object_encryption_enc_values_supported = "A128CBC-HS256",
+      request_object_encryption_jwk = representation
+    )
+    client <- make_jar_test_client(
+      provider = provider,
+      request_object_encryption_alg = "RSA-OAEP",
+      request_object_encryption_enc = "A128CBC-HS256"
+    )
+
+    expect_error(
+      shinyOAuth:::prepare_call(client, valid_browser_token()),
+      class = "shinyOAuth_config_error",
+      regexp = "not permitted for encryption by its use or key_ops metadata"
+    )
+  }
 })
 
 test_that("OIDC request minimal front-channel mode is rejected without PAR", {
@@ -850,7 +1162,7 @@ test_that("OIDC request_uri minimal front-channel mode is rejected", {
       provider = make_jar_test_provider(
         authorization_request_front_channel_mode = "minimal"
       ),
-      authorization_request_mode = "request_uri"
+      request_object_mode = "request_uri"
     ),
     regexp = paste(
       "OpenID Connect request and caller-managed request_uri transports do not support",
@@ -859,7 +1171,6 @@ test_that("OIDC request_uri minimal front-channel mode is rejected", {
   )
 })
 
-
 # 2. request object encryption validation -------------------------------------
 
 test_that("oauth_client validates request-object encryption configuration", {
@@ -867,26 +1178,26 @@ test_that("oauth_client validates request-object encryption configuration", {
   provider_with_key <- make_jar_test_provider(
     request_object_encryption_alg_values_supported = "RSA-OAEP",
     request_object_encryption_enc_values_supported = "A256CBC-HS512",
-    request_object_encryption_jwk = encryption_key$pubkey
+    request_object_encryption_jwk = encryption_key[["pubkey"]]
   )
 
   expect_error(
     make_jar_test_client(
       provider = provider_with_key,
-      authorization_request_encryption_alg = "RSA-OAEP"
+      request_object_encryption_alg = "RSA-OAEP"
     ),
     regexp = paste(
-      "authorization_request_encryption_alg and",
-      "authorization_request_encryption_enc must both be provided"
+      "request_object_encryption_alg and",
+      "request_object_encryption_enc must both be provided"
     )
   )
 
   expect_error(
     make_jar_test_client(
       provider = make_jar_test_provider(issuer = NA_character_),
-      authorization_request_audience = "https://issuer.example.com",
-      authorization_request_encryption_alg = "RSA-OAEP",
-      authorization_request_encryption_enc = "A256CBC-HS512"
+      request_object_audience = "https://issuer.example.com",
+      request_object_encryption_alg = "RSA-OAEP",
+      request_object_encryption_enc = "A256CBC-HS512"
     ),
     regexp = paste(
       "Request Object encryption requires provider issuer or",
@@ -899,15 +1210,25 @@ test_that("oauth_client validates request-object encryption configuration", {
       provider = make_jar_test_provider(
         request_object_encryption_alg_values_supported = "RSA1_5",
         request_object_encryption_enc_values_supported = "A256CBC-HS512",
-        request_object_encryption_jwk = encryption_key$pubkey
+        request_object_encryption_jwk = encryption_key[["pubkey"]]
       ),
-      authorization_request_encryption_alg = "RSA-OAEP",
-      authorization_request_encryption_enc = "A256CBC-HS512"
+      request_object_encryption_alg = "RSA-OAEP",
+      request_object_encryption_enc = "A256CBC-HS512"
     ),
     regexp = paste(
-      "authorization_request_encryption_alg 'RSA-OAEP' is not supported by",
+      "request_object_encryption_alg 'RSA-OAEP' is not supported by",
       "provider request_object_encryption_alg_values_supported"
     )
+  )
+
+  weak_encryption_key <- openssl::rsa_keygen(bits = 1024)
+  expect_error(
+    make_jar_test_provider(
+      request_object_encryption_alg_values_supported = "RSA-OAEP",
+      request_object_encryption_enc_values_supported = "A128CBC-HS256",
+      request_object_encryption_jwk = weak_encryption_key[["pubkey"]]
+    ),
+    regexp = "RSA public key with a modulus of at least 2048 bits"
   )
 })
 
@@ -926,7 +1247,7 @@ test_that("request mode through PAR keeps client_id in the body for header auth"
       body_text <<- request_body_text(req)
       auth_header_names <<- names(as.list(req[["headers"]]))
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -961,9 +1282,9 @@ test_that("request mode through PAR keeps extra auth params inside the request o
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
-      body_data <<- req$body$data %||% list()
+      body_data <<- req[["body"]][["data"]] %||% list()
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -975,7 +1296,7 @@ test_that("request mode through PAR keeps extra auth params inside the request o
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
-  pl <- shinyOAuth:::parse_jwt_payload(body_data$request)
+  pl <- shinyOAuth:::parse_jwt_payload(body_data[["request"]])
 
   expect_setequal(
     query_param_names(auth_url),
@@ -987,9 +1308,12 @@ test_that("request mode through PAR keeps extra auth params inside the request o
   expect_false("login_hint" %in% names(body_data))
   expect_false("response_type" %in% names(body_data))
   expect_false("redirect_uri" %in% names(body_data))
-  expect_identical(pl$prompt, "login")
-  expect_identical(pl$login_hint, "alice")
-  expect_identical(unname(as.character(pl$custom_multi)), c("alpha", "beta"))
+  expect_identical(pl[["prompt"]], "login")
+  expect_identical(pl[["login_hint"]], "alice")
+  expect_identical(
+    unname(as.character(pl[["custom_multi"]])),
+    c("alpha", "beta")
+  )
 })
 
 test_that("request mode through PAR supports client_secret_jwt client auth", {
@@ -1003,9 +1327,9 @@ test_that("request mode through PAR supports client_secret_jwt client auth", {
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
-      body_data <<- req$body$data %||% list()
+      body_data <<- req[["body"]][["data"]] %||% list()
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -1017,12 +1341,14 @@ test_that("request mode through PAR supports client_secret_jwt client auth", {
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
-  request_value <- utils::URLdecode(as.character(body_data$request)[[1]])
-  assertion_value <- utils::URLdecode(as.character(body_data$client_assertion)[[
+  request_value <- utils::URLdecode(as.character(body_data[["request"]])[[1]])
+  assertion_value <- utils::URLdecode(as.character(body_data[[
+    "client_assertion"
+  ]])[[
     1
   ]])
   assertion_type <- utils::URLdecode(
-    as.character(body_data$client_assertion_type)[[1]]
+    as.character(body_data[["client_assertion_type"]])[[1]]
   )
   request_payload <- shinyOAuth:::parse_jwt_payload(request_value)
   assertion_payload <- shinyOAuth:::parse_jwt_payload(assertion_value)
@@ -1043,8 +1369,8 @@ test_that("request mode through PAR supports client_secret_jwt client auth", {
   expect_false("client_secret" %in% names(body_data))
   expect_false("response_type" %in% names(body_data))
   expect_false("redirect_uri" %in% names(body_data))
-  expect_identical(request_payload$client_id, "abc")
-  expect_identical(assertion_payload$aud, cli@provider@issuer)
+  expect_identical(request_payload[["client_id"]], "abc")
+  expect_identical(assertion_payload[["aud"]], cli@provider@issuer)
 })
 
 test_that("request mode through PAR supports private_key_jwt client auth", {
@@ -1055,16 +1381,16 @@ test_that("request mode through PAR supports private_key_jwt client auth", {
       token_auth_style = "private_key_jwt"
     ),
     client_secret = "",
-    client_private_key = key,
-    client_private_key_kid = "kid-123"
+    client_assertion_private_key = key,
+    client_assertion_private_key_kid = "kid-123"
   )
   body_data <- NULL
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
-      body_data <<- req$body$data %||% list()
+      body_data <<- req[["body"]][["data"]] %||% list()
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 201,
         headers = list("content-type" = "application/json"),
         body = charToRaw(
@@ -1076,12 +1402,14 @@ test_that("request mode through PAR supports private_key_jwt client auth", {
   )
 
   auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
-  request_value <- utils::URLdecode(as.character(body_data$request)[[1]])
-  assertion_value <- utils::URLdecode(as.character(body_data$client_assertion)[[
+  request_value <- utils::URLdecode(as.character(body_data[["request"]])[[1]])
+  assertion_value <- utils::URLdecode(as.character(body_data[[
+    "client_assertion"
+  ]])[[
     1
   ]])
   assertion_type <- utils::URLdecode(
-    as.character(body_data$client_assertion_type)[[1]]
+    as.character(body_data[["client_assertion_type"]])[[1]]
   )
   request_header <- shinyOAuth:::parse_jwt_header(request_value)
   request_payload <- shinyOAuth:::parse_jwt_payload(request_value)
@@ -1101,14 +1429,14 @@ test_that("request mode through PAR supports private_key_jwt client auth", {
   expect_false("client_secret" %in% names(body_data))
   expect_false("response_type" %in% names(body_data))
   expect_false("redirect_uri" %in% names(body_data))
-  expect_identical(request_header$typ, "oauth-authz-req+jwt")
-  expect_identical(request_header$kid, "kid-123")
-  expect_identical(request_payload$client_id, "abc")
-  expect_identical(assertion_header$typ, "JWT")
-  expect_identical(assertion_header$kid, "kid-123")
-  expect_identical(assertion_payload$iss, "abc")
-  expect_identical(assertion_payload$sub, "abc")
-  expect_identical(assertion_payload$aud, cli@provider@issuer)
+  expect_identical(request_header[["typ"]], "oauth-authz-req+jwt")
+  expect_identical(request_header[["kid"]], "kid-123")
+  expect_identical(request_payload[["client_id"]], "abc")
+  expect_identical(assertion_header[["typ"]], "JWT")
+  expect_identical(assertion_header[["kid"]], "kid-123")
+  expect_identical(assertion_payload[["iss"]], "abc")
+  expect_identical(assertion_payload[["sub"]], "abc")
+  expect_identical(assertion_payload[["aud"]], cli@provider@issuer)
 })
 
 test_that("request object preserves repeated resource indicators", {
@@ -1124,7 +1452,7 @@ test_that("request object preserves repeated resource indicators", {
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
   expect_identical(
-    unname(as.character(pl$resource)),
+    unname(as.character(pl[["resource"]])),
     c("https://api.example.com", "urn:example:ledger")
   )
 })
@@ -1146,13 +1474,19 @@ test_that("request object preserves JSON-encoded claims requests", {
   request_jwt <- parse_query_param(auth_url, "request", decode = TRUE)
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
-  expect_type(pl$claims, "list")
-  expect_true("userinfo" %in% names(pl$claims))
-  expect_true("id_token" %in% names(pl$claims))
-  expect_true("email" %in% names(pl$claims$userinfo))
-  expect_true("given_name" %in% names(pl$claims$userinfo))
-  expect_identical(pl$claims$userinfo$given_name$essential, TRUE)
-  expect_identical(pl$claims$id_token$auth_time$essential, TRUE)
+  expect_type(pl[["claims"]], "list")
+  expect_true("userinfo" %in% names(pl[["claims"]]))
+  expect_true("id_token" %in% names(pl[["claims"]]))
+  expect_true("email" %in% names(pl[["claims"]][["userinfo"]]))
+  expect_true("given_name" %in% names(pl[["claims"]][["userinfo"]]))
+  expect_identical(
+    pl[["claims"]][["userinfo"]][["given_name"]][["essential"]],
+    TRUE
+  )
+  expect_identical(
+    pl[["claims"]][["id_token"]][["auth_time"]][["essential"]],
+    TRUE
+  )
 })
 
 test_that("request object preserves acr_values hints", {
@@ -1173,7 +1507,7 @@ test_that("request object preserves acr_values hints", {
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
   expect_identical(
-    pl$acr_values,
+    pl[["acr_values"]],
     paste(
       c(
         "urn:mace:incommon:iap:silver",
@@ -1182,7 +1516,7 @@ test_that("request object preserves acr_values hints", {
       collapse = " "
     )
   )
-  expect_true(is.character(pl$nonce) && nzchar(pl$nonce))
+  expect_true(is.character(pl[["nonce"]]) && nzchar(pl[["nonce"]]))
 })
 
 test_that("request object preserves safe provider extra auth params", {
@@ -1200,9 +1534,12 @@ test_that("request object preserves safe provider extra auth params", {
   request_jwt <- parse_query_param(auth_url, "request", decode = TRUE)
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
-  expect_identical(pl$prompt, "login")
-  expect_identical(pl$login_hint, "alice")
-  expect_identical(unname(as.character(pl$custom_multi)), c("alpha", "beta"))
+  expect_identical(pl[["prompt"]], "login")
+  expect_identical(pl[["login_hint"]], "alice")
+  expect_identical(
+    unname(as.character(pl[["custom_multi"]])),
+    c("alpha", "beta")
+  )
 })
 
 test_that("request mode preserves non-client-id sub while overriding managed JWT claims", {
@@ -1224,24 +1561,26 @@ test_that("request mode preserves non-client-id sub while overriding managed JWT
   request_jwt <- parse_query_param(auth_url, "request", decode = TRUE)
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
-  expect_identical(pl$sub, "248289761001")
-  expect_null(pl$nbf)
-  expect_identical(pl$iss, cli@client_id)
+  expect_identical(pl[["sub"]], "248289761001")
+  expect_null(pl[["nbf"]])
+  expect_identical(pl[["iss"]], cli@client_id)
   expect_identical(
-    pl$aud,
-    shinyOAuth:::resolve_authorization_request_audience(cli)
+    pl[["aud"]],
+    shinyOAuth:::resolve_request_object_audience(cli)
   )
-  expect_true(is.numeric(pl$iat) && pl$iat != 3)
-  expect_true(is.numeric(pl$exp) && pl$exp != 1)
+  expect_true(is.numeric(pl[["iat"]]) && pl[["iat"]] != 3)
+  expect_true(is.numeric(pl[["exp"]]) && pl[["exp"]] != 1)
   expect_true(
-    is.character(pl$jti) && nzchar(pl$jti) && pl$jti != "user-supplied-jti"
+    is.character(pl[["jti"]]) &&
+      nzchar(pl[["jti"]]) &&
+      pl[["jti"]] != "user-supplied-jti"
   )
 })
 
-test_that("request mode only emits nbf from authorization_request_nbf_skew", {
+test_that("request mode only emits nbf from request_object_nbf_skew", {
   fixed_now <- as.POSIXct("2026-05-13 12:00:00", tz = "UTC")
   cli <- make_jar_test_client(
-    authorization_request_nbf_skew = 30,
+    request_object_nbf_skew = 30,
     provider = make_jar_test_provider(
       extra_auth_params = list(nbf = 9999999999)
     )
@@ -1255,8 +1594,8 @@ test_that("request mode only emits nbf from authorization_request_nbf_skew", {
   request_jwt <- parse_query_param(auth_url, "request", decode = TRUE)
   pl <- shinyOAuth:::parse_jwt_payload(request_jwt)
 
-  expect_identical(pl$nbf, 1778673570L)
-  expect_identical(pl$iat, 1778673600L)
+  expect_identical(pl[["nbf"]], 1778673570L)
+  expect_identical(pl[["iat"]], 1778673600L)
 })
 
 test_that("request mode rejects client_id as request object sub", {
@@ -1285,7 +1624,7 @@ test_that("HMAC request objects use the expected signature bytes", {
   for (alg in names(hmac_signers)) {
     cli <- make_jar_test_client(
       client_secret = strrep("s", 64L),
-      authorization_request_signing_alg = alg
+      request_object_signing_alg = alg
     )
 
     auth_url <- shinyOAuth:::prepare_call(cli, valid_browser_token())
@@ -1301,7 +1640,7 @@ test_that("HMAC request objects use the expected signature bytes", {
 
     expect_identical(length(parts), 3L, info = alg)
     expect_identical(
-      shinyOAuth:::parse_jwt_header(request_jwt)$alg,
+      shinyOAuth:::parse_jwt_header(request_jwt)[["alg"]],
       alg,
       info = alg
     )
@@ -1316,10 +1655,10 @@ test_that("HMAC request objects enforce RFC 7518 HMAC secret lengths", {
     expect_error(
       make_jar_test_client(
         client_secret = strrep("s", cases[[alg]] - 1L),
-        authorization_request_signing_alg = alg
+        request_object_signing_alg = alg
       ),
       regexp = paste0(
-        "authorization_request_signing_alg '",
+        "request_object_signing_alg '",
         alg,
         "'.*>= ",
         cases[[alg]],
@@ -1343,40 +1682,40 @@ test_that("HMAC request objects enforce RFC 7518 HMAC secret lengths", {
 
 test_that("request mode rejects incompatible explicit signing alg combinations", {
   expect_error(
-    make_jar_test_client(authorization_request_signing_alg = "RS256"),
-    regexp = "asymmetric authorization_request_signing_alg requires client_private_key"
+    make_jar_test_client(request_object_signing_alg = "RS256"),
+    regexp = "asymmetric request_object_signing_alg requires client_assertion_private_key"
   )
 
   expect_error(
     make_jar_test_client(
       client_secret = "",
-      authorization_request_signing_alg = "HS256"
+      request_object_signing_alg = "HS256"
     ),
-    regexp = "HS[*] authorization_request_signing_alg requires client_secret"
+    regexp = "HS[*] request_object_signing_alg requires client_secret"
   )
 
   expect_error(
-    make_jar_test_client(authorization_request_signing_alg = "none"),
-    regexp = "authorization_request_signing_alg = 'none' is not supported"
+    make_jar_test_client(request_object_signing_alg = "none"),
+    regexp = "request_object_signing_alg = 'none' is not supported"
   )
 
   expect_error(
     make_jar_test_client(
-      client_private_key = openssl::rsa_keygen(),
-      authorization_request_signing_alg = "EdDSA"
+      client_assertion_private_key = openssl::rsa_keygen(),
+      request_object_signing_alg = "EdDSA"
     ),
     regexp = paste0(
-      "authorization_request_signing_alg 'EdDSA' is incompatible with signed authorization requests"
+      "request_object_signing_alg 'EdDSA' is incompatible with the provided private key"
     )
   )
 
   expect_error(
     make_jar_test_client(
-      client_private_key = openssl::ec_keygen(curve = "P-256"),
-      authorization_request_signing_alg = "ES512"
+      client_assertion_private_key = openssl::ec_keygen(curve = "P-256"),
+      request_object_signing_alg = "ES512"
     ),
     regexp = paste(
-      "authorization_request_signing_alg 'ES512' is incompatible",
+      "request_object_signing_alg 'ES512' is incompatible",
       "with the provided private key"
     )
   )
@@ -1386,15 +1725,12 @@ test_that("request mode rejects incompatible explicit signing alg combinations",
     testthat::skip("Ed25519 key generation not supported on this platform")
   }
 
-  expect_error(
-    make_jar_test_client(
+  expect_identical(
+    resolve_request_object_signing_alg(make_jar_test_client(
       client_secret = "",
-      client_private_key = key_ed
-    ),
-    regexp = paste(
-      "outbound signed authorization requests currently support RSA and ECDSA",
-      "private keys only"
-    )
+      client_assertion_private_key = key_ed
+    )),
+    "EdDSA"
   )
 })
 
@@ -1411,7 +1747,7 @@ test_that("request mode rejects provider-disallowed request object algs", {
       )
     ),
     regexp = paste(
-      "authorization_request_signing_alg 'HS256' is not supported by",
+      "request_object_signing_alg 'HS256' is not supported by",
       "provider request_object_signing_alg_values_supported"
     )
   )
@@ -1423,17 +1759,17 @@ test_that("request mode rejects provider-disallowed request object algs", {
         request_object_signing_alg_values_supported = c("PS256")
       ),
       client_secret = "",
-      client_private_key = key
+      client_assertion_private_key = key
     ),
     regexp = paste(
-      "authorization_request_signing_alg 'RS256' is not supported by",
+      "request_object_signing_alg 'RS256' is not supported by",
       "provider request_object_signing_alg_values_supported"
     )
   )
 })
 
 test_that("providers requiring signed request objects reject parameters mode", {
-  prov <- make_jar_test_provider(require_signed_request_object = TRUE)
+  prov <- make_jar_test_provider(signed_request_object_required = TRUE)
 
   expect_error(
     oauth_client(
@@ -1450,7 +1786,79 @@ test_that("providers requiring signed request objects reject parameters mode", {
     ),
     regexp = paste(
       "provider requires signed request objects;",
-      "set authorization_request_mode = 'request' or 'request_uri'"
+      "set request_object_mode = 'request' or 'request_uri'"
     )
   )
+})
+test_that("max_age uses its canonical name across authorization transports", {
+  pushed <- NULL
+  published <- NULL
+  testthat::local_mocked_bindings(
+    req_with_retry = function(req, ...) {
+      pushed <<- shiny::parseQueryString(request_body_text(req))
+      httr2::response(
+        url = req[["url"]],
+        status = 201,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw(paste0(
+          '{"request_uri":"urn:ietf:params:oauth:request_uri:test",',
+          '"expires_in":90}'
+        ))
+      )
+    },
+    .package = "shinyOAuth"
+  )
+  for (spelling in c("max_age", "MAX_AGE", " Max_Age ")) {
+    for (transport in c(
+      "query",
+      "par",
+      "request",
+      "request_par",
+      "request_uri"
+    )) {
+      uses_par <- transport %in% c("par", "request_par")
+      mode <- if (transport %in% c("query", "par")) {
+        "parameters"
+      } else if (uses_par) {
+        "request"
+      } else {
+        transport
+      }
+      client <- make_jar_test_client(
+        provider = make_jar_test_provider(
+          extra_auth_params = stats::setNames(list("300"), spelling),
+          par_url = if (uses_par) "https://example.com/par" else NA_character_
+        ),
+        request_object_mode = mode
+      )
+      url <- prepare_call(
+        client,
+        valid_browser_token(),
+        request_uri_publisher = function(request_object, ...) {
+          published <<- request_object
+          "https://client.example.com/request-object"
+        }
+      )
+      fields <- if (uses_par) {
+        pushed
+      } else {
+        shiny::parseQueryString(sub("^[^?]*[?]", "", url))
+      }
+      if (mode == "request") {
+        fields <- shinyOAuth:::parse_jwt_payload(fields[["request"]])
+      } else if (mode == "request_uri") {
+        fields <- shinyOAuth:::parse_jwt_payload(published)
+      }
+      expect_identical(
+        names(fields)[tolower(trimws(names(fields))) == "max_age"],
+        "max_age"
+      )
+      expect_equal(as.numeric(fields[["max_age"]]), 300)
+      state <- shinyOAuth:::state_decrypt_gcm(
+        fields[["state"]],
+        key = client@state_key
+      )
+      expect_equal(state[["max_age"]], 300)
+    }
+  }
 })

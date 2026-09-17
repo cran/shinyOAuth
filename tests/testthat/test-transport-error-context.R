@@ -9,7 +9,7 @@ test_that("req_with_retry transport error includes method and url context", {
 
   # Mock req_perform to avoid real network and force transport error
   testthat::local_mocked_bindings(
-    req_perform = function(request) {
+    req_perform = function(request, ...) {
       stop("forced transport fail")
     },
     .package = "httr2"
@@ -19,8 +19,8 @@ test_that("req_with_retry transport error includes method and url context", {
   expect_s3_class(err, "rlang_error")
   expect_true(inherits(err, "shinyOAuth_transport_error"))
   # Context should include method and url
-  ctx <- err$context
+  ctx <- err[["context"]]
   expect_true(is.list(ctx))
-  expect_identical(ctx$method, "POST")
-  expect_match(ctx$url, "nonexistent\\.invalid/path")
+  expect_identical(ctx[["method"]], "POST")
+  expect_identical(ctx[["url"]], "https://nonexistent.invalid/")
 })

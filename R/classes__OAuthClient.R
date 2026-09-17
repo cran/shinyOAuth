@@ -9,214 +9,85 @@
 #' OAuthClient S7 class
 #'
 #' @description
-#' S7 class describing an OAuth 2.0 client configuration. It combines the
-#' provider, client credentials, redirect URI, requested scopes, and the state
-#' handling rules used during login and callback validation.
+#' An `OAuthClient` holds your app's registration with a provider: its client ID,
+#' credentials, return address, and requested permissions. It also holds the
+#' pending login state and client-specific token validation settings used by
+#' the Shiny module and token helpers. Create it with [oauth_client()], which
+#' resolves defaults from the provider and the supplied client settings.
 #'
-#' This is a low-level constructor intended for advanced use. Most users should
-#' prefer the helper constructor [oauth_client()].
+#' @details
+#' Configure the app registration with `provider`, `client_id`, `client_secret`
+#' (if issued), `redirect_uri`, and `scopes`. Create the client outside your Shiny
+#' `server()` function, then pass it to [oauth_module_server()].
 #'
-#' @param provider [OAuthProvider] object
+#' Use the state-store settings for deployments where callbacks can reach
+#' different R processes, and the validation settings to enforce required
+#' scopes, claims, or authentication context. Certificate (mTLS), key-binding
+#' (DPoP), and signed-request/response (JAR/JARM) settings enable those protocol
+#' features when supported by your provider and required by your deployment. See
+#' the [advanced security vignette](https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html) for examples. The defaults described below
+#' refer to [oauth_client()] unless stated otherwise.
 #'
-#' @param client_id OAuth client ID
-#' @param client_secret OAuth client secret.
+#' @param provider The service configuration, created with a provider helper such as
+#'   [oauth_provider_google()] or [oauth_provider_oidc_discover()].
 #'
-#'   Validation rules:
-#'   - Required (non-empty) when the provider authenticates the client with
-#'     HTTP Basic auth at the token endpoint (`token_auth_style = "header"`,
-#'     also known as `client_secret_basic`).
-#'   - Optional when the provider uses form-body client authentication at the
-#'     token endpoint (`token_auth_style = "body"`, also known as
-#'     `client_secret_post`) and `use_pkce = TRUE`. In that configuration,
-#'     the secret is omitted only when it is empty.
-#'   - Ignored for token-endpoint authentication when the provider uses
-#'     `token_auth_style = "public"` (or the alias `"none"`). Public auth
-#'     sends `client_id` only and never sends `client_secret`, even if one is
-#'     configured or picked up from `OAUTH_CLIENT_SECRET`.
+#' @param client_id The identifier assigned when you register your app with the provider.
 #'
-#'   Note: If your provider issues HS256 ID tokens and `id_token_validation` is
-#'   enabled, a non-empty `client_secret` is required for signature validation.
+#' @param client_secret The secret issued for your app, preferably read with
+#'   `Sys.getenv()`. Omit it for registrations that do not use a secret.
 #'
-#' @param client_private_key Optional private key for `private_key_jwt` client authentication
-#'   at the token endpoint. Can be an `openssl::key` or a PEM string containing a
-#'   private key. Required when the provider's `token_auth_style = 'private_key_jwt'`.
-#'   Ignored for other auth styles. Current outbound private-key JWT signing
-#'   supports RSA and EC private keys. For RSA keys, outbound signing is currently
-#'   limited to `RS256`; `RS384`, `RS512`, and RSA-PSS (`PS256`, `PS384`, `PS512`)
-#'   are not supported. Ed25519/Ed448 keys are also not currently supported.
+#'   It is required for `token_auth_style = "header"`. With `"body"` and PKCE,
+#'   an empty secret is omitted. With `"public"` (alias `"none"`), it is never
+#'   sent for client authentication. HMAC-signed ID token validation still
+#'   requires a non-empty secret, regardless of the client authentication method.
 #'
-#' @param client_private_key_kid Optional key identifier (kid) to include in the JWT header
-#'   for `private_key_jwt` assertions. Useful when the authorization server uses kid to
-#'   select the correct verification key.
+#' @param redirect_uri The URL where users return after login. It must match the
+#'   callback URL registered with your provider, including scheme, host, port,
+#'   and path. Use HTTPS in production.
 #'
-#' @param client_assertion_alg Optional JWT signing algorithm to use for client assertions.
-#'   When omitted, defaults to `HS256` for `client_secret_jwt`. For `private_key_jwt`, a
-#'   compatible default is selected based on the private key type/curve (e.g., `RS256` for RSA
-#'   or `ES256`/`ES384`/`ES512` for EC P-256/384/521). If an explicit
-#'   value is provided but incompatible with the key, validation fails early with a configuration
-#'   error. When the provider advertises
-#'   `token_endpoint_auth_signing_alg_values_supported`, both explicit values and
-#'   inferred defaults must be included in that set.
-#'   Supported values are `HS256`, `HS384`, `HS512` for client_secret_jwt and asymmetric algorithms
-#'   supported for outbound signing (`RS256`, `ES256`, `ES384`, `ES512`) for
-#'   private keys. `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, and `EdDSA`
-#'   are not currently supported for outbound client assertions.
+#' @param scopes Character vector of permissions to request. The provider defines
+#'   the available names. For OIDC (`issuer` set and `infer_oidc_from_issuer = TRUE`),
+#'   shinyOAuth adds `"openid"` automatically if absent. The resulting set is
+#'   used in the request and subsequent scope checks.
 #'
-#' @param client_assertion_audience Optional override for the `aud` claim used when building
-#'   JWT client assertions (`client_secret_jwt` / `private_key_jwt`). By default, shinyOAuth
-#'   uses the exact token endpoint request URL. Some identity providers require a different
-#'   audience value; set this to the exact value your IdP expects.
-#' @param tls_client_cert_file Optional path to the PEM-encoded client
-#'   certificate (or certificate chain) used for RFC 8705 mutual TLS client
-#'   authentication and certificate-bound protected-resource requests. Required
-#'   when `provider@token_auth_style` is `"tls_client_auth"` or
-#'   `"self_signed_tls_client_auth"`.
-#' @param tls_client_key_file Optional path to the PEM-encoded private key used
-#'   with `tls_client_cert_file`. Must be supplied together with
-#'   `tls_client_cert_file`, and is required for RFC 8705 mTLS client
-#'   authentication.
-#' @param tls_client_key_password Optional password used to decrypt an encrypted
-#'   PEM private key referenced by `tls_client_key_file`.
-#' @param tls_client_ca_file Optional path to a PEM CA bundle used to validate
-#'   the remote HTTPS server certificate when making mTLS requests. This is
-#'   mainly useful for local or test environments that use self-signed server
-#'   certificates.
-#' @param mtls_request_certificate_bound_access_tokens Logical. Whether this
-#'   client intends to request RFC 8705 certificate-bound access tokens when
-#'   the provider advertises that capability. Default is `FALSE`.
+#' @param authorization_method Browser method for sending the authorization
+#'   request: `"GET"` (default) or `"POST"`. Select POST only after confirming
+#'   provider support. It submits form fields instead of a long URL query.
+#'   Use the module's `request_login()` or [prepare_authorization_request()]; URL-only
+#'   helpers reject POST. This does not select the callback `response_mode` or
+#'   replace a provider's PAR or signed Request Object requirements.
+#' @param response_mode How the provider returns the login result. Leave `NULL`
+#'   (default) for a normal callback with parameters in the URL; no
+#'   `response_mode` parameter is then sent. Use `"query"` to request that
+#'   format explicitly, or `"form_post"` when your provider needs an HTTP POST.
+#'   POST callbacks require [oauth_form_post_ui()].
 #'
-#'   Set this to `TRUE` for clients that should prefer discovered
-#'   `mtls_endpoint_aliases` on authorization-server requests even when
-#'   `token_auth_style` itself is not an mTLS auth style, and that should fail
-#'   closed if the returned access token omits `cnf.x5t#S256`.
+#'   Signed responses (JWT Secured Authorization Response Mode, JARM)
+#'   use `"jwt"`, `"query.jwt"`, or `"form_post.jwt"`
+#'   and require [oauth_module_server()]. `"jwt"` uses the query transport for
+#'   this authorization-code flow. `"form_post.jwt"` also needs
+#'   [oauth_form_post_ui()]. [handle_callback()] does not handle JARM.
+#'   Requested modes must be in `response_modes_supported` when advertised;
+#'   fragment modes are not supported.
 #'
-#'   Requires `tls_client_cert_file` and `tls_client_key_file`, and the
-#'   provider must be configured with
-#'   `tls_client_certificate_bound_access_tokens = TRUE`.
+#' @param resource Optional RFC 8707 resource indicator(s). Supply a character
+#'   vector of absolute URIs to request audience-restricted tokens for one or
+#'   more protected resources. Each value is sent as a repeated `resource`
+#'   parameter on the authorization request, initial token exchange, and token
+#'   refresh requests. Default is `character(0)`.
 #'
-#' @param authorization_request_mode Controls how the authorization request is
-#'   transported to the provider.
+#' @param claims Optional request for specific OIDC user information, beyond scopes.
+#'   Default `NULL` sends no request. Supply a list with `userinfo` and/or
+#'   `id_token` members, for example
+#'   `list(userinfo = list(email = list(essential = TRUE)))`.
+#'   Use `claims_validation = "strict"` if an unmet request must stop login.
 #'
-#'   - `"parameters"` (default): send OAuth parameters directly on the browser
-#'     redirect URL.
-#'   - `"request"`: send a signed JWT-secured authorization request (JAR;
-#'     RFC 9101) via the `request` parameter.
-#'   - `"request_uri"`: publish a signed Request Object by reference and send
-#'     its URL via the `request_uri` parameter.
+#'   Lists are JSON-encoded with `auto_unbox = TRUE`. Use `NULL` for an
+#'   unconstrained claim, `value` for one required value, or `values` for a set.
+#'   Wrap a single-element `values` vector in [I()] to keep it a JSON array,
+#'   for example `list(values = I("example-acr"))`. A pre-encoded JSON string
+#'   is also accepted. Your provider must support the OIDC claims parameter.
 #'
-#'   Most users can keep the default. Request mode is an advanced option that
-#'   requires signing material on the client. shinyOAuth prefers
-#'   `client_private_key` when present; otherwise it falls back to HMAC signing
-#'   with `client_secret`. When Request Object encryption is configured,
-#'   shinyOAuth signs first and then wraps the signed Request Object in a JWE.
-#'   If a caller-managed `request_uri` uses HTTP and the configured host policy
-#'   explicitly allows it, shinyOAuth still publishes it but warns once per R
-#'   session because RFC 9101 Section 5.2 expects client-provided
-#'   `request_uri` values to use HTTPS.
-#'   If the provider advertises `require_request_uri_registration = TRUE`,
-#'   caller-managed `request_uri` publication still depends on the provider
-#'   having that URI or a matching wildcard prefix registered for the client;
-#'   shinyOAuth cannot verify that server-side registration automatically.
-#' @param response_mode Authorization response mode for authorization-code
-#'   callbacks. Supported values are `"query"` and `"form_post"`. The
-#'   effective default is always `"query"`: omitting this argument keeps the
-#'   normal query-parameter callback flow and shinyOAuth does not send a
-#'   `response_mode` parameter. Pass `"query"` only if you need to explicitly
-#'   request the query response mode from the provider.
-#'   Set `"form_post"` only when the provider requires or explicitly
-#'   recommends POSTing the authorization response to the redirect URI. Shiny
-#'   apps using `"form_post"` must wrap their UI with [oauth_form_post_ui()].
-#'   Prefer this argument over setting `extra_auth_params$response_mode` on the
-#'   provider. When the provider advertises `response_modes_supported`, the
-#'   resolved mode must be included in that set.
-#'   JWT Secured Authorization Response Mode (JARM) values such as
-#'   `"form_post.jwt"` are a separate response format and are not currently
-#'   supported.
-#'
-#' @param authorization_request_signing_alg Optional JWS algorithm override for
-#'   signed authorization requests when `authorization_request_mode` uses a
-#'   Request Object (`"request"` or `"request_uri"`).
-#'   When omitted, shinyOAuth chooses `HS256` for HMAC-based signing or a
-#'   compatible asymmetric default based on `client_private_key` (for example
-#'   `RS256`, `ES256`, `ES384`, or `ES512`). `RS384`, `RS512`, `PS256`,
-#'   `PS384`, `PS512`, and `EdDSA` are not currently supported for outbound
-#'   signed authorization requests.
-#'
-#' @param authorization_request_audience Optional override for the `aud` claim
-#'   used in signed authorization requests. By default, shinyOAuth uses the
-#'   provider issuer when available. When
-#'   `authorization_request_mode = "request"` or `"request_uri"`, the provider
-#'   must have a configured issuer or you must supply an explicit override so
-#'   the signed Request Object remains audience-bound to the intended
-#'   authorization server.
-#' @param authorization_request_encryption_alg Optional JWE key-management
-#'   algorithm override for encrypted Request Objects. Current outbound support
-#'   is limited to `RSA-OAEP`. When set, you must also set
-#'   `authorization_request_encryption_enc`.
-#' @param authorization_request_encryption_enc Optional JWE content-encryption
-#'   algorithm override for encrypted Request Objects. Current outbound support
-#'   is limited to the AES-CBC-HMAC family (`A128CBC-HS256`,
-#'   `A192CBC-HS384`, `A256CBC-HS512`). When set, you must also set
-#'   `authorization_request_encryption_alg`.
-#' @param authorization_request_encryption_kid Optional key identifier (`kid`)
-#'   used to select one provider encryption key and emit the outer JWE `kid`
-#'   header. This is mainly useful when the provider publishes more than one
-#'   Request Object encryption key.
-#' @param authorization_request_ttl Positive number of seconds to keep signed
-#'   authorization request objects (`request` JWTs) valid. When
-#'   `authorization_request_mode = "request_uri"`, shinyOAuth also uses this
-#'   value as the default publication window for the referenced Request Object
-#'   URI. Default is `45`.
-#' @param authorization_request_nbf_skew Optional non-negative number of
-#'   seconds. When provided, shinyOAuth adds an `nbf` claim set to
-#'   `iat - authorization_request_nbf_skew` so deployments can tolerate small
-#'   clock skew while still emitting bounded request-object validity windows.
-#'   Leave `NULL` (the default) to omit `nbf`. Request-object `nbf` is reserved
-#'   by shinyOAuth and cannot be supplied through extra authorization
-#'   parameters.
-#'
-#' @param dpop_private_key Optional private key used to generate DPoP proofs
-#'   (RFC 9449). Can be an `openssl::key` or a PEM string containing an
-#'   asymmetric private key. When provided, shinyOAuth can attach `DPoP`
-#'   proofs to token endpoint requests and use DPoP-bound access tokens in
-#'   downstream request helpers. In [oauth_client()], configuring this key also
-#'   makes `dpop_require_access_token` default to `TRUE`, so access-token
-#'   responses reject `token_type = "Bearer"` unless you explicitly set
-#'   `dpop_require_access_token = FALSE`. Current outbound DPoP signing
-#'   supports RSA and EC private keys. For RSA keys, outbound signing is
-#'   currently limited to `RS256`; `RS384`, `RS512`, and RSA-PSS (`PS256`,
-#'   `PS384`, `PS512`) are not supported. Ed25519/Ed448 keys are also not
-#'   currently supported. This is an advanced setting; most clients do not need
-#'   DPoP unless their provider or resource server asks for it.
-#'
-#' @param dpop_private_key_kid Optional key identifier (`kid`) to include in
-#'   the JOSE header of DPoP proofs. Useful when the authorization or resource
-#'   server expects a stable key identifier alongside the embedded public JWK.
-#'
-#' @param dpop_signing_alg Optional JWT signing algorithm to use for DPoP
-#'   proofs. When omitted, a compatible asymmetric default is selected based on
-#'   the private key type/curve (for example `RS256`, `ES256`, `ES384`, or
-#'   `ES512`). `RS384`, `RS512`, `PS256`, `PS384`, `PS512`, and `EdDSA` are
-#'   not currently supported for outbound DPoP proofs. If an explicit value is
-#'   provided but incompatible with the key, validation fails early with a
-#'   configuration error. When the provider advertises
-#'   `dpop_signing_alg_values_supported`, both explicit values and inferred
-#'   defaults must be included in that set.
-#'
-#' @param dpop_require_access_token Logical or `NULL`. When `TRUE` and
-#'   `dpop_private_key` is configured, shinyOAuth requires the authorization
-#'   server to return `token_type = "DPoP"` for access tokens and fails fast
-#'   otherwise. When shinyOAuth can observe token binding data from a JWT
-#'   access token or an introspection response, this strict mode also requires
-#'   `cnf$jkt` to be present and match the configured `dpop_private_key`.
-#'   Opaque access tokens that expose no `cnf` data still pass this check unless
-#'   introspection later reveals the binding. In [oauth_client()], the default
-#'   `NULL` resolves to `TRUE` when `dpop_private_key` is configured and to
-#'   `FALSE` otherwise. Set `FALSE` explicitly only when you intentionally want
-#'   to allow Bearer access tokens, such as deployments where DPoP is used only
-#'   to bind refresh tokens.
-#'
-#' @param redirect_uri Redirect URI registered with provider
 #' @param enforce_callback_issuer Logical or `NULL`. When `TRUE`, enforce that
 #'   authorization responses handled through this client include an RFC 9207
 #'   `iss` parameter and reject callbacks unless it exactly matches
@@ -230,97 +101,41 @@
 #'   configured `issuer`, such as OIDC discovery providers that expose RFC 9207
 #'   support. Set `FALSE` to opt out explicitly.
 #'
-#' @param scopes Vector of scopes to request. For OIDC providers (those with an
-#'   `issuer`), shinyOAuth automatically prepends `openid` when it is missing;
-#'   that effective scope set is what gets sent in the authorization request
-#'   and used for later state and token-scope validation.
+#' @param compare_callback_issuer Logical or `NULL`. Compare any supplied callback
+#'   `iss` exactly with `provider@issuer`, while allowing absence when
+#'   `enforce_callback_issuer = FALSE`. `NULL` enables comparison when an issuer
+#'   is configured, except when `enforce_callback_issuer = FALSE` was explicitly
+#'   supplied. This preserves the existing complete opt-out. Set
+#'   `compare_callback_issuer = TRUE` with `enforce_callback_issuer = FALSE` to
+#'   check present values without requiring older providers to send `iss`.
+#'   Required issuer presence always enables comparison, even when this separate
+#'   flag is `FALSE`. Validated JARM supplies
+#'   its own issuer protection without requiring a redundant outer `iss`.
 #'
-#' @param resource Optional RFC 8707 resource indicator(s). Supply a character
-#'   vector of absolute URIs to request audience-restricted tokens for one or
-#'   more protected resources. Each value is sent as a repeated `resource`
-#'   parameter on the authorization request, initial token exchange, and token
-#'   refresh requests. Default is `character(0)`.
+#' @param authorization_server_mode Declares whether this client is part of an
+#'   application that can interact with more than one authorization server,
+#'   and which RFC 9700 mix-up defense it uses. One of:
 #'
-#' @param state_store State storage backend. Defaults to `cachem::cache_mem(max_age = 300)`.
-#'    Alternative backends should use [custom_cache()] with an atomic `$take()`
-#'    method for replay-safe single-use state consumption. The backend
-#'    must implement cachem-like methods `$get(key, missing)`, `$set(key, value)`,
-#'    and `$remove(key)`; `$info()` is optional.
+#'   - `"single"` (default): the application uses only one authorization
+#'     server, so RFC 9700 does not require a mix-up defense.
+#'   - `"multi_issuer"`: authorization responses identify their issuer. JARM
+#'     response modes satisfy this requirement through their validated `iss`
+#'     claim. Direct response modes require the provider to advertise
+#'     `authorization_response_iss_parameter_supported = TRUE`; shinyOAuth then
+#'     requires and validates the RFC 9207 `iss` response parameter. Missing
+#'     support metadata is treated as absence of this defense.
+#'   - `"multi_redirect_uri"`: each authorization server uses a distinct
+#'     redirect URI. Supply the complete set through
+#'     `authorization_server_redirect_uris`. This mode is supported by
+#'     [oauth_module_server()], which compares the browser-visible canonical
+#'     scheme, authority, and path before parsing callback values.
 #'
-#'    Stored values must round-trip `browser_token` as a non-empty string.
-#'    `pkce_code_verifier` and `nonce` are required only when the provider
-#'    enables PKCE or nonce validation; otherwise backends may keep those
-#'    fields as `NULL` or omit them.
-#'
-#'    `cachem::cache_mem()` is a good default for a single Shiny process. For
-#'    multi-process deployments, use [custom_cache()] with an atomic `$take()`
-#'    backed by a shared store (for example Redis `GETDEL` or SQL
-#'    `DELETE ... RETURNING`). Plain `cachem::cache_disk()` is **not safe** as
-#'    a shared state store because its `$get()` + `$remove()` operations are not
-#'    atomic.
-#'
-#'    The client automatically generates, persists (in `state_store`), and
-#'    validates the OAuth `state` parameter (and OIDC `nonce` when applicable)
-#'    during the authorization code flow.
-#'
-#' @param claims OIDC claims request parameter (OIDC Core §5.5). Allows
-#'   requesting specific claims from the UserInfo Endpoint and/or in the ID
-#'   Token. Can be:
-#'   - `NULL` (default): no claims parameter is sent
-#'   - A list: automatically JSON-encoded (via [jsonlite::toJSON()] with
-#'     `auto_unbox = TRUE`) and URL-encoded into the authorization request.
-#'     The list should have top-level members `userinfo` and/or `id_token`,
-#'     each containing named lists of claims.
-#'     Use `NULL` to request a claim without parameters (per spec).
-#'     Example: `list(userinfo = list(email = NULL, given_name = list(essential = TRUE)), id_token = list(auth_time = list(essential = TRUE)))`
-#'
-#'     Note on single-element arrays: because `auto_unbox = TRUE` is used,
-#'     single-element R vectors are serialized as JSON scalars, not arrays.
-#'     The OIDC spec defines `values` as an array. To force array encoding
-#'     for a single-element vector, wrap it in [I()], e.g.,
-#'     `acr = list(values = I("urn:mace:incommon:iap:silver"))` produces
-#'     `{"values":["urn:mace:incommon:iap:silver"]}`. Multi-element vectors
-#'     are always encoded as arrays. shinyOAuth warns when it sees a
-#'     single-element `values` entry that is not wrapped in [I()], because
-#'     that common input pattern serializes incorrectly for OIDC.
-#'   - A character string: pre-encoded JSON string (advanced use). Must
-#'     be valid JSON. Use this when you need full control over JSON encoding.
-#'   Note: The `claims` parameter is OPTIONAL per OIDC Core §5.5. Not all
-#'   providers support it; consult your provider's documentation.
-#'
-#' @param state_payload_max_age Positive number of seconds. Maximum allowed age
-#'   for the decrypted state payload's `issued_at` timestamp during callback
-#'   validation.
-#'
-#'   This is the freshness window for the sealed `state` payload itself. It is
-#'   separate from the `state_store` TTL, which controls how long the one-time
-#'   server-side state entry can exist.
-#'
-#'   Default is 300 seconds.
-#'
-#' @param state_entropy Integer. The length (in characters) of the randomly
-#'   generated state parameter. Higher values provide more entropy and better
-#'   security against CSRF attacks. Must be between 22 and 128 (to align with
-#'   `validate_state()`'s default minimum which targets ~128 bits for base64url‑like
-#'   strings). Default is 64.
-#'
-#' @param state_key Optional per-client secret used as the state sealing key
-#'   for AES-GCM AEAD (authenticated encryption) of the state payload that
-#'   travels via the `state` query parameter. This provides confidentiality
-#'   and integrity (via authentication tag) for the embedded data used during
-#'   callback verification. If you omit this argument, a random value is
-#'   generated via `random_urlsafe(128)`. This key is distinct from the
-#'   OAuth `client_secret` and may be used with public clients.
-#'
-#'   Type: character string (>= 32 bytes when encoded) or raw vector
-#'   (>= 32 bytes). Raw keys enable direct use of high-entropy secrets from
-#'   external stores. Both forms are normalized internally by cryptographic
-#'   helpers.
-#'
-#'   Multi-process deployments: if your app runs with multiple R workers or
-#'   behind a non-sticky load balancer, configure a shared `state_store` and
-#'   the same `state_key` across all workers. Otherwise callbacks that land on
-#'   a different worker will fail state validation.
+#' @param authorization_server_redirect_uris Complete character vector of
+#'   redirect URIs used by the application for its authorization servers when
+#'   `authorization_server_mode = "multi_redirect_uri"`. It must contain at
+#'   least two canonically distinct scheme/authority/path routes and include
+#'   this client's `redirect_uri`. Query and fragment components do not make
+#'   routes distinct.
 #'
 #' @param scope_validation Controls how scope discrepancies are handled when
 #'   the authorization server grants fewer scopes than requested. RFC 6749
@@ -335,69 +150,76 @@
 #'     error.
 #'   - `"none"`: Skips scope validation entirely.
 #'
-#' @param claims_validation Controls validation of requested claims supplied via
-#'   the `claims` parameter (OIDC Core §5.5). When `claims` includes entries
-#'   with `essential = TRUE` for `id_token` or `userinfo`, or explicit `value`
-#'   / `values` constraints for individual claims, this setting determines what
-#'   happens if the returned ID token or userinfo response does not satisfy
-#'   those requests.
+#' @param scope_policy Internal versioned scope policy. Leave the default for
+#'   ordinary OAuth clients. SMART adapters install their own policy, including
+#'   required permissions; these checks cannot be disabled by `scope_validation`.
+#'   This parameter is not an argument to [oauth_client()].
 #'
-#'   - `"none"`: Skips claims validation entirely. This remains the effective
-#'     default when the supplied `claims` request has no enforceable
-#'     `essential`, `value`, or `values` constraints, and when you explicitly
-#'     set `claims_validation = "none"`.
-#'   - `"warn"`: Emits a warning but continues authentication if requested
-#'     essential claims are missing or requested claim values are not
-#'     satisfied.
-#'   - `"strict"`: Throws an error if any requested essential claims are
-#'     missing or requested claim `value` / `values` constraints are not
-#'     satisfied by the response.
+#' @param smart Internal SMART configuration installed by [smart_client()].
+#'   Leave the empty default for ordinary clients. This is not an argument to
+#'   [oauth_client()].
 #'
-#'   If `claims_validation` is omitted and the supplied `claims` request does
-#'   include enforceable `essential`, `value`, or `values` constraints,
-#'   [oauth_client()] promotes the effective default to `"warn"` so those
-#'   mismatches are surfaced by default.
+#' @param resource_bases Optional named character vector of approved API base
+#'   URLs for [oauth_connection()] and [oauth_connections()]. The default
+#'   `character()` leaves the existing token/request APIs unchanged. Each resource
+#'   ID starts with a letter and contains letters, digits, `_` or `-` (at most
+#'   64 bytes). Up to 64 bases are supported. HTTPS is required except for
+#'   loopback development URLs. Requests through a connection stay within the
+#'   exact scheme, host, effective port and base path; redirects are disabled.
+#'   Bases exclude user information, query strings, fragments, dot segments,
+#'   repeated slashes, semicolon parameters and ambiguous encoded characters.
+#'   This is local request policy, not evidence of token audience, and does not
+#'   add the OAuth `resource` authorization parameter.
+#' @param required_scopes Optional requested scopes that every usable connection
+#'   needs, default `character()`. Other requested scopes may be absent from a
+#'   limited grant. Ordinary OAuth clients compare literal scopes; [smart_client()]
+#'   selects SMART semantic comparison and also enforces these permissions when
+#'   validating token responses. Explicit refresh narrowing retains these scopes.
+#' @param label Optional display label used in connection summaries; defaults to
+#'   the provider name, with control characters replaced by spaces and shortened
+#'   to 128 UTF-8 bytes if needed. If the provider name is empty, missing or not a
+#'   single string, the default is `"OAuth provider"`. Explicit labels must be non-empty strings of at
+#'   most 128 bytes without control characters. Labels contain no credentials or
+#'   patient context.
 #'
-#'   Enforceable requests under `claims$id_token` require a validated ID token.
-#'   Configure the provider with `id_token_validation = TRUE` or `use_nonce = TRUE`
-#'   so shinyOAuth validates the ID token before checking those claims.
+#' @param claims_validation What to do if requested claims are missing or have
+#'   unexpected values: `"warn"` continues with a warning, `"strict"` stops
+#'   login, and `"none"` skips the check. When omitted, [oauth_client()] uses
+#'   `"warn"` if `claims` includes `essential = TRUE`, `value`, or `values`
+#'   requirements, and `"none"` otherwise. Checks on `claims[["id_token"]]` require
+#'   ID token validation (`id_token_validation = TRUE` or `use_nonce = TRUE`).
 #'
-#' @param userinfo_jwt_required_temporal_claims Optional character vector of
+#' @param trusted_id_token_audiences Character vector of additional ID-token
+#'   audiences explicitly trusted by this client. Defaults to `character(0)`,
+#'   which permits only `client_id`. The token must always include `client_id`
+#'   in `aud`; when `azp` is present it must equal `client_id`.
+#'   Values are matched exactly and case-sensitively. Configure only audiences
+#'   trusted for this application's identity tokens, not arbitrary API audiences.
+#' @param required_acr_values Optional character vector of acceptable login
+#'   requirements, such as a provider's multi-factor authentication (MFA) policy.
+#'   Use the provider's Authentication Context Class Reference (ACR) identifiers.
+#'   The validated ID token must contain a matching `acr` or login fails.
+#'   The request also sends `acr_values` as a hint to the provider.
+#'   Requires `id_token_validation = TRUE` and an `issuer`.
+#'   Default `character(0)` imposes no requirement.
+#'
+#' @param userinfo_jwt_required_time_claims Optional character vector of
 #'   temporal JWT claims that must be present when the UserInfo response is a
 #'   signed JWT (`application/jwt`). Allowed values are `"exp"`, `"iat"`, and
 #'   `"nbf"`.
 #'
 #'   Default is `character(0)`, which means these claims are validated only when
-#'   present. Set, for example, `userinfo_jwt_required_temporal_claims = "exp"`
+#'   present. Set, for example, `userinfo_jwt_required_time_claims = "exp"`
 #'   to require an expiry on signed UserInfo JWTs, or pass multiple values to
 #'   require additional temporal claims. For security-sensitive deployments that
 #'   accept signed UserInfo JWTs, prefer requiring at least `"exp"`.
 #'
-#' @param required_acr_values Optional character vector of acceptable
-#'   Authentication Context Class Reference values (OIDC Core §2, §3.1.2.1).
-#'   When non-empty, the ID token returned by the provider must contain an
-#'   `acr` claim whose value is one of the specified entries; otherwise the
-#'   login fails with a `shinyOAuth_id_token_error`.
+#' @param introspect If `TRUE`, ask the provider to confirm the access token is active
+#'   before completing login and module refreshes. Requires `introspection_url`;
+#'   an unsuccessful check or a response other than `active = TRUE` stops the
+#'   operation. Default `FALSE`.
 #'
-#'   Additionally, when non-empty, the authorization request automatically
-#'   includes an `acr_values` query parameter (space-separated) as a voluntary
-#'   hint to the provider (OIDC Core §3.1.2.1).  Note that the provider is
-#'   not required to honour this hint; the client-side validation is the
-#'   authoritative enforcement.
-#'
-#'   Requires an OIDC-capable provider with `id_token_validation = TRUE` and
-#'   an `issuer` configured.  Default is `character(0)` (no enforcement).
-#'
-#' @param introspect If TRUE, the login flow will call the provider's token
-#'   introspection endpoint (RFC 7662) to validate the access token. The login
-#'   is not considered complete unless introspection succeeds and returns
-#'   `active = TRUE`; otherwise the login fails and `authenticated` remains
-#'   FALSE. When [oauth_module_server()] later performs proactive refresh, it
-#'   also forwards this setting so refreshed access tokens are introspected
-#'   through the same client policy. Default is FALSE. Requires the provider to
-#'   have an `introspection_url` configured.
-#'
-#' @param introspect_elements Optional character vector of additional
+#' @param introspection_checks Optional character vector of additional
 #'   requirements to enforce on the introspection response when
 #'   `introspect = TRUE`. Supported values:
 #'   - `"sub"`: require the introspected `sub` to match the session subject
@@ -414,8 +236,301 @@
 #'   (Note that not all providers may return each of these fields in
 #'   introspection responses.)
 #'
-#' @example inst/examples/oauth_module_server.R
+#' @param state_store Storage for pending logins. The default
+#'   `cachem::cache_mem(max_age = 300)` is suitable for one R process.
+#'   For multiple app processes, supply a shared [custom_cache()] with atomic
+#'   `[["take"]]()` and use the same `state_key` on every process.
+#'   Plain `cachem::cache_disk()` is unsafe for shared login state because its
+#'   separate read and delete operations do not prevent simultaneous reuse.
+#'   See [custom_cache()] for method and stored-value requirements.
 #'
+#' @param state_payload_max_age Maximum age of a pending login's encrypted state, in
+#'   seconds. Default 300. This is checked separately from the state store's
+#'   entry lifetime; both must allow the returning login.
+#'
+#' @param state_entropy Length in characters of the random state identifier, from
+#'   22 to 128. Default 64. Most apps should keep the default.
+#'
+#' @param state_key Secret used to encrypt and protect pending login details.
+#'   A random key is generated when omitted. This is separate from
+#'   `client_secret` and is also used for public clients.
+#'
+#'   For multiple R processes, supply the same key and shared `state_store`
+#'   on every process. Accepts a character string or raw vector of at least
+#'   32 bytes. Generate it from cryptographically random bytes; do not use
+#'   a memorable password. State uses AES-GCM authenticated encryption.
+#'
+#' @param client_assertion_private_key Optional private key for `private_key_jwt` client authentication
+#'   at the token endpoint. Can be an `openssl::key` or a PEM string containing a
+#'   private key. Required when the provider's `token_auth_style = 'private_key_jwt'`.
+#'   Also used to sign JAR Request Objects, regardless of the token auth style.
+#'   Current outbound private-key JWT signing
+#'   supports RSA, EC, and Ed25519 private keys. RSA keys support `RS256` and
+#'   explicitly selected `RS384`; `RS512` and RSA-PSS (`PS256`, `PS384`, `PS512`)
+#'   are not supported. Ed25519 keys support `Ed25519` (RFC 9864) and legacy
+#'   `EdDSA` (the default for compatibility); Ed448 is not supported.
+#'
+#' @param client_assertion_private_key_kid Optional key identifier (kid) to include in the JWT header
+#'   for `private_key_jwt` assertions and JAR Request Objects. Useful when the authorization server uses kid to
+#'   select the correct verification key.
+#'
+#' @param client_assertion_alg Optional JWT signing algorithm to use for client assertions.
+#'   When omitted, defaults to `HS256` for `client_secret_jwt`. For `private_key_jwt`, a
+#'   compatible default is selected based on the private key type/curve (e.g., `RS256` for RSA
+#'   or `ES256`/`ES384`/`ES512` for EC P-256/384/521, or `EdDSA` for Ed25519). If an explicit
+#'   value is provided but incompatible with the key, validation fails early with a configuration
+#'   error. When the provider advertises
+#'   `token_endpoint_auth_signing_alg_values_supported`, both explicit values and
+#'   inferred defaults must be included in that set.
+#'   Supported values are `HS256`, `HS384`, `HS512` for client_secret_jwt and asymmetric algorithms
+#'   supported for outbound signing (`RS256`, `RS384`, `ES256`, `ES384`, `ES512`, and
+#'   `Ed25519` or legacy `EdDSA` with Ed25519 keys) for private keys. `RS512`, `PS256`, `PS384`, and `PS512`
+#'   are not currently supported for outbound client assertions.
+#'
+#' @param client_assertion_audience Optional override for the `aud` claim used when building
+#'   JWT client assertions (`client_secret_jwt` / `private_key_jwt`). By default, shinyOAuth
+#'   uses the active token, introspection, or revocation request URL. PAR uses
+#'   the issuer when configured, otherwise the canonical PAR URL, including
+#'   when the request uses an mTLS alias. Set an explicit value when required
+#'   by the provider's registration agreement.
+#' @param endpoint_auth Named list of authentication overrides for `par`,
+#'   `introspection`, and `revocation`. Token exchange and refresh use the
+#'   top-level client/provider authentication settings. Each entry may supply
+#'   `token_auth_style`, `client_secret`, `client_assertion_private_key`,
+#'   `client_assertion_private_key_kid`, `client_assertion_alg`,
+#'   `client_assertion_audience`, `client_assertion_typ`, `extra_headers` (named character vector),
+#'   and the `mtls_client_*` certificate/key/CA fields. Introspection and
+#'   revocation may also use a separate `client_id`. Unspecified credentials
+#'   inherit the client's settings. Discovered endpoint methods and signing
+#'   algorithms are checked independently. PAR inherits token authentication.
+#'   Extra token headers apply only to token exchange and refresh; set
+#'   `extra_headers` explicitly for every other endpoint that needs them.
+#' @param client_assertion_typ JWT header `typ` for client authentication.
+#'   Defaults to `"JWT"` for existing providers. Use
+#'   `"client-authentication+jwt"` with `client_assertion_audience` set to the
+#'   provider's trusted issuer identifier for RFC7523bis-11 / OAuth 2.1 draft 16.
+#'   The explicit type is recommended; it does not replace audience validation.
+#'   This setting does not change JAR, JARM, ID token or DPoP types, or the
+#'   OAuth form parameter `client_assertion_type`.
+#' @param mtls_client_cert_file Optional path to the PEM-encoded client
+#'   certificate (or certificate chain) used for RFC 8705 mutual TLS (mTLS) client
+#'   authentication and certificate-bound protected-resource requests. Required
+#'   when `provider@token_auth_style` is `"tls_client_auth"` or
+#'   `"self_signed_tls_client_auth"`. The certificate matching the private key
+#'   must appear first, followed by its issuers in chain order. CA-first bundles
+#'   are rejected.
+#' @param mtls_client_key_file Optional path to the PEM-encoded private key used
+#'   with `mtls_client_cert_file`. Must be supplied together with
+#'   `mtls_client_cert_file`, and is required for RFC 8705 mTLS client
+#'   authentication.
+#' @param mtls_client_key_password Optional password used to decrypt an encrypted
+#'   PEM private key referenced by `mtls_client_key_file`.
+#' @param mtls_client_ca_file Optional path to a PEM CA bundle used to validate
+#'   the remote HTTPS server certificate when making mTLS requests. This is
+#'   mainly useful for local or test environments that use self-signed server
+#'   certificates.
+#' @param mtls_certificate_bound_access_tokens Logical. Whether this
+#'   client intends to request RFC 8705 certificate-bound access tokens when
+#'   the provider advertises that capability. Default is `FALSE`.
+#'
+#'   Set this to `TRUE` for clients that should prefer discovered
+#'   `mtls_endpoint_aliases` on authorization-server requests even when
+#'   `token_auth_style` itself is not an mTLS auth style, and present the
+#'   certificate on token and protected-resource requests. Certificate/key
+#'   configuration alone does not enable this mode.
+#'
+#'   Requires `mtls_client_cert_file` and `mtls_client_key_file`, and the
+#'   provider must be configured with
+#'   `mtls_client_certificate_bound_access_tokens = TRUE`.
+#'   By default, `mtls_require_observed_cnf = TRUE` also requires locally
+#'   observable confirmation of the certificate binding. For opaque tokens
+#'   whose binding is enforced only by the servers, keep
+#'   `mtls_certificate_bound_access_tokens = TRUE` and set
+#'   `mtls_require_observed_cnf = FALSE`.
+#' @param mtls_require_observed_cnf Logical, default `TRUE`. When
+#'   `mtls_certificate_bound_access_tokens = TRUE`, require `cnf[["x5t#S256"]]`
+#'   in the token response, JWT access token, or introspection and verify that
+#'   it matches the configured certificate. The default preserves strict
+#'   local assurance. Set `FALSE` for server-enforced opaque bindings that
+#'   the client cannot observe; this does not disable certificate presentation
+#'   or mTLS endpoint selection. Missing confirmation is then allowed, but
+#'   any observed confirmation is still validated, including mismatches and
+#'   conflicting claims. This flag does not independently enable mTLS.
+#'
+#' @param dpop_private_key Private key for tying tokens to this app's requests
+#'   using Demonstrating Proof of Possession (DPoP). Only needed when your
+#'   provider/API supports DPoP. Accepts an
+#'   `openssl::key` or PEM private-key string, using RSA, EC, or Ed25519.
+#'   [oauth_client()] then defaults `dpop_require_access_token` to `TRUE`.
+#'   Supported signing algorithms are `RS256`, `RS384`, `ES256`, `ES384`, `ES512`, and
+#'   `Ed25519` or legacy `EdDSA` with Ed25519 keys; RSA-PSS and other RSA signing algorithms are not supported for
+#'   outgoing proofs. See `dpop_signing_alg` and the [advanced security vignette](https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html).
+#'
+#' @param dpop_private_key_kid Optional key identifier (`kid`) to include in
+#'   the JOSE header of DPoP proofs. Useful when the authorization or resource
+#'   server expects a stable key identifier alongside the embedded public JWK.
+#'
+#' @param dpop_signing_alg Optional JWT signing algorithm to use for DPoP
+#'   proofs. When omitted, a compatible asymmetric default is selected based on
+#'   the private key type/curve (for example `RS256`, `ES256`, `ES384`, or
+#'   `ES512`, or `EdDSA` for Ed25519). `RS512`, `PS256`, `PS384`, and `PS512` are
+#'   not currently supported for outbound DPoP proofs. If an explicit value is
+#'   provided but incompatible with the key, validation fails early with a
+#'   configuration error. When the provider advertises
+#'   `dpop_signing_alg_values_supported`, both explicit values and inferred
+#'   defaults must be included in that set.
+#'
+#' @param dpop_require_access_token Logical or `NULL`. When `TRUE` and
+#'   `dpop_private_key` is configured, shinyOAuth requires the authorization
+#'   server to return `token_type = "DPoP"` for access tokens and fails fast
+#'   otherwise, independently of the access token's representation. Observed
+#'   binding data must match the configured key; requiring its presence is a
+#'   separate policy (`dpop_require_observed_cnf`). In [oauth_client()], the default
+#'   `NULL` resolves to `TRUE` when `dpop_private_key` is configured and to
+#'   `FALSE` otherwise. Set `FALSE` explicitly only when you intentionally want
+#'   to allow Bearer access tokens, such as deployments where DPoP is used only
+#'   to bind refresh tokens.
+#'
+#' @param dpop_require_observed_cnf Logical. When `TRUE`, shinyOAuth rejects
+#'   `token_type = "DPoP"` access tokens unless it can observe `cnf[["jkt"]]`
+#'   locally, from the token response, introspection, or optional JWT access-token
+#'   inspection. Set `options(shinyOAuth.access_token_cnf = "opaque")` to disable
+#'   access-token decoding for both DPoP and mTLS; the compatibility default
+#'   `"jwt"` inspects JWT `cnf` without treating it as signature validation.
+#'   Use this when high-assurance DPoP deployments must
+#'   fail closed on opaque access tokens that provide no observable binding.
+#'   Default is `FALSE`.
+#'
+#' @param request_object_mode Controls how the authorization request is
+#'   transported to the provider.
+#'
+#'   - `"parameters"` (default): send OAuth parameters directly on the browser
+#'     redirect URL.
+#'   - `"request"`: send a signed JWT-secured authorization request (JAR;
+#'     RFC 9101) via the `request` parameter.
+#'   - `"request_uri"`: publish a signed Request Object by reference and send
+#'     its URL via the `request_uri` parameter.
+#'
+#'   If the provider has a `par_url`, `"parameters"` and `"request"` are
+#'   sent to that endpoint first using Pushed Authorization Requests (PAR).
+#'   The browser then receives the provider-issued `request_uri` handle.
+#'   Caller-published `"request_uri"` mode is separate from PAR and cannot
+#'   be used when the provider requires PAR.
+#'
+#'   Use a signed Request Object when the provider requires JAR or when it must
+#'   verify the integrity of the authorization parameters. `"request_uri"`
+#'   lets the provider fetch the object from a published URL instead of carrying
+#'   the JWT in the browser redirect. Both modes require signing material on
+#'   the client. shinyOAuth prefers
+#'   `client_assertion_private_key` when present; otherwise it falls back to HMAC signing
+#'   with `client_secret`. When Request Object encryption is configured,
+#'   shinyOAuth signs first and then wraps the signed Request Object in a JWE.
+#'   Caller-managed `request_uri` publication requires HTTPS; HTTP URLs are
+#'   rejected even when another configured host policy would otherwise allow
+#'   them, as required by RFC 9101 Section 5.2.
+#'   If the provider advertises `request_uri_registration_required = TRUE`,
+#'   caller-managed `request_uri` publication still depends on the provider
+#'   having that URI or a matching wildcard prefix registered for the client;
+#'   shinyOAuth cannot verify that server-side registration automatically.
+#' @param request_object_signing_alg Optional JWS algorithm override for
+#'   signed authorization requests when `request_object_mode` uses a
+#'   Request Object (`"request"` or `"request_uri"`).
+#'   When omitted, shinyOAuth chooses `HS256` for HMAC-based signing or a
+#'   compatible asymmetric default based on `client_assertion_private_key` (for example
+#'   `RS256`, `RS384`, `ES256`, `ES384`, `ES512`, or `EdDSA` for Ed25519). `RS512`, `PS256`,
+#'   `PS384`, and `PS512` are not currently supported for outbound
+#'   signed authorization requests.
+#'
+#' @param request_object_audience Optional override for the `aud` claim
+#'   used in signed authorization requests. By default, shinyOAuth uses the
+#'   provider issuer when available. When
+#'   `request_object_mode = "request"` or `"request_uri"`, the provider
+#'   must have a configured issuer or you must supply an explicit override so
+#'   the signed Request Object remains audience-bound to the intended
+#'   authorization server.
+#' @param request_object_encryption_alg Optional JWE key-management
+#'   algorithm override for encrypted Request Objects. Current outbound support
+#'   is limited to `RSA-OAEP`. When set, you must also set
+#'   `request_object_encryption_enc`.
+#' @param request_object_encryption_enc Optional JWE content-encryption
+#'   algorithm override for encrypted Request Objects. Current outbound support
+#'   is limited to the AES-CBC-HMAC family (`A128CBC-HS256`,
+#'   `A192CBC-HS384`, `A256CBC-HS512`). When set, you must also set
+#'   `request_object_encryption_alg`.
+#' @param request_object_encryption_kid Optional key identifier (`kid`)
+#'   used to select one provider encryption key and emit the outer JWE `kid`
+#'   header. This is mainly useful when the provider publishes more than one
+#'   Request Object encryption key.
+#' @param request_object_ttl Positive number of seconds to keep signed
+#'   authorization request objects (`request` JWTs) valid. When
+#'   `request_object_mode = "request_uri"`, shinyOAuth also uses this
+#'   value as the default publication window for the referenced Request Object
+#'   URI. Default is `45`.
+#' @param request_object_nbf_skew Optional non-negative number of
+#'   seconds. When provided, shinyOAuth adds an `nbf` claim set to
+#'   `iat - request_object_nbf_skew` so deployments can tolerate small
+#'   clock skew while still emitting bounded request-object validity windows.
+#'   Leave `NULL` (the default) to omit `nbf`. Request-object `nbf` is reserved
+#'   by shinyOAuth and cannot be supplied through extra authorization
+#'   parameters.
+#'
+#' @param jarm_signed_response_alg Optional expected JWS algorithm for
+#'   signed JWT Secured Authorization Responses (JARM). When omitted and the
+#'   effective response mode is JARM, shinyOAuth defaults to `RS256`. This
+#'   value is not sent dynamically on the authorization request; it must match
+#'   the client metadata and provider behavior configured out-of-band for that
+#'   client. Current inbound support accepts `HS256`, `HS384`, `HS512`,
+#'   `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, `Ed25519`, and `EdDSA`.
+#'   RSA-PSS (`PS256`, `PS384`, `PS512`) and unsecured `none` are not accepted
+#'   for inbound JARM.
+#' @param jarm_encrypted_response_alg Optional expected JWE
+#'   key-management algorithm for encrypted JARM responses. Current inbound
+#'   support is limited to `RSA-OAEP`. Like
+#'   `jarm_signed_response_alg`, this reflects out-of-band client
+#'   metadata and expected provider behavior rather than an authorization
+#'   request parameter emitted by shinyOAuth.
+#' @param jarm_encrypted_response_enc Optional expected JWE
+#'   content-encryption algorithm for encrypted JARM responses. Current inbound
+#'   support is limited to the AES-CBC-HMAC family (`A128CBC-HS256`,
+#'   `A192CBC-HS384`, `A256CBC-HS512`). When omitted while
+#'   `jarm_encrypted_response_alg` is set, shinyOAuth defaults to
+#'   `A128CBC-HS256`. This must also match the provider-side JARM client
+#'   metadata when encrypted responses are enabled.
+#' @param jarm_decryption_private_key Optional private key
+#'   used to decrypt encrypted JARM responses. Can be an `openssl::key` or a
+#'   PEM string containing a private key. Required when encrypted JARM is
+#'   enabled.
+#' @param jarm_decryption_private_key_kid Optional key
+#'   identifier (`kid`) associated with
+#'   `jarm_decryption_private_key`.
+#' @param jarm_max_lifetime Positive number of seconds. Maximum accepted
+#'   lifetime for a JARM response JWT. Default is 600 seconds, matching JARM's
+#'   recommended 10-minute upper bound for authorization response JWTs. When a
+#'   JARM payload includes `iat`, shinyOAuth enforces
+#'   `exp - iat <= jarm_max_lifetime`; otherwise it falls back to the
+#'   remaining `exp` window at validation time. Applies only when
+#'   `response_mode` uses JARM.
+#'
+#' @return Calling the constructor creates an `OAuthClient` object.
+#' @example inst/examples/oauth_client.R
+#'
+#' @param introspect_elements Compatibility alias for `introspection_checks`.
+#' @param client_private_key Compatibility alias for `client_assertion_private_key`.
+#' @param client_private_key_kid Compatibility alias for `client_assertion_private_key_kid`.
+#' @param userinfo_jwt_required_temporal_claims Compatibility alias for `userinfo_jwt_required_time_claims`.
+#' @param mtls_request_certificate_bound_access_tokens Compatibility alias for `mtls_certificate_bound_access_tokens`.
+#' @param tls_client_cert_file Compatibility alias for `mtls_client_cert_file`.
+#' @param tls_client_key_file Compatibility alias for `mtls_client_key_file`.
+#' @param tls_client_key_password Compatibility alias for `mtls_client_key_password`.
+#' @param tls_client_ca_file Compatibility alias for `mtls_client_ca_file`.
+#' @param authorization_request_mode Compatibility alias for `request_object_mode`.
+#' @param authorization_request_signing_alg Compatibility alias for `request_object_signing_alg`.
+#' @param authorization_request_audience Compatibility alias for `request_object_audience`.
+#' @param authorization_request_encryption_alg Compatibility alias for `request_object_encryption_alg`.
+#' @param authorization_request_encryption_enc Compatibility alias for `request_object_encryption_enc`.
+#' @param authorization_request_encryption_kid Compatibility alias for `request_object_encryption_kid`.
+#' @param authorization_request_ttl Compatibility alias for `request_object_ttl`.
+#' @param authorization_request_nbf_skew Compatibility alias for `request_object_nbf_skew`.
 #' @export
 OAuthClient <- S7::new_class(
   "OAuthClient",
@@ -426,15 +541,86 @@ OAuthClient <- S7::new_class(
     provider = S7::class_any,
     client_id = S7::class_character,
     client_secret = S7::class_character,
-    # Optional client private key (PEM string or openssl::key) for private_key_jwt
-    client_private_key = S7::new_property(S7::class_any, default = NULL),
-    # Optional kid header to include when using private_key_jwt
-    client_private_key_kid = S7::new_property(
+    endpoint_auth = S7::new_property(S7::class_list, default = list()),
+    redirect_uri = S7::class_character,
+    scopes = S7::class_character,
+    # Authorization response mode for authorization-code callbacks.
+    response_mode = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    resource = S7::new_property(
+      S7::class_character,
+      default = character(0)
+    ),
+    # Optional OIDC claims request parameter (OIDC Core §5.5):
+    # can be NULL (no claims), a list (auto JSON-encoded), or a character
+    # string (pre-encoded JSON). When a list, it is JSON-encoded using
+    # jsonlite::toJSON(auto_unbox = TRUE, null = "null") during auth URL
+    # construction.
+    claims = S7::new_property(
+      S7::class_any,
+      default = NULL
+    ),
+    enforce_callback_issuer = S7::new_property(
+      S7::class_logical,
+      default = FALSE
+    ),
+    authorization_server_mode = S7::new_property(
+      S7::class_character,
+      default = "single"
+    ),
+    authorization_server_redirect_uris = S7::new_property(
+      S7::class_character,
+      default = character(0)
+    ),
+    scope_validation = S7::new_property(
+      S7::class_character,
+      default = "warn"
+    ),
+    claims_validation = S7::new_property(
+      S7::class_character,
+      default = "none"
+    ),
+    # OIDC acr enforcement (OIDC Core §2, §3.1.2.1): when non-empty, the ID
+    # token's acr claim must match one of these values.
+    required_acr_values = S7::new_property(
+      S7::class_character,
+      default = character(0)
+    ),
+    userinfo_jwt_required_time_claims = S7::new_property(
+      S7::class_character,
+      default = character(0)
+    ),
+    # Token introspection settings (RFC 7662): control whether login validates
+    # the access token via the provider's introspection endpoint.
+    introspect = S7::new_property(S7::class_logical, default = FALSE),
+    introspect_elements = S7::new_property(
+      S7::class_character,
+      default = character(0)
+    ),
+    state_store = S7::new_property(
+      S7::class_any,
+      default = quote(cachem::cache_mem(max_age = 300))
+    ),
+    state_payload_max_age = S7::new_property(S7::class_numeric, default = 300),
+    state_entropy = S7::new_property(S7::class_numeric, default = 64),
+    state_key = S7::new_property(
+      S7::class_any,
+      default = quote(random_urlsafe(n = 128))
+    ),
+    # Optional client assertion private key (PEM string or openssl::key) for private_key_jwt.
+    client_assertion_private_key = S7::new_property(
+      S7::class_any,
+      default = NULL
+    ),
+    # Optional kid header to include when using private_key_jwt.
+    client_assertion_private_key_kid = S7::new_property(
       S7::class_character,
       default = NA_character_
     ),
     # Optional override for client assertion signing algorithm. If NULL, defaults
-    # to HS256 for client_secret_jwt and RS256 for private_key_jwt
+    # to HS256 for client_secret_jwt and RS256 for private_key_jwt.
     client_assertion_alg = S7::new_property(
       S7::class_character,
       default = NA_character_
@@ -444,70 +630,25 @@ OAuthClient <- S7::new_class(
       S7::class_character,
       default = NA_character_
     ),
-    tls_client_cert_file = S7::new_property(
+    mtls_client_cert_file = S7::new_property(
       S7::class_character,
       default = NA_character_
     ),
-    tls_client_key_file = S7::new_property(
+    mtls_client_key_file = S7::new_property(
       S7::class_character,
       default = NA_character_
     ),
-    tls_client_key_password = S7::new_property(
+    mtls_client_key_password = S7::new_property(
       S7::class_character,
       default = NA_character_
     ),
-    tls_client_ca_file = S7::new_property(
+    mtls_client_ca_file = S7::new_property(
       S7::class_character,
       default = NA_character_
     ),
-    mtls_request_certificate_bound_access_tokens = S7::new_property(
+    mtls_certificate_bound_access_tokens = S7::new_property(
       S7::class_logical,
       default = FALSE
-    ),
-    # Authorization request transport: direct parameters or signed JAR request.
-    authorization_request_mode = S7::new_property(
-      S7::class_character,
-      default = "parameters"
-    ),
-    # Authorization response mode for authorization-code callbacks.
-    response_mode = S7::new_property(
-      S7::class_character,
-      default = NA_character_
-    ),
-    # Optional override for the signed authorization request alg.
-    authorization_request_signing_alg = S7::new_property(
-      S7::class_character,
-      default = NA_character_
-    ),
-    # Optional override for the signed authorization request aud claim.
-    authorization_request_audience = S7::new_property(
-      S7::class_character,
-      default = NA_character_
-    ),
-    # Optional override for the Request Object JWE alg.
-    authorization_request_encryption_alg = S7::new_property(
-      S7::class_character,
-      default = NA_character_
-    ),
-    # Optional override for the Request Object JWE enc.
-    authorization_request_encryption_enc = S7::new_property(
-      S7::class_character,
-      default = NA_character_
-    ),
-    # Optional recipient-key selection hint for Request Object JWE.
-    authorization_request_encryption_kid = S7::new_property(
-      S7::class_character,
-      default = NA_character_
-    ),
-    # Signed authorization request lifetime in seconds.
-    authorization_request_ttl = S7::new_property(
-      S7::class_numeric,
-      default = 45
-    ),
-    # Optional request-object nbf skew in seconds; NA means omit nbf.
-    authorization_request_nbf_skew = S7::new_property(
-      S7::class_numeric,
-      default = NA_real_
     ),
     # Optional DPoP proof key (PEM string or openssl::key) used to
     # sender-constrain token and resource requests.
@@ -525,86 +666,227 @@ OAuthClient <- S7::new_class(
     # Optional strict mode: require DPoP access tokens when DPoP is enabled.
     dpop_require_access_token = S7::new_property(
       S7::class_logical,
-      default = FALSE
+      default = quote(!is.null(dpop_private_key))
     ),
-    redirect_uri = S7::class_character,
-    enforce_callback_issuer = S7::new_property(
+    # Optional high-assurance mode: require observable DPoP cnf.jkt binding.
+    dpop_require_observed_cnf = S7::new_property(
       S7::class_logical,
       default = FALSE
     ),
-    scopes = S7::class_character,
-    resource = S7::new_property(
+    # Authorization request transport: direct parameters or signed JAR request.
+    request_object_mode = S7::new_property(
       S7::class_character,
-      default = character(0)
+      default = "parameters"
     ),
-    # Optional OIDC claims request parameter (OIDC Core §5.5):
-    # can be NULL (no claims), a list (auto JSON-encoded), or a character
-    # string (pre-encoded JSON). When a list, it is JSON-encoded using
-    # jsonlite::toJSON(auto_unbox = TRUE, null = "null") during auth URL
-    # construction.
-    claims = S7::new_property(
+    # Optional override for the signed authorization request alg.
+    request_object_signing_alg = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Optional override for the signed authorization request aud claim.
+    request_object_audience = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Optional override for the Request Object JWE alg.
+    request_object_encryption_alg = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Optional override for the Request Object JWE enc.
+    request_object_encryption_enc = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Optional recipient-key selection hint for Request Object JWE.
+    request_object_encryption_kid = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Signed authorization request lifetime in seconds.
+    request_object_ttl = S7::new_property(
+      S7::class_numeric,
+      default = 45
+    ),
+    # Optional request-object nbf skew in seconds; NA means omit nbf.
+    request_object_nbf_skew = S7::new_property(
+      S7::class_numeric,
+      default = NA_real_
+    ),
+    # Optional override for the signed JARM alg.
+    jarm_signed_response_alg = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Optional override for the encrypted JARM alg.
+    jarm_encrypted_response_alg = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Optional override for the encrypted JARM enc.
+    jarm_encrypted_response_enc = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
+    # Optional private key used to decrypt encrypted JARM.
+    jarm_decryption_private_key = S7::new_property(
       S7::class_any,
       default = NULL
     ),
-    state_store = S7::new_property(
-      S7::class_any,
-      default = quote(cachem::cache_mem(max_age = 300))
-    ),
-    state_payload_max_age = S7::new_property(S7::class_numeric, default = 300),
-    state_entropy = S7::new_property(S7::class_numeric, default = 64),
-    state_key = S7::new_property(
-      S7::class_any,
-      default = quote(random_urlsafe(n = 128))
-    ),
-    scope_validation = S7::new_property(
+    # Optional kid associated with the encrypted JARM decryption key.
+    jarm_decryption_private_key_kid = S7::new_property(
       S7::class_character,
-      default = "warn"
+      default = NA_character_
     ),
-    claims_validation = S7::new_property(
-      S7::class_character,
-      default = "none"
+    # Maximum accepted JARM JWT lifetime in seconds.
+    jarm_max_lifetime = S7::new_property(S7::class_numeric, default = 600),
+    # Require local confirmation independently of certificate presentation.
+    mtls_require_observed_cnf = S7::new_property(
+      S7::class_logical,
+      default = TRUE
     ),
-    userinfo_jwt_required_temporal_claims = S7::new_property(
+    trusted_id_token_audiences = S7::new_property(
       S7::class_character,
       default = character(0)
     ),
-
-    # OIDC acr enforcement (OIDC Core §2, §3.1.2.1): when non-empty, the ID
-    # token's acr claim must match one of these values.
-    required_acr_values = S7::new_property(
-      S7::class_character,
-      default = character(0)
+    compare_callback_issuer = S7::new_property(
+      S7::class_logical,
+      default = quote(
+        is_valid_string(provider@issuer) &&
+          (missing(enforce_callback_issuer) || isTRUE(enforce_callback_issuer))
+      )
     ),
-
-    # Token introspection settings (RFC 7662): control whether login validates
-    # the access token via the provider's introspection endpoint.
-    introspect = S7::new_property(S7::class_logical, default = FALSE),
-    introspect_elements = S7::new_property(
+    client_assertion_typ = S7::new_property(
       S7::class_character,
-      default = character(0)
-    )
+      default = "JWT"
+    ),
+    # Append new properties to preserve the public positional constructor.
+    resource_bases = S7::new_property(
+      S7::class_character,
+      default = character()
+    ),
+    required_scopes = S7::new_property(
+      S7::class_character,
+      default = character()
+    ),
+    label = S7::new_property(
+      S7::class_character,
+      default = quote(default_client_label(provider))
+    ),
+    authorization_method = S7::new_property(
+      S7::class_character,
+      default = "GET"
+    ),
+    # Internal, versioned policy selected by SMART clients. A generic client
+    # retains literal scopes and RFC 6749 omission behavior.
+    scope_policy = S7::new_property(S7::class_list, default = list()),
+    smart = S7::new_property(S7::class_list, default = list())
   ),
   validator = function(self) oauth_client_validate(self)
 )
+OAuthClient <- api_class_argument_alias(
+  OAuthClient,
+  "introspect_elements",
+  "introspection_checks"
+)
+OAuthClient <- api_preserve_constructor(
+  OAuthClient,
+  released = c(
+    "provider",
+    "client_id",
+    "client_secret",
+    "client_private_key",
+    "client_private_key_kid",
+    "client_assertion_alg",
+    "client_assertion_audience",
+    "tls_client_cert_file",
+    "tls_client_key_file",
+    "tls_client_key_password",
+    "tls_client_ca_file",
+    "mtls_request_certificate_bound_access_tokens",
+    "authorization_request_mode",
+    "response_mode",
+    "authorization_request_signing_alg",
+    "authorization_request_audience",
+    "authorization_request_encryption_alg",
+    "authorization_request_encryption_enc",
+    "authorization_request_encryption_kid",
+    "authorization_request_ttl",
+    "authorization_request_nbf_skew",
+    "dpop_private_key",
+    "dpop_private_key_kid",
+    "dpop_signing_alg",
+    "dpop_require_access_token",
+    "redirect_uri",
+    "enforce_callback_issuer",
+    "scopes",
+    "resource",
+    "claims",
+    "state_store",
+    "state_payload_max_age",
+    "state_entropy",
+    "state_key",
+    "scope_validation",
+    "claims_validation",
+    "userinfo_jwt_required_temporal_claims",
+    "required_acr_values",
+    "introspect",
+    "introspect_elements"
+  ),
+  aliases = c(
+    client_private_key = "client_assertion_private_key",
+    client_private_key_kid = "client_assertion_private_key_kid",
+    userinfo_jwt_required_temporal_claims = "userinfo_jwt_required_time_claims",
+    mtls_request_certificate_bound_access_tokens = "mtls_certificate_bound_access_tokens",
+    tls_client_cert_file = "mtls_client_cert_file",
+    tls_client_key_file = "mtls_client_key_file",
+    tls_client_key_password = "mtls_client_key_password",
+    tls_client_ca_file = "mtls_client_ca_file",
+    authorization_request_mode = "request_object_mode",
+    authorization_request_signing_alg = "request_object_signing_alg",
+    authorization_request_audience = "request_object_audience",
+    authorization_request_encryption_alg = "request_object_encryption_alg",
+    authorization_request_encryption_enc = "request_object_encryption_enc",
+    authorization_request_encryption_kid = "request_object_encryption_kid",
+    authorization_request_ttl = "request_object_ttl",
+    authorization_request_nbf_skew = "request_object_nbf_skew",
+    introspect_elements = "introspection_checks"
+  )
+)
+
 
 # 2 Helper constructor ---------------------------------------------------------
 
-#' Create generic [OAuthClient]
+#' Configure OAuth/OIDC client credentials and login settings
 #'
-#' Main helper for creating a validated [OAuthClient] configuration before
-#' [oauth_module_server()] starts login or callback handling.
+#' @description
+#' Create a client with the credentials assigned by your provider, the URL where
+#' users return after login, and the permissions your app needs. Pass the result
+#' to [oauth_module_server()].
+#'
+#' @details
+#' Create the client outside `server()` so its settings and pending login state
+#' remain available when the callback returns. Configure `provider`, `client_id`,
+#' `client_secret` (if issued), `redirect_uri`, and `scopes` from the app
+#' registration. Use `state_store` and `state_key` for shared login state across
+#' workers, and validation arguments to require particular scopes, claims, or
+#' authentication context. See the [usage vignette](https://lukakoning.github.io/shinyOAuth/articles/usage.html) for a complete app, or
+#' the [advanced security vignette](https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html) for certificate and signed-request settings.
 #'
 #' @inheritParams OAuthClient
+#' @param ... Deprecated renamed arguments accepted temporarily for backward
+#'   compatibility.
 #'
 #' @return [OAuthClient] object
 #'
-#' @example inst/examples/oauth_module_server.R
+#' @example inst/examples/oauth_client.R
 #'
+#' @param introspect_elements Compatibility alias for `introspection_checks`. Supply only one spelling.
 #' @export
 oauth_client <- function(
   provider,
-  client_id = Sys.getenv("OAUTH_CLIENT_ID"),
-  client_secret = Sys.getenv("OAUTH_CLIENT_SECRET"),
+  client_id,
+  client_secret = character(0),
   redirect_uri,
   enforce_callback_issuer = NULL,
   scopes = character(0),
@@ -614,35 +896,129 @@ oauth_client <- function(
   state_payload_max_age = 300,
   state_entropy = 64,
   state_key = random_urlsafe(128),
-  client_private_key = NULL,
-  client_private_key_kid = NULL,
+  client_assertion_private_key = NULL,
+  client_assertion_private_key_kid = NULL,
   client_assertion_alg = NULL,
   client_assertion_audience = NULL,
-  tls_client_cert_file = NULL,
-  tls_client_key_file = NULL,
-  tls_client_key_password = NULL,
-  tls_client_ca_file = NULL,
-  mtls_request_certificate_bound_access_tokens = FALSE,
-  authorization_request_mode = c("parameters", "request", "request_uri"),
+  mtls_client_cert_file = NULL,
+  mtls_client_key_file = NULL,
+  mtls_client_key_password = NULL,
+  mtls_client_ca_file = NULL,
+  mtls_certificate_bound_access_tokens = FALSE,
+  request_object_mode = c("parameters", "request", "request_uri"),
   response_mode = NULL,
-  authorization_request_signing_alg = NULL,
-  authorization_request_audience = NULL,
-  authorization_request_encryption_alg = NULL,
-  authorization_request_encryption_enc = NULL,
-  authorization_request_encryption_kid = NULL,
-  authorization_request_ttl = 45,
-  authorization_request_nbf_skew = NULL,
+  request_object_signing_alg = NULL,
+  request_object_audience = NULL,
+  request_object_encryption_alg = NULL,
+  request_object_encryption_enc = NULL,
+  request_object_encryption_kid = NULL,
+  request_object_ttl = 45,
+  request_object_nbf_skew = NULL,
   dpop_private_key = NULL,
   dpop_private_key_kid = NULL,
   dpop_signing_alg = NULL,
   dpop_require_access_token = NULL,
   scope_validation = c("warn", "strict", "none"),
   claims_validation = c("none", "warn", "strict"),
-  userinfo_jwt_required_temporal_claims = character(0),
+  userinfo_jwt_required_time_claims = character(0),
   required_acr_values = character(0),
   introspect = FALSE,
-  introspect_elements = character(0)
+  introspection_checks = character(0),
+  authorization_server_mode = c(
+    "single",
+    "multi_issuer",
+    "multi_redirect_uri"
+  ),
+  authorization_server_redirect_uris = character(0),
+  dpop_require_observed_cnf = FALSE,
+  jarm_signed_response_alg = NULL,
+  jarm_encrypted_response_alg = NULL,
+  jarm_encrypted_response_enc = NULL,
+  jarm_decryption_private_key = NULL,
+  jarm_decryption_private_key_kid = NULL,
+  jarm_max_lifetime = 600,
+  endpoint_auth = list(),
+  mtls_require_observed_cnf = TRUE,
+  trusted_id_token_audiences = character(0),
+  compare_callback_issuer = NULL,
+  client_assertion_typ = "JWT",
+  authorization_method = "GET",
+  resource_bases = character(),
+  required_scopes = character(),
+  label = default_client_label(provider),
+  ...,
+  introspect_elements = NULL
 ) {
+  introspect_elements <- resolve_argument_alias(
+    introspection_checks,
+    introspect_elements,
+    missing(introspection_checks),
+    missing(introspect_elements),
+    "introspection_checks",
+    "introspect_elements"
+  )
+  compat_args <- resolve_deprecated_constructor_args(
+    dots = list(...),
+    arg_map = c(
+      client_private_key = "client_assertion_private_key",
+      client_private_key_kid = "client_assertion_private_key_kid",
+      userinfo_jwt_required_temporal_claims = "userinfo_jwt_required_time_claims",
+      mtls_request_certificate_bound_access_tokens = "mtls_certificate_bound_access_tokens",
+      tls_client_cert_file = "mtls_client_cert_file",
+      tls_client_key_file = "mtls_client_key_file",
+      tls_client_key_password = "mtls_client_key_password",
+      tls_client_ca_file = "mtls_client_ca_file",
+      authorization_request_mode = "request_object_mode",
+      authorization_request_signing_alg = "request_object_signing_alg",
+      authorization_request_audience = "request_object_audience",
+      authorization_request_encryption_alg = "request_object_encryption_alg",
+      authorization_request_encryption_enc = "request_object_encryption_enc",
+      authorization_request_encryption_kid = "request_object_encryption_kid",
+      authorization_request_ttl = "request_object_ttl",
+      authorization_request_nbf_skew = "request_object_nbf_skew",
+      authorization_signed_response_alg = "jarm_signed_response_alg",
+      authorization_encrypted_response_alg = "jarm_encrypted_response_alg",
+      authorization_encrypted_response_enc = "jarm_encrypted_response_enc",
+      authorization_response_decryption_private_key = "jarm_decryption_private_key",
+      authorization_response_decryption_private_key_kid = "jarm_decryption_private_key_kid"
+    ),
+    fn_name = "oauth_client",
+    provided_new = c(
+      client_assertion_private_key = !missing(client_assertion_private_key),
+      client_assertion_private_key_kid = !missing(
+        client_assertion_private_key_kid
+      ),
+      userinfo_jwt_required_time_claims = !missing(
+        userinfo_jwt_required_time_claims
+      ),
+      mtls_certificate_bound_access_tokens = !missing(
+        mtls_certificate_bound_access_tokens
+      ),
+      mtls_client_cert_file = !missing(mtls_client_cert_file),
+      mtls_client_key_file = !missing(mtls_client_key_file),
+      mtls_client_key_password = !missing(mtls_client_key_password),
+      mtls_client_ca_file = !missing(mtls_client_ca_file),
+      request_object_mode = !missing(request_object_mode),
+      request_object_signing_alg = !missing(request_object_signing_alg),
+      request_object_audience = !missing(request_object_audience),
+      request_object_encryption_alg = !missing(request_object_encryption_alg),
+      request_object_encryption_enc = !missing(request_object_encryption_enc),
+      request_object_encryption_kid = !missing(request_object_encryption_kid),
+      request_object_ttl = !missing(request_object_ttl),
+      request_object_nbf_skew = !missing(request_object_nbf_skew),
+      jarm_signed_response_alg = !missing(jarm_signed_response_alg),
+      jarm_encrypted_response_alg = !missing(jarm_encrypted_response_alg),
+      jarm_encrypted_response_enc = !missing(jarm_encrypted_response_enc),
+      jarm_decryption_private_key = !missing(jarm_decryption_private_key),
+      jarm_decryption_private_key_kid = !missing(
+        jarm_decryption_private_key_kid
+      )
+    )
+  )
+  if (length(compat_args) > 0) {
+    list2env(compat_args, envir = environment())
+  }
+
   dpop_require_access_token_missing <-
     missing(dpop_require_access_token) || is.null(dpop_require_access_token)
   claims_validation_missing <- missing(claims_validation)
@@ -650,6 +1026,20 @@ oauth_client <- function(
   warn_about_oauth_client_created_in_shiny(
     state_key_missing = missing(state_key)
   )
+
+  authorization_server_mode <- match.arg(authorization_server_mode)
+  response_mode_info <- resolve_auth_response_mode(
+    response_mode,
+    arg = "response_mode",
+    context = "OAuthClient"
+  )
+  if (!is.null(response_mode_info[["error"]])) {
+    err_input(response_mode_info[["error"]])
+  }
+  response_mode <- response_mode_info[["mode"]] %||%
+    NA_character_
+  jarm_response_mode <- response_mode_info[["effective_mode"]] %in%
+    c("query.jwt", "form_post.jwt")
 
   auto_enforce_callback_issuer <-
     missing(enforce_callback_issuer) || is.null(enforce_callback_issuer)
@@ -660,7 +1050,7 @@ oauth_client <- function(
         !is.na(enforce_callback_issuer))
   ) {
     err_input(
-      "{.arg enforce_callback_issuer} must be NULL or a single non-NA logical."
+      "`enforce_callback_issuer` must be NULL or a single non-NA logical."
     )
   }
 
@@ -674,6 +1064,65 @@ oauth_client <- function(
     isTRUE(enforce_callback_issuer)
   }
   if (
+    !is.null(compare_callback_issuer) &&
+      !is_scalar_logical(compare_callback_issuer)
+  ) {
+    err_input(
+      "`compare_callback_issuer` must be NULL or a single non-NA logical."
+    )
+  }
+  resolved_compare_callback_issuer <- compare_callback_issuer %||%
+    (is_valid_string(provider@issuer) &&
+      (auto_enforce_callback_issuer || isTRUE(enforce_callback_issuer)))
+
+  if (identical(authorization_server_mode, "multi_issuer")) {
+    if (isTRUE(jarm_response_mode)) {
+      if (!is_valid_string(provider@issuer %||% NA_character_)) {
+        err_config(c(
+          "`authorization_server_mode` = `multi_issuer` requires a configured provider issuer.",
+          "i" = "JARM issuer identification validates the response's iss claim against that configured issuer."
+        ))
+      }
+    } else {
+      if (!isTRUE(provider@authorization_response_iss_parameter_supported)) {
+        err_config(c(
+          "`authorization_server_mode` = `multi_issuer` requires advertised RFC 9207 support for direct callbacks.",
+          "x" = paste0(
+            "Provider ",
+            provider@name %||% "(unnamed)",
+            " does not advertise authorization_response_iss_parameter_supported = TRUE."
+          ),
+          "i" = paste(
+            "Use a JARM response mode, configure distinct redirect URIs with",
+            "authorization_server_mode = 'multi_redirect_uri', or correct",
+            "the provider metadata."
+          )
+        ))
+      }
+      if (!auto_enforce_callback_issuer && !isTRUE(enforce_callback_issuer)) {
+        err_config(c(
+          "`enforce_callback_issuer` cannot be disabled in `multi_issuer` mode.",
+          "i" = "RFC 9700 requires the authorization-response issuer to be validated in this mode."
+        ))
+      }
+      resolved_enforce_callback_issuer <- TRUE
+    }
+  }
+
+  authorization_server_redirect_uris <-
+    authorization_server_redirect_uris %||% character(0)
+  if (identical(authorization_server_mode, "multi_redirect_uri")) {
+    validate_distinct_authorization_server_redirect_uris(
+      redirect_uri = redirect_uri,
+      authorization_server_redirect_uris = authorization_server_redirect_uris
+    )
+  } else if (length(authorization_server_redirect_uris) > 0L) {
+    err_config(c(
+      "`authorization_server_redirect_uris` is only used in `multi_redirect_uri` mode.",
+      "i" = "Set authorization_server_mode = 'multi_redirect_uri' or remove the redirect URI set."
+    ))
+  }
+  if (
     isTRUE(resolved_enforce_callback_issuer) &&
       S7::S7_inherits(provider, OAuthProvider) &&
       !is_valid_string(provider@issuer %||% NA_character_)
@@ -681,13 +1130,13 @@ oauth_client <- function(
     provider_name <- provider@name %||% "(unnamed)"
     err_config(
       c(
-        "{.arg enforce_callback_issuer} = {.val TRUE} requires the provider to have a configured {.arg issuer}.",
+        "`enforce_callback_issuer` = `TRUE` requires the provider to have a configured `issuer`.",
         "x" = paste0(
-          "Provider {.val ",
+          "Provider `",
           provider_name,
-          "} does not expose a stable issuer identifier."
+          "` does not expose a stable issuer identifier."
         ),
-        "i" = "Disable {.arg enforce_callback_issuer} or use an issuer-configured OIDC/discovery provider."
+        "i" = "Disable `enforce_callback_issuer` or use an issuer-configured OIDC/discovery provider."
       )
     )
   }
@@ -701,16 +1150,17 @@ oauth_client <- function(
   }
   claims_validation <- match.arg(claims_validation)
   warn_about_scalar_claim_values(claims)
-  authorization_request_mode <- match.arg(authorization_request_mode)
-  response_mode_info <- resolve_auth_response_mode(
-    response_mode,
-    arg = "response_mode",
-    context = "OAuthClient"
-  )
-  if (!is.null(response_mode_info$error)) {
-    err_input(response_mode_info$error)
+  request_object_mode <- match.arg(request_object_mode)
+  jarm_encrypted_response_alg <- jarm_encrypted_response_alg %||%
+    NA_character_
+  jarm_encrypted_response_enc <-
+    jarm_encrypted_response_enc %||% NA_character_
+  if (
+    is_valid_string(jarm_encrypted_response_alg %||% NA_character_) &&
+      !is_valid_string(jarm_encrypted_response_enc %||% NA_character_)
+  ) {
+    jarm_encrypted_response_enc <- "A128CBC-HS256"
   }
-  response_mode <- response_mode_info$mode %||% NA_character_
 
   if (
     !isTRUE(dpop_require_access_token_missing) &&
@@ -719,19 +1169,37 @@ oauth_client <- function(
         !is.na(dpop_require_access_token))
   ) {
     err_input(
-      "{.arg dpop_require_access_token} must be NULL or a single non-NA logical."
+      "`dpop_require_access_token` must be NULL or a single non-NA logical."
     )
   }
   if (
-    !(is.logical(mtls_request_certificate_bound_access_tokens) &&
-      length(mtls_request_certificate_bound_access_tokens) == 1L &&
-      !is.na(mtls_request_certificate_bound_access_tokens))
+    !(is.logical(dpop_require_observed_cnf) &&
+      length(dpop_require_observed_cnf) == 1L &&
+      !is.na(dpop_require_observed_cnf))
+  ) {
+    err_input(
+      "`dpop_require_observed_cnf` must be a single non-NA logical."
+    )
+  }
+  if (
+    !(is.logical(mtls_certificate_bound_access_tokens) &&
+      length(mtls_certificate_bound_access_tokens) == 1L &&
+      !is.na(mtls_certificate_bound_access_tokens))
   ) {
     err_input(
       paste(
-        "{.arg mtls_request_certificate_bound_access_tokens}",
+        "`mtls_certificate_bound_access_tokens`",
         "must be a single non-NA logical."
       )
+    )
+  }
+  if (
+    !(is.logical(mtls_require_observed_cnf) &&
+      length(mtls_require_observed_cnf) == 1L &&
+      !is.na(mtls_require_observed_cnf))
+  ) {
+    err_input(
+      "`mtls_require_observed_cnf` must be a single non-NA logical."
     )
   }
 
@@ -748,71 +1216,177 @@ oauth_client <- function(
   }
   scopes <- as_scope_tokens(scopes %||% NULL)
   resource <- resource %||% character(0)
-  userinfo_jwt_required_temporal_claims <- unique(tolower(
-    userinfo_jwt_required_temporal_claims %||% character(0)
+  userinfo_jwt_required_time_claims <- unique(tolower(
+    userinfo_jwt_required_time_claims %||% character(0)
   ))
 
   if (isTRUE(dpop_require_access_token_missing)) {
     dpop_require_access_token <- !is.null(dpop_private_key)
   }
 
+  validate_scopes(required_scopes)
   client <- OAuthClient(
     provider = provider,
     client_id = client_id,
     client_secret = client_secret,
+    endpoint_auth = endpoint_auth,
     redirect_uri = redirect_uri,
-    enforce_callback_issuer = isTRUE(resolved_enforce_callback_issuer),
     scopes = scopes,
+    resource_bases = if (length(resource_bases)) {
+      normalize_resource_bases(resource_bases)
+    } else {
+      resource_bases
+    },
+    required_scopes = normalize_scope_tokens(required_scopes),
+    label = label,
+    response_mode = response_mode,
+    authorization_method = authorization_method,
     resource = resource,
     claims = claims,
+    enforce_callback_issuer = isTRUE(resolved_enforce_callback_issuer),
+    compare_callback_issuer = resolved_compare_callback_issuer,
+    authorization_server_mode = authorization_server_mode,
+    authorization_server_redirect_uris = authorization_server_redirect_uris,
+    scope_validation = scope_validation,
+    claims_validation = claims_validation,
+    required_acr_values = required_acr_values,
+    trusted_id_token_audiences = trusted_id_token_audiences,
+    userinfo_jwt_required_time_claims = userinfo_jwt_required_time_claims,
+    introspect = introspect,
+    introspection_checks = introspect_elements,
     state_store = state_store,
     state_payload_max_age = state_payload_max_age,
     state_entropy = state_entropy,
     state_key = state_key,
-    client_private_key = client_private_key,
-    client_private_key_kid = client_private_key_kid %||% NA_character_,
+    client_assertion_private_key = client_assertion_private_key,
+    client_assertion_private_key_kid = client_assertion_private_key_kid %||%
+      NA_character_,
     client_assertion_alg = client_assertion_alg %||% NA_character_,
     client_assertion_audience = client_assertion_audience %||% NA_character_,
-    tls_client_cert_file = tls_client_cert_file %||% NA_character_,
-    tls_client_key_file = tls_client_key_file %||% NA_character_,
-    tls_client_key_password = tls_client_key_password %||% NA_character_,
-    tls_client_ca_file = tls_client_ca_file %||% NA_character_,
-    mtls_request_certificate_bound_access_tokens = isTRUE(
-      mtls_request_certificate_bound_access_tokens
+    client_assertion_typ = client_assertion_typ,
+    mtls_client_cert_file = mtls_client_cert_file %||% NA_character_,
+    mtls_client_key_file = mtls_client_key_file %||% NA_character_,
+    mtls_client_key_password = mtls_client_key_password %||% NA_character_,
+    mtls_client_ca_file = mtls_client_ca_file %||% NA_character_,
+    mtls_certificate_bound_access_tokens = isTRUE(
+      mtls_certificate_bound_access_tokens
     ),
-    authorization_request_mode = authorization_request_mode,
-    response_mode = response_mode,
-    authorization_request_signing_alg = authorization_request_signing_alg %||%
-      NA_character_,
-    authorization_request_audience = authorization_request_audience %||%
-      NA_character_,
-    authorization_request_encryption_alg = authorization_request_encryption_alg %||%
-      NA_character_,
-    authorization_request_encryption_enc = authorization_request_encryption_enc %||%
-      NA_character_,
-    authorization_request_encryption_kid = authorization_request_encryption_kid %||%
-      NA_character_,
-    authorization_request_ttl = authorization_request_ttl,
-    authorization_request_nbf_skew = authorization_request_nbf_skew %||%
-      NA_real_,
+    mtls_require_observed_cnf = mtls_require_observed_cnf,
     dpop_private_key = dpop_private_key,
     dpop_private_key_kid = dpop_private_key_kid %||% NA_character_,
     dpop_signing_alg = dpop_signing_alg %||% NA_character_,
     dpop_require_access_token = isTRUE(dpop_require_access_token),
-    scope_validation = scope_validation,
-    claims_validation = claims_validation,
-    userinfo_jwt_required_temporal_claims = userinfo_jwt_required_temporal_claims,
-    required_acr_values = required_acr_values,
-    introspect = introspect,
-    introspect_elements = introspect_elements
+    dpop_require_observed_cnf = isTRUE(dpop_require_observed_cnf),
+    request_object_mode = request_object_mode,
+    request_object_signing_alg = request_object_signing_alg %||%
+      NA_character_,
+    request_object_audience = request_object_audience %||%
+      NA_character_,
+    request_object_encryption_alg = request_object_encryption_alg %||%
+      NA_character_,
+    request_object_encryption_enc = request_object_encryption_enc %||%
+      NA_character_,
+    request_object_encryption_kid = request_object_encryption_kid %||%
+      NA_character_,
+    request_object_ttl = request_object_ttl,
+    request_object_nbf_skew = request_object_nbf_skew %||%
+      NA_real_,
+    jarm_signed_response_alg = jarm_signed_response_alg %||%
+      NA_character_,
+    jarm_encrypted_response_alg = jarm_encrypted_response_alg,
+    jarm_encrypted_response_enc = jarm_encrypted_response_enc,
+    jarm_decryption_private_key = jarm_decryption_private_key,
+    jarm_decryption_private_key_kid = jarm_decryption_private_key_kid %||%
+      NA_character_,
+    jarm_max_lifetime = jarm_max_lifetime
   )
 
+  if (client_has_mtls_certificate(client)) {
+    tls_client_cert_thumbprint_s256(
+      client@mtls_client_cert_file,
+      client@mtls_client_key_file,
+      client@mtls_client_key_password
+    )
+  }
   client
 }
 
 # 3 Validation and constructor support helpers ---------------------------------
 
 ## 3.1 Client validation -------------------------------------------------------
+
+#' Validate distinct authorization-server redirect routes
+#'
+#' @param redirect_uri Redirect URI for the current client.
+#' @param authorization_server_redirect_uris Complete redirect URI set for the
+#'   application's authorization servers.
+#' @return Invisibly returns `TRUE`; otherwise raises a configuration error.
+#' @keywords internal
+#' @noRd
+validate_distinct_authorization_server_redirect_uris <- function(
+  redirect_uri,
+  authorization_server_redirect_uris
+) {
+  uris <- authorization_server_redirect_uris
+  if (
+    !is.character(uris) ||
+      length(uris) < 2L ||
+      anyNA(uris) ||
+      !all(nzchar(trimws(uris)))
+  ) {
+    err_config(c(
+      "`authorization_server_redirect_uris` must contain at least two non-empty absolute redirect URIs.",
+      "i" = "Provide the complete redirect URI set for every authorization server used by the application."
+    ))
+  }
+
+  routes <- lapply(uris, oauth_callback_route)
+  if (any(vapply(routes, is.null, logical(1)))) {
+    err_config(
+      "Every `authorization_server_redirect_uris` value must be an absolute URI with a scheme and authority."
+    )
+  }
+  route_keys <- vapply(
+    routes,
+    function(route) {
+      paste(
+        route[["scheme"]],
+        route[["hostname"]],
+        route[["port"]],
+        route[["path"]],
+        sep = "\n"
+      )
+    },
+    ""
+  )
+  if (anyDuplicated(route_keys)) {
+    err_config(c(
+      "`authorization_server_redirect_uris` must use a distinct canonical scheme, authority, and path for every authorization server.",
+      "x" = "Changing only the query string does not create a distinct callback route."
+    ))
+  }
+
+  current_route <- oauth_callback_route(redirect_uri)
+  current_key <- if (is.null(current_route)) {
+    NA_character_
+  } else {
+    paste(
+      current_route[["scheme"]],
+      current_route[["hostname"]],
+      current_route[["port"]],
+      current_route[["path"]],
+      sep = "\n"
+    )
+  }
+  if (is.na(current_key) || !(current_key %in% route_keys)) {
+    err_config(c(
+      "The client's `redirect_uri` must be included in `authorization_server_redirect_uris`.",
+      "i" = "Routes are compared by canonical scheme, authority, and path."
+    ))
+  }
+
+  invisible(TRUE)
+}
 
 #' Internal: validate one OAuthClient configuration
 #'
@@ -825,6 +1399,10 @@ oauth_client <- function(
 #' @keywords internal
 #' @noRd
 oauth_client_validate <- function(self) {
+  endpoint_problem <- endpoint_auth_config_problem(self@endpoint_auth)
+  if (!is.null(endpoint_problem)) {
+    return(endpoint_problem)
+  }
   if (!S7::S7_inherits(self@provider, OAuthProvider)) {
     return("OAuthClient: provider must be an OAuthProvider object")
   }
@@ -834,11 +1412,34 @@ oauth_client_validate <- function(self) {
     return("OAuthClient: client_id must be a non-empty string")
   }
 
+  # Enforce RSA signing strength for both explicit and inferred algorithms,
+  # including direct S7 construction and later property updates.
+  for (field in c("client_assertion_private_key", "dpop_private_key")) {
+    configured <- S7::prop(self, field)
+    if (is.null(configured)) {
+      next
+    }
+    key <- try(
+      normalize_private_key_input(configured, arg_name = field),
+      silent = TRUE
+    )
+    if (!inherits(key, "try-error") && inherits(key, "rsa")) {
+      bits <- jwe_rsa_key_size_bits(key)
+      if (is.na(bits) || bits < 2048L) {
+        return(paste0(
+          "OAuthClient: ",
+          field,
+          " RSA modulus must be at least 2048 bits"
+        ))
+      }
+    }
+  }
+
   parsed <- try(httr2::url_parse(self@redirect_uri), silent = TRUE)
   if (
     inherits(parsed, "try-error") ||
-      !nzchar((parsed$scheme %||% "")) ||
-      !nzchar((parsed$hostname %||% ""))
+      !nzchar((parsed[["scheme"]] %||% "")) ||
+      !nzchar((parsed[["hostname"]] %||% ""))
   ) {
     return(
       "OAuthClient: redirect_uri must be an absolute URL (including scheme and hostname)"
@@ -846,9 +1447,40 @@ oauth_client_validate <- function(self) {
   }
 
   # RFC 6749 Section 3.1.2: redirect URI MUST NOT include a fragment
-  if (nzchar(parsed$fragment %||% "")) {
+  if (has_uri_fragment(self@redirect_uri)) {
     return(
       "OAuthClient: redirect_uri must not contain a URI fragment (RFC 6749 Section 3.1.2)"
+    )
+  }
+
+  fixed_query <- oauth_callback_uri_query(self@redirect_uri)
+  fixed_parts <- strsplit(fixed_query, "&", fixed = TRUE)[[1L]]
+  fixed_keys <- tryCatch(
+    vapply(
+      fixed_parts[nzchar(fixed_parts)],
+      function(part) {
+        decode_form_member(sub("=.*$", "", part), "redirect_uri", "query name")
+      },
+      character(1)
+    ),
+    error = function(...) NULL
+  )
+  if (is.null(fixed_keys)) {
+    return("OAuthClient: redirect_uri contains an invalid fixed query name")
+  }
+  if (
+    any(
+      fixed_keys %in%
+        c(
+          oauth_module_callback_query_keys,
+          "response",
+          "scope",
+          shiny_request_object_param
+        )
+    )
+  ) {
+    return(
+      "OAuthClient: redirect_uri fixed query must not use callback-reserved parameter names"
     )
   }
 
@@ -874,6 +1506,89 @@ oauth_client_validate <- function(self) {
   ) {
     return(
       "OAuthClient: enforce_callback_issuer = TRUE requires the provider to have an issuer configured"
+    )
+  }
+  if (!is_scalar_logical(self@compare_callback_issuer)) {
+    return(
+      "OAuthClient: compare_callback_issuer must be a single non-NA logical"
+    )
+  }
+  if (
+    isTRUE(self@compare_callback_issuer) &&
+      !is_valid_string(self@provider@issuer)
+  ) {
+    return(
+      "OAuthClient: compare_callback_issuer = TRUE requires a configured issuer"
+    )
+  }
+
+  authorization_server_modes <- c(
+    "single",
+    "multi_issuer",
+    "multi_redirect_uri"
+  )
+  if (
+    !is_valid_string(self@authorization_server_mode) ||
+      !(self@authorization_server_mode %in% authorization_server_modes)
+  ) {
+    return(paste0(
+      "OAuthClient: authorization_server_mode must be one of ",
+      paste(sQuote(authorization_server_modes), collapse = ", ")
+    ))
+  }
+  if (
+    !is_valid_string(self@authorization_method) ||
+      !self@authorization_method %in% c("GET", "POST")
+  ) {
+    return("OAuthClient: authorization_method must be GET or POST")
+  }
+  response_mode_info <- resolve_auth_response_mode(
+    self@response_mode,
+    arg = "response_mode",
+    context = "OAuthClient"
+  )
+  response_mode <- response_mode_info[["mode"]] %||% "query"
+  jarm_response_mode <- response_mode_info[["effective_mode"]] %in%
+    c("query.jwt", "form_post.jwt")
+  if (identical(self@authorization_server_mode, "multi_issuer")) {
+    if (!is_valid_string(self@provider@issuer %||% NA_character_)) {
+      return(
+        "OAuthClient: multi_issuer mode requires the provider to have an issuer configured"
+      )
+    }
+    if (
+      !isTRUE(jarm_response_mode) &&
+        !isTRUE(
+          self@provider@authorization_response_iss_parameter_supported
+        )
+    ) {
+      return(
+        "OAuthClient: multi_issuer direct callbacks require advertised RFC 9207 support"
+      )
+    }
+    if (!isTRUE(jarm_response_mode) && !isTRUE(self@enforce_callback_issuer)) {
+      return(
+        "OAuthClient: multi_issuer direct callbacks require enforce_callback_issuer = TRUE"
+      )
+    }
+  }
+  if (identical(self@authorization_server_mode, "multi_redirect_uri")) {
+    redirect_error <- tryCatch(
+      {
+        validate_distinct_authorization_server_redirect_uris(
+          redirect_uri = self@redirect_uri,
+          authorization_server_redirect_uris = self@authorization_server_redirect_uris
+        )
+        NULL
+      },
+      error = conditionMessage
+    )
+    if (!is.null(redirect_error)) {
+      return(paste0("OAuthClient: ", redirect_error))
+    }
+  } else if (length(self@authorization_server_redirect_uris) > 0L) {
+    return(
+      "OAuthClient: authorization_server_redirect_uris is only valid in multi_redirect_uri mode"
     )
   }
 
@@ -915,14 +1630,14 @@ oauth_client_validate <- function(self) {
     }
   } else if (identical(tok_style, "private_key_jwt")) {
     # Asymmetric client assertion requires a private key
-    if (is.null(self@client_private_key)) {
+    if (is.null(self@client_assertion_private_key)) {
       return(
-        "OAuthClient: client_private_key is required when token_auth_style = 'private_key_jwt'"
+        "OAuthClient: client_assertion_private_key is required when token_auth_style = 'private_key_jwt'"
       )
     }
     # Basic sanity: if a character was supplied, must look like a PEM
-    if (is.character(self@client_private_key)) {
-      pem <- paste(self@client_private_key, collapse = "\n")
+    if (is.character(self@client_assertion_private_key)) {
+      pem <- paste(self@client_assertion_private_key, collapse = "\n")
       # Accept PKCS#1 ("BEGIN RSA PRIVATE KEY" / "BEGIN EC PRIVATE KEY")
       # and PKCS#8 ("BEGIN PRIVATE KEY"). Make the RSA/EC prefix optional.
       if (
@@ -934,7 +1649,7 @@ oauth_client_validate <- function(self) {
         )
       ) {
         return(
-          "OAuthClient: client_private_key must be a PEM string (BEGIN ... PRIVATE KEY) or an openssl::key"
+          "OAuthClient: client_assertion_private_key must be a PEM string (BEGIN ... PRIVATE KEY) or an openssl::key"
         )
       }
     }
@@ -992,9 +1707,12 @@ oauth_client_validate <- function(self) {
       allowed_hmac <- c("HS256", "HS384", "HS512")
       allowed_asym <- c(
         "RS256",
+        "RS384",
         "ES256",
         "ES384",
-        "ES512"
+        "ES512",
+        "Ed25519",
+        "EdDSA"
       )
       if (
         identical(tok_style, "client_secret_jwt") &&
@@ -1022,12 +1740,12 @@ oauth_client_validate <- function(self) {
       }
       if (identical(tok_style, "private_key_jwt")) {
         key0 <- try(
-          normalize_private_key_input(self@client_private_key),
+          normalize_private_key_input(self@client_assertion_private_key),
           silent = TRUE
         )
         if (inherits(key0, "try-error")) {
           return(
-            "OAuthClient: client_private_key could not be parsed for client_assertion_alg validation"
+            "OAuthClient: client_assertion_private_key could not be parsed for client_assertion_alg validation"
           )
         }
         if (
@@ -1052,12 +1770,12 @@ oauth_client_validate <- function(self) {
       (is.na(client_assertion_alg) || !nzchar(client_assertion_alg))
   ) {
     key0 <- try(
-      normalize_private_key_input(self@client_private_key),
+      normalize_private_key_input(self@client_assertion_private_key),
       silent = TRUE
     )
     if (inherits(key0, "try-error")) {
       return(
-        "OAuthClient: client_private_key could not be parsed for client_assertion_alg validation"
+        "OAuthClient: client_assertion_private_key could not be parsed for client_assertion_alg validation"
       )
     }
 
@@ -1068,8 +1786,8 @@ oauth_client_validate <- function(self) {
     if (inherits(inferred_alg, "try-error")) {
       return(paste(
         "OAuthClient: could not determine a compatible default",
-        "client_assertion_alg from client_private_key",
-        "(outbound private-key JWT signing currently supports RSA and ECDSA private keys only)"
+        "client_assertion_alg from client_assertion_private_key",
+        "(outbound private-key JWT signing currently supports RSA, ECDSA, and Ed25519 private keys only)"
       ))
     }
   }
@@ -1083,7 +1801,7 @@ oauth_client_validate <- function(self) {
       "HS256"
     }
   } else {
-    NA_character_
+    client_assertion_alg
   }
 
   provider_client_assertion_algs <- toupper(as.character(
@@ -1103,7 +1821,7 @@ oauth_client_validate <- function(self) {
     } else {
       inferred_alg <- try(
         {
-          key0 <- normalize_private_key_input(self@client_private_key)
+          key0 <- normalize_private_key_input(self@client_assertion_private_key)
           choose_default_alg_for_private_key(key0)
         },
         silent = TRUE
@@ -1112,7 +1830,7 @@ oauth_client_validate <- function(self) {
         return(
           paste(
             "OAuthClient: could not determine a compatible default",
-            "client_assertion_alg from client_private_key"
+            "client_assertion_alg from client_assertion_private_key"
           )
         )
       }
@@ -1144,6 +1862,12 @@ oauth_client_validate <- function(self) {
     }
   }
 
+  if (!valid_client_assertion_typ(self@client_assertion_typ)) {
+    return(
+      "OAuthClient: client_assertion_typ must be a non-empty JWT media type without whitespace or control characters"
+    )
+  }
+
   # Validate client_assertion_audience when provided
   caa <- self@client_assertion_audience %||% NA_character_
   if (!is.character(caa) || length(caa) != 1L) {
@@ -1157,22 +1881,339 @@ oauth_client_validate <- function(self) {
     )
   }
 
-  arm <- self@authorization_request_mode %||% "parameters"
+  arm <- self@request_object_mode %||% "parameters"
   if (!is.character(arm) || length(arm) != 1L || is.na(arm)) {
     return(
-      "OAuthClient: authorization_request_mode must be a scalar character string"
+      "OAuthClient: request_object_mode must be a scalar character string"
     )
   }
   response_mode_info <- resolve_oauth_client_response_mode(self)
-  if (!is.null(response_mode_info$error)) {
-    return(response_mode_info$error)
+  if (!is.null(response_mode_info[["error"]])) {
+    return(response_mode_info[["error"]])
   }
+  effective_response_mode <- response_mode_info[["mode"]] %||%
+    "query"
+  jarm_response_mode <- effective_response_mode %in%
+    c(
+      "query.jwt",
+      "form_post.jwt"
+    )
+
+  if (isTRUE(jarm_response_mode)) {
+    jml <- suppressWarnings(as.numeric(self@jarm_max_lifetime))
+    if (length(jml) != 1L || !is.finite(jml) || jml <= 0) {
+      return(
+        "OAuthClient: jarm_max_lifetime must be a finite positive number of seconds"
+      )
+    }
+  }
+
   request_object_modes <- c("request", "request_uri")
+
+  asra <- self@jarm_signed_response_alg %||% NA_character_
+  if (!is.character(asra) || length(asra) != 1L) {
+    return(
+      paste(
+        "OAuthClient: jarm_signed_response_alg must be a scalar",
+        "character string (or NULL/NA to omit)"
+      )
+    )
+  }
+  if (!is.na(asra) && !nzchar(asra)) {
+    return(
+      paste(
+        "OAuthClient: jarm_signed_response_alg must be non-empty",
+        "when provided (use NULL or NA to omit)"
+      )
+    )
+  }
+
+  signed_response_alg <- if (!is.na(asra) && nzchar(asra)) {
+    canonicalize_jws_alg(asra)
+  } else if (isTRUE(jarm_response_mode)) {
+    "RS256"
+  } else {
+    ""
+  }
+  if (!isTRUE(jarm_response_mode) && !is.na(asra) && nzchar(asra)) {
+    return(
+      paste(
+        "OAuthClient: jarm_signed_response_alg requires",
+        "response_mode = 'jwt', 'query.jwt', or 'form_post.jwt'"
+      )
+    )
+  }
+  if (identical(toupper(signed_response_alg), "NONE")) {
+    return(
+      "OAuthClient: jarm_signed_response_alg = 'none' is not supported"
+    )
+  }
+  if (
+    isTRUE(jarm_response_mode) &&
+      !(signed_response_alg %in%
+        c(
+          "HS256",
+          "HS384",
+          "HS512",
+          "RS256",
+          "RS384",
+          "RS512",
+          "ES256",
+          "ES384",
+          "ES512",
+          "Ed25519",
+          "EdDSA"
+        ))
+  ) {
+    return(paste0(
+      "OAuthClient: jarm_signed_response_alg '",
+      signed_response_alg,
+      "' is not supported for inbound JARM validation"
+    ))
+  }
+
+  aera <- self@jarm_encrypted_response_alg %||% NA_character_
+  if (!is.character(aera) || length(aera) != 1L) {
+    return(
+      paste(
+        "OAuthClient: jarm_encrypted_response_alg must be a scalar",
+        "character string (or NULL/NA to omit)"
+      )
+    )
+  }
+  if (!is.na(aera) && !nzchar(aera)) {
+    return(
+      paste(
+        "OAuthClient: jarm_encrypted_response_alg must be non-empty",
+        "when provided (use NULL or NA to omit)"
+      )
+    )
+  }
+
+  aere <- self@jarm_encrypted_response_enc %||% NA_character_
+  if (!is.character(aere) || length(aere) != 1L) {
+    return(
+      paste(
+        "OAuthClient: jarm_encrypted_response_enc must be a scalar",
+        "character string (or NULL/NA to omit)"
+      )
+    )
+  }
+  if (!is.na(aere) && !nzchar(aere)) {
+    return(
+      paste(
+        "OAuthClient: jarm_encrypted_response_enc must be non-empty",
+        "when provided (use NULL or NA to omit)"
+      )
+    )
+  }
+
+  aerk <- self@jarm_decryption_private_key_kid %||%
+    NA_character_
+  if (!is.character(aerk) || length(aerk) != 1L) {
+    return(
+      paste(
+        "OAuthClient: jarm_decryption_private_key_kid must be a scalar",
+        "character string (or NULL/NA to omit)"
+      )
+    )
+  }
+  if (!is.na(aerk) && !nzchar(aerk)) {
+    return(
+      paste(
+        "OAuthClient: jarm_decryption_private_key_kid must be non-empty",
+        "when provided (use NULL or NA to omit)"
+      )
+    )
+  }
+
+  encrypted_response_alg <- canonicalize_jwe_alg(aera)
+  encrypted_response_enc <- canonicalize_jwe_enc(aere)
+  if (nzchar(encrypted_response_alg) && !nzchar(encrypted_response_enc)) {
+    encrypted_response_enc <- "A128CBC-HS256"
+  }
+  encrypted_jarm_enabled <-
+    nzchar(encrypted_response_alg) ||
+    nzchar(encrypted_response_enc) ||
+    !is.null(self@jarm_decryption_private_key)
+
+  if (
+    !isTRUE(jarm_response_mode) &&
+      (!is.na(asra) && nzchar(asra) || encrypted_jarm_enabled)
+  ) {
+    return(
+      paste(
+        "OAuthClient: JARM authorization response settings require",
+        "response_mode = 'jwt', 'query.jwt', or 'form_post.jwt'"
+      )
+    )
+  }
+  if (
+    isTRUE(jarm_response_mode) &&
+      !is_valid_string(self@provider@issuer %||% NA_character_)
+  ) {
+    return(
+      "OAuthClient: JARM response modes require the provider to have an issuer configured"
+    )
+  }
+  if (nzchar(encrypted_response_alg) != nzchar(encrypted_response_enc)) {
+    return(
+      paste(
+        "OAuthClient: jarm_encrypted_response_alg and",
+        "jarm_encrypted_response_enc must both be provided"
+      )
+    )
+  }
+  if (isTRUE(encrypted_jarm_enabled) && !nzchar(encrypted_response_alg)) {
+    return(
+      paste(
+        "OAuthClient: encrypted JARM requires",
+        "jarm_encrypted_response_alg"
+      )
+    )
+  }
+  if (isTRUE(encrypted_jarm_enabled)) {
+    if (!(encrypted_response_alg %in% c("RSA-OAEP"))) {
+      return(paste0(
+        "OAuthClient: jarm_encrypted_response_alg '",
+        encrypted_response_alg,
+        "' is not supported for inbound encrypted JARM"
+      ))
+    }
+    if (
+      !(encrypted_response_enc %in%
+        c(
+          "A128CBC-HS256",
+          "A192CBC-HS384",
+          "A256CBC-HS512"
+        ))
+    ) {
+      return(paste0(
+        "OAuthClient: jarm_encrypted_response_enc '",
+        encrypted_response_enc,
+        "' is not supported for inbound encrypted JARM"
+      ))
+    }
+    if (is.null(self@jarm_decryption_private_key)) {
+      return(
+        paste(
+          "OAuthClient: encrypted JARM requires",
+          "jarm_decryption_private_key"
+        )
+      )
+    }
+
+    response_decryption_key <- try(
+      normalize_private_key_input(
+        self@jarm_decryption_private_key,
+        arg_name = "jarm_decryption_private_key"
+      ),
+      silent = TRUE
+    )
+    if (inherits(response_decryption_key, "try-error")) {
+      return(
+        paste(
+          "OAuthClient: jarm_decryption_private_key must be a parseable",
+          "PEM private key or openssl::key"
+        )
+      )
+    }
+    if (!inherits(response_decryption_key, "rsa")) {
+      return(
+        paste(
+          "OAuthClient: encrypted JARM currently requires an RSA private key for",
+          "jarm_decryption_private_key"
+        )
+      )
+    }
+    response_decryption_key_bits <- jwe_rsa_key_size_bits(
+      response_decryption_key
+    )
+    if (
+      is.na(response_decryption_key_bits) ||
+        response_decryption_key_bits < 2048L
+    ) {
+      return(
+        paste(
+          "OAuthClient: jarm_decryption_private_key RSA modulus must be",
+          "at least 2048 bits"
+        )
+      )
+    }
+  }
+
+  provider_authorization_signing_algs <- as.character(
+    self@provider@jarm_signing_alg_values_supported %||% character(0)
+  )
+  if (
+    isTRUE(jarm_response_mode) &&
+      length(provider_authorization_signing_algs) > 0 &&
+      !(signed_response_alg %in% provider_authorization_signing_algs)
+  ) {
+    return(paste0(
+      "OAuthClient: jarm_signed_response_alg '",
+      signed_response_alg,
+      "' is not supported by provider jarm_signing_alg_values_supported"
+    ))
+  }
+
+  provider_authorization_encryption_algs <- as.character(
+    self@provider@jarm_encryption_alg_values_supported %||%
+      character(0)
+  )
+  if (
+    isTRUE(encrypted_jarm_enabled) &&
+      length(provider_authorization_encryption_algs) > 0 &&
+      !(encrypted_response_alg %in%
+        provider_authorization_encryption_algs)
+  ) {
+    return(paste0(
+      "OAuthClient: jarm_encrypted_response_alg '",
+      encrypted_response_alg,
+      "' is not supported by provider jarm_encryption_alg_values_supported"
+    ))
+  }
+
+  provider_authorization_encryption_encs <- as.character(
+    self@provider@jarm_encryption_enc_values_supported %||%
+      character(0)
+  )
+  if (
+    isTRUE(encrypted_jarm_enabled) &&
+      length(provider_authorization_encryption_encs) > 0 &&
+      !(encrypted_response_enc %in%
+        provider_authorization_encryption_encs)
+  ) {
+    return(paste0(
+      "OAuthClient: jarm_encrypted_response_enc '",
+      encrypted_response_enc,
+      "' is not supported by provider jarm_encryption_enc_values_supported"
+    ))
+  }
+
+  if (
+    isTRUE(jarm_response_mode) &&
+      signed_response_alg %in% c("HS256", "HS384", "HS512")
+  ) {
+    if (!is_valid_string(self@client_secret)) {
+      return("OAuthClient: HS* JARM validation requires client_secret")
+    }
+    min_secret_bytes <- min_hmac_key_bytes(signed_response_alg)
+    if (nchar(self@client_secret, type = "bytes") < min_secret_bytes) {
+      return(paste0(
+        "OAuthClient: jarm_signed_response_alg '",
+        signed_response_alg,
+        "' requires client_secret >= ",
+        min_secret_bytes,
+        " bytes"
+      ))
+    }
+  }
 
   if (!(arm %in% c("parameters", request_object_modes))) {
     return(
       paste(
-        "OAuthClient: authorization_request_mode must be one of 'parameters',",
+        "OAuthClient: request_object_mode must be one of 'parameters',",
         "'request', or 'request_uri'"
       )
     )
@@ -1186,7 +2227,7 @@ oauth_client_validate <- function(self) {
       paste(
         "OAuthClient: provider discovery metadata says request parameter transport is not supported;",
         paste(
-          "authorization_request_mode = 'request' cannot be used unless",
+          "request_object_mode = 'request' cannot be used unless",
           "PAR is configured"
         )
       )
@@ -1199,31 +2240,29 @@ oauth_client_validate <- function(self) {
     return(
       paste(
         "OAuthClient: provider discovery metadata says request_uri parameter",
-        "transport is not supported; authorization_request_mode =",
+        "transport is not supported; request_object_mode =",
         "'request_uri' cannot be used"
       )
     )
   }
   if (
     !(arm %in% request_object_modes) &&
-      isTRUE(self@provider@require_signed_request_object)
+      isTRUE(self@provider@signed_request_object_required)
   ) {
     return(
       paste(
         "OAuthClient: provider requires signed request objects;",
-        "set authorization_request_mode = 'request' or 'request_uri'"
+        "set request_object_mode = 'request' or 'request_uri'"
       )
     )
   }
 
-  provider_has_issuer <- is_valid_string(
-    self@provider@issuer %||% NA_character_
-  )
+  provider_is_oidc <- provider_uses_oidc(self@provider)
   par_configured <- is_valid_string(self@provider@par_url %||% NA_character_)
   front_channel_mode <-
     self@provider@authorization_request_front_channel_mode %||% "compat"
   if (
-    isTRUE(provider_has_issuer) &&
+    isTRUE(provider_is_oidc) &&
       identical(front_channel_mode, "minimal") &&
       (identical(arm, "request_uri") ||
         (identical(arm, "request") && !isTRUE(par_configured)))
@@ -1237,27 +2276,27 @@ oauth_client_validate <- function(self) {
     )
   }
 
-  arsa <- self@authorization_request_signing_alg %||% NA_character_
+  arsa <- self@request_object_signing_alg %||% NA_character_
   if (!is.character(arsa) || length(arsa) != 1L) {
     return(
-      "OAuthClient: authorization_request_signing_alg must be a scalar character string (or NULL/NA to omit)"
+      "OAuthClient: request_object_signing_alg must be a scalar character string (or NULL/NA to omit)"
     )
   }
   if (!is.na(arsa) && !nzchar(arsa)) {
     return(
-      "OAuthClient: authorization_request_signing_alg must be non-empty when provided (use NULL or NA to omit)"
+      "OAuthClient: request_object_signing_alg must be non-empty when provided (use NULL or NA to omit)"
     )
   }
 
-  ara <- self@authorization_request_audience %||% NA_character_
+  ara <- self@request_object_audience %||% NA_character_
   if (!is.character(ara) || length(ara) != 1L) {
     return(
-      "OAuthClient: authorization_request_audience must be a scalar character string (or NULL/NA to omit)"
+      "OAuthClient: request_object_audience must be a scalar character string (or NULL/NA to omit)"
     )
   }
   if (!is.na(ara) && !nzchar(ara)) {
     return(
-      "OAuthClient: authorization_request_audience must be non-empty when provided (use NULL or NA to omit)"
+      "OAuthClient: request_object_audience must be non-empty when provided (use NULL or NA to omit)"
     )
   }
   if (
@@ -1268,17 +2307,17 @@ oauth_client_validate <- function(self) {
   ) {
     return(
       paste(
-        "OAuthClient: authorization_request_mode = 'request' or 'request_uri' requires either",
-        "provider issuer or authorization_request_audience so Request Objects stay audience-bound"
+        "OAuthClient: request_object_mode = 'request' or 'request_uri' requires either",
+        "provider issuer or request_object_audience so Request Objects stay audience-bound"
       )
     )
   }
 
-  area <- self@authorization_request_encryption_alg %||% NA_character_
+  area <- self@request_object_encryption_alg %||% NA_character_
   if (!is.character(area) || length(area) != 1L) {
     return(
       paste(
-        "OAuthClient: authorization_request_encryption_alg must be a scalar",
+        "OAuthClient: request_object_encryption_alg must be a scalar",
         "character string (or NULL/NA to omit)"
       )
     )
@@ -1286,17 +2325,17 @@ oauth_client_validate <- function(self) {
   if (!is.na(area) && !nzchar(area)) {
     return(
       paste(
-        "OAuthClient: authorization_request_encryption_alg must be non-empty",
+        "OAuthClient: request_object_encryption_alg must be non-empty",
         "when provided (use NULL or NA to omit)"
       )
     )
   }
 
-  arec <- self@authorization_request_encryption_enc %||% NA_character_
+  arec <- self@request_object_encryption_enc %||% NA_character_
   if (!is.character(arec) || length(arec) != 1L) {
     return(
       paste(
-        "OAuthClient: authorization_request_encryption_enc must be a scalar",
+        "OAuthClient: request_object_encryption_enc must be a scalar",
         "character string (or NULL/NA to omit)"
       )
     )
@@ -1304,17 +2343,17 @@ oauth_client_validate <- function(self) {
   if (!is.na(arec) && !nzchar(arec)) {
     return(
       paste(
-        "OAuthClient: authorization_request_encryption_enc must be non-empty",
+        "OAuthClient: request_object_encryption_enc must be non-empty",
         "when provided (use NULL or NA to omit)"
       )
     )
   }
 
-  arek <- self@authorization_request_encryption_kid %||% NA_character_
+  arek <- self@request_object_encryption_kid %||% NA_character_
   if (!is.character(arek) || length(arek) != 1L) {
     return(
       paste(
-        "OAuthClient: authorization_request_encryption_kid must be a scalar",
+        "OAuthClient: request_object_encryption_kid must be a scalar",
         "character string (or NULL/NA to omit)"
       )
     )
@@ -1322,28 +2361,28 @@ oauth_client_validate <- function(self) {
   if (!is.na(arek) && !nzchar(arek)) {
     return(
       paste(
-        "OAuthClient: authorization_request_encryption_kid must be non-empty",
+        "OAuthClient: request_object_encryption_kid must be non-empty",
         "when provided (use NULL or NA to omit)"
       )
     )
   }
 
-  arttl <- self@authorization_request_ttl %||% NA_real_
+  arttl <- self@request_object_ttl %||% NA_real_
   if (!(is.numeric(arttl) && length(arttl) == 1L && is.finite(arttl))) {
     return(
       paste(
-        "OAuthClient: authorization_request_ttl must be a single finite number",
+        "OAuthClient: request_object_ttl must be a single finite number",
         "of seconds"
       )
     )
   }
   if (arttl <= 0) {
     return(
-      "OAuthClient: authorization_request_ttl must be greater than 0 seconds"
+      "OAuthClient: request_object_ttl must be greater than 0 seconds"
     )
   }
 
-  arns <- self@authorization_request_nbf_skew %||% NA_real_
+  arns <- self@request_object_nbf_skew %||% NA_real_
   if (
     !(is.numeric(arns) &&
       length(arns) == 1L &&
@@ -1351,7 +2390,7 @@ oauth_client_validate <- function(self) {
   ) {
     return(
       paste(
-        "OAuthClient: authorization_request_nbf_skew must be NULL/NA or a",
+        "OAuthClient: request_object_nbf_skew must be NULL/NA or a",
         "single finite number of seconds"
       )
     )
@@ -1359,7 +2398,7 @@ oauth_client_validate <- function(self) {
   if (!is.na(arns) && arns < 0) {
     return(
       paste(
-        "OAuthClient: authorization_request_nbf_skew must be greater than or",
+        "OAuthClient: request_object_nbf_skew must be greater than or",
         "equal to 0 seconds"
       )
     )
@@ -1369,29 +2408,32 @@ oauth_client_validate <- function(self) {
     allowed_hmac <- c("HS256", "HS384", "HS512")
     allowed_asym <- c(
       "RS256",
+      "RS384",
       "ES256",
       "ES384",
-      "ES512"
+      "ES512",
+      "Ed25519",
+      "EdDSA"
     )
     alg <- canonicalize_jws_alg(arsa)
-    has_private_key <- !is.null(self@client_private_key)
+    has_private_key <- !is.null(self@client_assertion_private_key)
     has_secret <- is_valid_string(self@client_secret)
 
     if (nzchar(alg) && identical(toupper(alg), "NONE")) {
       return(
-        "OAuthClient: authorization_request_signing_alg = 'none' is not supported"
+        "OAuthClient: request_object_signing_alg = 'none' is not supported"
       )
     }
 
     if (!nzchar(alg)) {
       if (isTRUE(has_private_key)) {
         key0 <- try(
-          normalize_private_key_input(self@client_private_key),
+          normalize_private_key_input(self@client_assertion_private_key),
           silent = TRUE
         )
         if (inherits(key0, "try-error")) {
           return(
-            "OAuthClient: client_private_key could not be parsed for authorization_request_signing_alg validation"
+            "OAuthClient: client_assertion_private_key could not be parsed for request_object_signing_alg validation"
           )
         }
 
@@ -1402,16 +2444,16 @@ oauth_client_validate <- function(self) {
         if (inherits(inferred_alg, "try-error")) {
           return(paste(
             "OAuthClient: could not determine a compatible default",
-            "authorization_request_signing_alg from client_private_key",
-            "(outbound signed authorization requests currently support RSA and ECDSA private keys only)"
+            "request_object_signing_alg from client_assertion_private_key",
+            "(outbound signed authorization requests currently support RSA, ECDSA, and Ed25519 private keys only)"
           ))
         }
       }
       if (!isTRUE(has_private_key) && !isTRUE(has_secret)) {
         return(
           paste(
-            "OAuthClient: authorization_request_mode = 'request' or",
-            "'request_uri' requires client_private_key or client_secret"
+            "OAuthClient: request_object_mode = 'request' or",
+            "'request_uri' requires client_assertion_private_key or client_secret"
           )
         )
       }
@@ -1422,22 +2464,22 @@ oauth_client_validate <- function(self) {
       ) {
         return(
           paste(
-            "OAuthClient: authorization_request_mode = 'request' or",
+            "OAuthClient: request_object_mode = 'request' or",
             "'request_uri' requires client_secret >= 32 bytes when no",
-            "client_private_key is configured"
+            "client_assertion_private_key is configured"
           )
         )
       }
     } else if (alg %in% allowed_hmac) {
       if (!isTRUE(has_secret)) {
         return(
-          "OAuthClient: HS* authorization_request_signing_alg requires client_secret"
+          "OAuthClient: HS* request_object_signing_alg requires client_secret"
         )
       }
       min_secret_bytes <- min_hmac_key_bytes(alg)
       if (nchar(self@client_secret, type = "bytes") < min_secret_bytes) {
         return(paste0(
-          "OAuthClient: authorization_request_signing_alg '",
+          "OAuthClient: request_object_signing_alg '",
           alg,
           "' requires client_secret >= ",
           min_secret_bytes,
@@ -1447,31 +2489,31 @@ oauth_client_validate <- function(self) {
     } else if (alg %in% allowed_asym) {
       if (!isTRUE(has_private_key)) {
         return(
-          "OAuthClient: asymmetric authorization_request_signing_alg requires client_private_key"
+          "OAuthClient: asymmetric request_object_signing_alg requires client_assertion_private_key"
         )
       }
 
       key0 <- try(
-        normalize_private_key_input(self@client_private_key),
+        normalize_private_key_input(self@client_assertion_private_key),
         silent = TRUE
       )
       if (inherits(key0, "try-error")) {
         return(
-          "OAuthClient: client_private_key could not be parsed for authorization_request_signing_alg validation"
+          "OAuthClient: client_assertion_private_key could not be parsed for request_object_signing_alg validation"
         )
       }
       if (
         !private_key_can_sign_jws_alg(key0, alg, typ = "oauth-authz-req+jwt")
       ) {
         return(paste0(
-          "OAuthClient: authorization_request_signing_alg '",
+          "OAuthClient: request_object_signing_alg '",
           alg,
           "' is incompatible with the provided private key"
         ))
       }
     } else {
       return(paste0(
-        "OAuthClient: authorization_request_signing_alg '",
+        "OAuthClient: request_object_signing_alg '",
         alg,
         "' is incompatible with signed authorization requests"
       ))
@@ -1487,7 +2529,9 @@ oauth_client_validate <- function(self) {
       } else if (isTRUE(has_private_key)) {
         inferred_alg <- try(
           {
-            key0 <- normalize_private_key_input(self@client_private_key)
+            key0 <- normalize_private_key_input(
+              self@client_assertion_private_key
+            )
             choose_default_alg_for_private_key(key0)
           },
           silent = TRUE
@@ -1496,7 +2540,7 @@ oauth_client_validate <- function(self) {
           return(
             paste(
               "OAuthClient: could not determine a compatible default",
-              "authorization_request_signing_alg from client_private_key"
+              "request_object_signing_alg from client_assertion_private_key"
             )
           )
         }
@@ -1507,7 +2551,7 @@ oauth_client_validate <- function(self) {
 
       if (!(toupper(resolved_alg) %in% provider_request_algs)) {
         return(paste0(
-          "OAuthClient: authorization_request_signing_alg '",
+          "OAuthClient: request_object_signing_alg '",
           resolved_alg,
           "' is not supported by provider request_object_signing_alg_values_supported"
         ))
@@ -1523,15 +2567,15 @@ oauth_client_validate <- function(self) {
     return(
       paste(
         "OAuthClient: Request Object encryption requires",
-        "authorization_request_mode = 'request' or 'request_uri'"
+        "request_object_mode = 'request' or 'request_uri'"
       )
     )
   }
   if (nzchar(encryption_alg) != nzchar(encryption_enc)) {
     return(
       paste(
-        "OAuthClient: authorization_request_encryption_alg and",
-        "authorization_request_encryption_enc must both be provided"
+        "OAuthClient: request_object_encryption_alg and",
+        "request_object_encryption_enc must both be provided"
       )
     )
   }
@@ -1545,14 +2589,14 @@ oauth_client_validate <- function(self) {
 
     if (!(encryption_alg %in% supported_encryption_algs)) {
       return(paste0(
-        "OAuthClient: authorization_request_encryption_alg '",
+        "OAuthClient: request_object_encryption_alg '",
         encryption_alg,
         "' is not supported for outbound Request Object encryption"
       ))
     }
     if (!(encryption_enc %in% supported_encryption_encs)) {
       return(paste0(
-        "OAuthClient: authorization_request_encryption_enc '",
+        "OAuthClient: request_object_encryption_enc '",
         encryption_enc,
         "' is not supported for outbound Request Object encryption"
       ))
@@ -1567,7 +2611,7 @@ oauth_client_validate <- function(self) {
         !(toupper(encryption_alg) %in% provider_encryption_algs)
     ) {
       return(paste0(
-        "OAuthClient: authorization_request_encryption_alg '",
+        "OAuthClient: request_object_encryption_alg '",
         encryption_alg,
         "' is not supported by provider request_object_encryption_alg_values_supported"
       ))
@@ -1582,7 +2626,7 @@ oauth_client_validate <- function(self) {
         !(toupper(encryption_enc) %in% provider_encryption_encs)
     ) {
       return(paste0(
-        "OAuthClient: authorization_request_encryption_enc '",
+        "OAuthClient: request_object_encryption_enc '",
         encryption_enc,
         "' is not supported by provider request_object_encryption_enc_values_supported"
       ))
@@ -1651,9 +2695,12 @@ oauth_client_validate <- function(self) {
     resolved_dpop_alg <- dpop_alg
     allowed_dpop_algs <- c(
       "RS256",
+      "RS384",
       "ES256",
       "ES384",
-      "ES512"
+      "ES512",
+      "Ed25519",
+      "EdDSA"
     )
     if (!(dpop_alg %in% allowed_dpop_algs)) {
       return(paste0(
@@ -1710,7 +2757,7 @@ oauth_client_validate <- function(self) {
       return(paste(
         "OAuthClient: could not determine a compatible default",
         "dpop_signing_alg from dpop_private_key",
-        "(outbound DPoP proofs currently support RSA and ECDSA private keys only)"
+        "(outbound DPoP proofs currently support RSA, ECDSA, and Ed25519 private keys only)"
       ))
     }
     resolved_dpop_alg <- toupper(as.character(inferred_alg))
@@ -1746,93 +2793,133 @@ oauth_client_validate <- function(self) {
     )
   }
   if (
-    !(is.logical(self@mtls_request_certificate_bound_access_tokens) &&
-      length(self@mtls_request_certificate_bound_access_tokens) == 1L &&
-      !is.na(self@mtls_request_certificate_bound_access_tokens))
+    !(is.logical(self@dpop_require_observed_cnf) &&
+      length(self@dpop_require_observed_cnf) == 1L &&
+      !is.na(self@dpop_require_observed_cnf))
+  ) {
+    return(
+      paste(
+        "OAuthClient: dpop_require_observed_cnf",
+        "must be a single non-NA logical"
+      )
+    )
+  }
+  if (
+    isTRUE(self@dpop_require_observed_cnf) && is.null(self@dpop_private_key)
+  ) {
+    return(
+      paste(
+        "OAuthClient: dpop_require_observed_cnf = TRUE",
+        "requires dpop_private_key"
+      )
+    )
+  }
+  if (
+    !(is.logical(self@mtls_certificate_bound_access_tokens) &&
+      length(self@mtls_certificate_bound_access_tokens) == 1L &&
+      !is.na(self@mtls_certificate_bound_access_tokens))
   ) {
     return(paste(
-      "OAuthClient: mtls_request_certificate_bound_access_tokens",
+      "OAuthClient: mtls_certificate_bound_access_tokens",
       "must be a single non-NA logical"
     ))
   }
 
-  tls_client_cert_file <- self@tls_client_cert_file %||% NA_character_
-  tls_client_key_file <- self@tls_client_key_file %||% NA_character_
-  tls_client_ca_file <- self@tls_client_ca_file %||% NA_character_
-  tls_client_key_password <- self@tls_client_key_password %||% NA_character_
+  if (
+    !(is.logical(self@mtls_require_observed_cnf) &&
+      length(self@mtls_require_observed_cnf) == 1L &&
+      !is.na(self@mtls_require_observed_cnf))
+  ) {
+    return(paste(
+      "OAuthClient: mtls_require_observed_cnf",
+      "must be a single non-NA logical"
+    ))
+  }
 
-  has_tls_client_cert <- is_valid_string(tls_client_cert_file)
-  has_tls_client_key <- is_valid_string(tls_client_key_file)
+  mtls_client_cert_file <- self@mtls_client_cert_file %||% NA_character_
+  mtls_client_key_file <- self@mtls_client_key_file %||% NA_character_
+  mtls_client_ca_file <- self@mtls_client_ca_file %||% NA_character_
+  mtls_client_key_password <- self@mtls_client_key_password %||% NA_character_
+
+  has_mtls_client_cert <- is_valid_string(mtls_client_cert_file)
+  has_mtls_client_key <- is_valid_string(mtls_client_key_file)
   requires_tls_client_cert <- tok_style %in%
     c(
       "tls_client_auth",
       "self_signed_tls_client_auth"
     )
   requests_certificate_bound_tokens <- isTRUE(
-    self@mtls_request_certificate_bound_access_tokens
+    self@mtls_certificate_bound_access_tokens
   )
 
   if (
     isTRUE(requests_certificate_bound_tokens) &&
-      !(has_tls_client_cert && has_tls_client_key)
+      !(has_mtls_client_cert && has_mtls_client_key)
   ) {
     return(paste(
-      "OAuthClient: mtls_request_certificate_bound_access_tokens = TRUE",
-      "requires tls_client_cert_file and tls_client_key_file"
+      "OAuthClient: mtls_certificate_bound_access_tokens = TRUE",
+      "requires mtls_client_cert_file and mtls_client_key_file"
     ))
   }
   if (
     isTRUE(requests_certificate_bound_tokens) &&
-      !isTRUE(self@provider@tls_client_certificate_bound_access_tokens)
+      !isTRUE(self@provider@mtls_client_certificate_bound_access_tokens)
   ) {
     return(paste(
-      "OAuthClient: mtls_request_certificate_bound_access_tokens = TRUE",
-      "requires provider@tls_client_certificate_bound_access_tokens = TRUE"
+      "OAuthClient: mtls_certificate_bound_access_tokens = TRUE",
+      "requires provider@mtls_client_certificate_bound_access_tokens = TRUE"
     ))
   }
 
   if (
     isTRUE(requires_tls_client_cert) &&
-      !(has_tls_client_cert && has_tls_client_key)
+      !(has_mtls_client_cert && has_mtls_client_key)
   ) {
     return(paste0(
-      "OAuthClient: tls_client_cert_file and tls_client_key_file are required when token_auth_style = '",
+      "OAuthClient: mtls_client_cert_file and mtls_client_key_file are required when token_auth_style = '",
       tok_style,
       "'"
     ))
   }
-  if (xor(has_tls_client_cert, has_tls_client_key)) {
+  if (xor(has_mtls_client_cert, has_mtls_client_key)) {
     return(
       paste(
-        "OAuthClient: tls_client_cert_file and tls_client_key_file",
+        "OAuthClient: mtls_client_cert_file and mtls_client_key_file",
         "must be supplied together"
       )
     )
   }
 
   for (field in list(
-    list(name = "tls_client_cert_file", value = tls_client_cert_file),
-    list(name = "tls_client_key_file", value = tls_client_key_file),
-    list(name = "tls_client_ca_file", value = tls_client_ca_file)
+    list(name = "mtls_client_cert_file", value = mtls_client_cert_file),
+    list(name = "mtls_client_key_file", value = mtls_client_key_file),
+    list(name = "mtls_client_ca_file", value = mtls_client_ca_file)
   )) {
-    if (is_valid_string(field$value) && !file.exists(field$value)) {
+    if (
+      is_valid_string(field[["value"]]) &&
+        !file.exists(field[["value"]])
+    ) {
       return(
-        paste0("OAuthClient: ", field$name, " must point to an existing file")
+        paste0(
+          "OAuthClient: ",
+          field[["name"]],
+          " must point to an existing file"
+        )
       )
     }
   }
 
   if (
-    !is.character(tls_client_key_password) ||
-      length(tls_client_key_password) != 1L
+    !is.character(mtls_client_key_password) ||
+      length(mtls_client_key_password) != 1L
   ) {
     return(
-      "OAuthClient: tls_client_key_password must be a scalar character string (or NULL/NA to omit)"
+      "OAuthClient: mtls_client_key_password must be a scalar character string (or NULL/NA to omit)"
     )
   }
-  if (!is.na(tls_client_key_password) && !nzchar(tls_client_key_password)) {
+  if (!is.na(mtls_client_key_password) && !nzchar(mtls_client_key_password)) {
     return(
-      "OAuthClient: tls_client_key_password must be non-empty when provided (use NULL or NA to omit)"
+      "OAuthClient: mtls_client_key_password must be non-empty when provided (use NULL or NA to omit)"
     )
   }
 
@@ -1847,13 +2934,12 @@ oauth_client_validate <- function(self) {
     return("OAuthClient: state_entropy must be a finite numeric value")
   }
   # Require integer-like (avoid fractional lengths causing truncation surprises)
-  if (!isTRUE(all.equal(ent, as.integer(ent)))) {
+  if (!isTRUE(all.equal(ent, trunc(ent)))) {
     return(
       "OAuthClient: state_entropy must be an integer number of characters"
     )
   }
-  ent <- as.integer(ent)
-  if (ent < 22L || ent > 128L) {
+  if (ent < 22 || ent > 128) {
     return("OAuthClient: state_entropy must be between 22 and 128")
   }
 
@@ -1867,13 +2953,13 @@ oauth_client_validate <- function(self) {
     )
   }
 
-  # Duck-type state_store: require $get, $set, and $remove; $info optional
-  has_get <- !is.null(self@state_store$get) &&
-    is.function(self@state_store$get)
-  has_set <- !is.null(self@state_store$set) &&
-    is.function(self@state_store$set)
-  has_remove <- !is.null(self@state_store$remove) &&
-    is.function(self@state_store$remove)
+  # Duck-type state_store: require [["get"]], [["set"]], and [["remove"]]; [["info"]] optional
+  has_get <- !is.null(self@state_store[["get"]]) &&
+    is.function(self@state_store[["get"]])
+  has_set <- !is.null(self@state_store[["set"]]) &&
+    is.function(self@state_store[["set"]])
+  has_remove <- !is.null(self@state_store[["remove"]]) &&
+    is.function(self@state_store[["remove"]])
   if (!isTRUE(has_get && has_set && has_remove)) {
     return(paste(
       "OAuthClient: state_store must implement cachem methods:",
@@ -1885,10 +2971,10 @@ oauth_client_validate <- function(self) {
   }
 
   # Robustness: verify method signatures/compatibility.
-  # - $get must accept a named `missing` argument (or `...`).
+  # - [["get"]] must accept a named `missing` argument (or `...`).
   #   Validated via formals inspection (no probe-call) to avoid triggering
   #   side-effects in stateful backends or test wrappers.
-  get_formals <- try(formals(self@state_store$get), silent = TRUE)
+  get_formals <- try(formals(self@state_store[["get"]]), silent = TRUE)
   get_args <- if (!inherits(get_formals, "try-error")) {
     names(get_formals)
   } else {
@@ -1900,9 +2986,9 @@ oauth_client_validate <- function(self) {
     )
   }
 
-  # - $set must accept (key, value) either explicitly or via "..."
+  # - [["set"]] must accept (key, value) either explicitly or via "..."
   #   (do not probe-call to avoid side-effects)
-  set_formals <- try(formals(self@state_store$set), silent = TRUE)
+  set_formals <- try(formals(self@state_store[["set"]]), silent = TRUE)
   set_args <- if (!inherits(set_formals, "try-error")) {
     names(set_formals)
   } else {
@@ -1914,8 +3000,8 @@ oauth_client_validate <- function(self) {
     return("OAuthClient: state_store$set must accept (key, value)")
   }
 
-  # - $remove must accept a key (explicitly or via "...")
-  rm_formals <- try(formals(self@state_store$remove), silent = TRUE)
+  # - [["remove"]] must accept a key (explicitly or via "...")
+  rm_formals <- try(formals(self@state_store[["remove"]]), silent = TRUE)
   rm_args <- if (!inherits(rm_formals, "try-error")) {
     names(rm_formals)
   } else {
@@ -1926,14 +3012,14 @@ oauth_client_validate <- function(self) {
     return("OAuthClient: state_store$remove must accept (key)")
   }
 
-  # Optional $take for atomic state consumption (preferred for shared stores)
+  # Optional [["take"]] for atomic state consumption (preferred for shared stores)
   # Validated via formals inspection (no probe-call) to avoid triggering
   # side-effects in stateful backends or test wrappers.
   if (
-    !is.null(self@state_store$take) &&
-      is.function(self@state_store$take)
+    !is.null(self@state_store[["take"]]) &&
+      is.function(self@state_store[["take"]])
   ) {
-    take_formals <- try(formals(self@state_store$take), silent = TRUE)
+    take_formals <- try(formals(self@state_store[["take"]]), silent = TRUE)
     take_args <- if (!inherits(take_formals, "try-error")) {
       names(take_formals)
     } else {
@@ -1975,6 +3061,11 @@ oauth_client_validate <- function(self) {
           "OAuthClient: claims provided as character must be valid JSON"
         )
       }
+      if (!grepl("^\\s*\\{", self@claims, perl = TRUE)) {
+        return(
+          "OAuthClient: claims provided as character must be a JSON object"
+        )
+      }
     } else {
       return(
         "OAuthClient: claims must be NULL, a list, or a character string"
@@ -1983,6 +3074,18 @@ oauth_client_validate <- function(self) {
   }
 
   # Validate scope_validation
+  scope_policy_error <- validate_client_scope_policy(self@scope_policy)
+  if (!is.null(scope_policy_error)) {
+    return(scope_policy_error)
+  }
+  connection_error <- validate_client_resources(self)
+  if (!is.null(connection_error)) {
+    return(connection_error)
+  }
+  smart_error <- smart_validate_client(self)
+  if (!is.null(smart_error)) {
+    return(smart_error)
+  }
   if (
     !is_valid_string(self@scope_validation) ||
       !self@scope_validation %in% c("strict", "warn", "none")
@@ -2022,26 +3125,26 @@ oauth_client_validate <- function(self) {
     }
   }
 
-  # Validate userinfo_jwt_required_temporal_claims
-  ujrtc <- self@userinfo_jwt_required_temporal_claims
+  # Validate userinfo_jwt_required_time_claims
+  ujrtc <- self@userinfo_jwt_required_time_claims
   if (!is.character(ujrtc)) {
     return(
       paste(
-        "OAuthClient: userinfo_jwt_required_temporal_claims must be a character vector"
+        "OAuthClient: userinfo_jwt_required_time_claims must be a character vector"
       )
     )
   }
   if (anyNA(ujrtc)) {
     return(
       paste(
-        "OAuthClient: userinfo_jwt_required_temporal_claims must not contain NA"
+        "OAuthClient: userinfo_jwt_required_time_claims must not contain NA"
       )
     )
   }
   if (length(ujrtc) > 0 && !all(nzchar(ujrtc))) {
     return(
       paste(
-        "OAuthClient: userinfo_jwt_required_temporal_claims must not contain empty strings"
+        "OAuthClient: userinfo_jwt_required_time_claims must not contain empty strings"
       )
     )
   }
@@ -2051,10 +3154,21 @@ oauth_client_validate <- function(self) {
   )
   if (length(invalid_userinfo_temporal_claims) > 0) {
     return(paste0(
-      "OAuthClient: invalid userinfo_jwt_required_temporal_claims value(s): ",
+      "OAuthClient: invalid userinfo_jwt_required_time_claims value(s): ",
       paste(invalid_userinfo_temporal_claims, collapse = ", "),
       "; allowed values are: exp, iat, nbf"
     ))
+  }
+
+  audiences <- self@trusted_id_token_audiences
+  if (
+    !is.character(audiences) ||
+      anyNA(audiences) ||
+      !all(nzchar(trimws(audiences)))
+  ) {
+    return(
+      "OAuthClient: trusted_id_token_audiences must be a character vector without NA or empty values"
+    )
   }
 
   # Validate required_acr_values
@@ -2172,7 +3286,7 @@ warn_about_oauth_client_created_in_shiny <- function(state_key_missing = NA) {
     bullets <- c(
       bullets,
       "x" = paste0(
-        "Because you did not supply {.code state_key}, it will be auto-generated for this session ",
+        "Because you did not supply `state_key`, it will be auto-generated for this session ",
         "and callbacks in the post-redirect session will be unable to decrypt/validate state."
       )
     )
@@ -2180,8 +3294,8 @@ warn_about_oauth_client_created_in_shiny <- function(state_key_missing = NA) {
     bullets <- c(
       bullets,
       "i" = paste0(
-        "Construct your {.code OAuthClient} once outside server logic (e.g., in global scope) and reuse it.",
-        " If you must create clients dynamically, ensure {.code state_key} is stable across sessions and (for multi-worker deployments) shared across workers."
+        "Construct your `OAuthClient` once outside server logic (e.g., in global scope) and reuse it.",
+        " If you must create clients dynamically, ensure `state_key` is stable across sessions and (for multi-worker deployments) shared across workers."
       )
     )
   }

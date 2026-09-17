@@ -17,7 +17,7 @@ test_that("get_userinfo rejects JSON response missing sub for OIDC provider", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(
@@ -35,10 +35,13 @@ test_that("get_userinfo rejects JSON response missing sub for OIDC provider", {
     regexp = "sub.*claim"
   )
 
-  ui_events <- Filter(function(e) identical(e$type, "audit_userinfo"), events)
+  ui_events <- Filter(
+    function(e) identical(e[["type"]], "audit_userinfo"),
+    events
+  )
   expect_true(any(vapply(
     ui_events,
-    function(e) identical(e$status, "userinfo_missing_sub"),
+    function(e) identical(e[["status"]], "userinfo_missing_sub"),
     logical(1)
   )))
 })
@@ -51,7 +54,7 @@ test_that("get_userinfo rejects JSON response with empty sub for OIDC provider",
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(
@@ -78,7 +81,7 @@ test_that("get_userinfo accepts JSON response with sub for OIDC provider", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(
@@ -91,7 +94,7 @@ test_that("get_userinfo accepts JSON response with sub for OIDC provider", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$sub, "user-123")
+  expect_equal(result[["sub"]], "user-123")
 })
 
 test_that("get_userinfo rejects direct OAuthToken calls with mismatched sub", {
@@ -118,7 +121,7 @@ test_that("get_userinfo rejects direct OAuthToken calls with mismatched sub", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(
@@ -136,10 +139,13 @@ test_that("get_userinfo rejects direct OAuthToken calls with mismatched sub", {
     regexp = "does not match"
   )
 
-  ui_events <- Filter(function(e) identical(e$type, "audit_userinfo"), events)
+  ui_events <- Filter(
+    function(e) identical(e[["type"]], "audit_userinfo"),
+    events
+  )
   statuses <- vapply(
     ui_events,
-    function(e) e$status %||% NA_character_,
+    function(e) e[["status"]] %||% NA_character_,
     character(1)
   )
   expect_false(any(statuses == "ok"))
@@ -154,7 +160,7 @@ test_that("get_userinfo fails closed for direct raw-token calls when required", 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(
@@ -173,15 +179,16 @@ test_that("get_userinfo fails closed for direct raw-token calls when required", 
   )
 })
 
-test_that("get_userinfo allows missing sub for non-OIDC provider (no issuer)", {
+test_that("get_userinfo allows missing sub when issuer-driven OIDC is off", {
   cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
   cli@provider@userinfo_url <- "https://example.com/userinfo"
-  # issuer is already NA_character_ from make_test_client defaults
+  cli@provider@issuer <- "https://example.com"
+  cli@provider@infer_oidc_from_issuer <- FALSE
 
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/json"),
         body = charToRaw(jsonlite::toJSON(
@@ -194,7 +201,7 @@ test_that("get_userinfo allows missing sub for non-OIDC provider (no issuer)", {
   )
 
   result <- get_userinfo(cli, token = "access-token")
-  expect_equal(result$login, "octocat")
+  expect_equal(result[["login"]], "octocat")
 })
 
 # --- JWT path: validate_signed_userinfo_claims() sub check --------------------
@@ -245,10 +252,10 @@ test_that("validate_signed_userinfo_claims accepts valid sub", {
 
 test_that("get_userinfo rejects signed JWT missing sub for OIDC provider", {
   key <- openssl::rsa_keygen(2048)
-  jwk_json <- jose::write_jwk(key$pubkey)
+  jwk_json <- write_test_jwk(key[["pubkey"]])
   jwk <- jsonlite::fromJSON(jwk_json, simplifyVector = TRUE)
-  jwk$kid <- "test-kid-sub"
-  jwk$use <- "sig"
+  jwk[["kid"]] <- "test-kid-sub"
+  jwk[["use"]] <- "sig"
   jwks <- list(keys = list(jwk))
 
   # Claims without sub
@@ -275,7 +282,7 @@ test_that("get_userinfo rejects signed JWT missing sub for OIDC provider", {
   testthat::local_mocked_bindings(
     req_with_retry = function(req, ...) {
       httr2::response(
-        url = as.character(req$url),
+        url = as.character(req[["url"]]),
         status = 200,
         headers = list("content-type" = "application/jwt"),
         body = charToRaw(jwt_body)
@@ -291,10 +298,13 @@ test_that("get_userinfo rejects signed JWT missing sub for OIDC provider", {
     regexp = "sub.*claim"
   )
 
-  ui_events <- Filter(function(e) identical(e$type, "audit_userinfo"), events)
+  ui_events <- Filter(
+    function(e) identical(e[["type"]], "audit_userinfo"),
+    events
+  )
   expect_true(any(vapply(
     ui_events,
-    function(e) identical(e$status, "userinfo_jwt_missing_sub"),
+    function(e) identical(e[["status"]], "userinfo_jwt_missing_sub"),
     logical(1)
   )))
 })

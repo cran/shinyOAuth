@@ -18,19 +18,63 @@
 #' @noRd
 parse_jwt_payload <- function(jwt) {
   parts <- jwt_compact_parts(jwt)
-  payload_text <- strict_decode_jwt_json_text(parts$payload_raw, "payload")
+  payload_text <- strict_decode_jwt_json_text(
+    parts[["payload_raw"]],
+    "payload"
+  )
   reject_duplicate_json_object_members(payload_text, "JWT payload")
   assert_json_text_is_object(payload_text, "JWT payload")
   # Normalize JSON parse failures to a consistent parse error class
   tryCatch(
-    jsonlite::fromJSON(payload_text, simplifyVector = TRUE),
+    jsonlite::fromJSON(payload_text, simplifyVector = FALSE),
     error = function(e) {
-      err_parse(c(
+      err_parse(
         "Failed to parse JWT payload JSON",
-        "i" = conditionMessage(e)
-      ))
+        context = safe_parse_failure_context(
+          payload_text,
+          "jwt_payload_json",
+          e
+        )
+      )
     }
   )
+}
+
+#' Normalize a JWT audience claim after parsing
+#'
+#' JWT payload parsing preserves JSON arrays as unnamed lists so one-element
+#' arrays cannot masquerade as scalar claims. Audience is one of the fields
+#' that explicitly permits either a string or an array of strings, so validators
+#' normalize that field only after checking every array element's type.
+#'
+#' @param value Parsed `aud` claim.
+#' @return A character vector, or `NULL` when the claim has an invalid type.
+#' @keywords internal
+#' @noRd
+normalize_jwt_audience <- function(value) {
+  if (is.character(value)) {
+    return(value)
+  }
+  if (
+    !is.list(value) ||
+      length(value) == 0L ||
+      !is.null(names(value))
+  ) {
+    return(NULL)
+  }
+
+  scalar_strings <- vapply(
+    value,
+    function(element) {
+      is.character(element) && length(element) == 1L && !is.na(element)
+    },
+    logical(1)
+  )
+  if (!all(scalar_strings)) {
+    return(NULL)
+  }
+
+  vapply(value, identity, character(1))
 }
 
 #' Internal: Parse JWT header (no validation)
@@ -43,17 +87,25 @@ parse_jwt_payload <- function(jwt) {
 #' @noRd
 parse_jwt_header <- function(jwt) {
   parts <- jwt_compact_parts(jwt)
-  header_text <- strict_decode_jwt_json_text(parts$header_raw, "header")
+  header_text <- strict_decode_jwt_json_text(
+    parts[["header_raw"]],
+    "header"
+  )
+  validate_jose_header_size(header_text, "JWT header")
   reject_duplicate_json_object_members(header_text, "JWT header")
   assert_json_text_is_object(header_text, "JWT header")
   # Normalize JSON parse failures to a consistent parse error class
   tryCatch(
     jsonlite::fromJSON(header_text, simplifyVector = FALSE),
     error = function(e) {
-      err_parse(c(
+      err_parse(
         "Failed to parse JWT header JSON",
-        "i" = conditionMessage(e)
-      ))
+        context = safe_parse_failure_context(
+          header_text,
+          "jwt_header_json",
+          e
+        )
+      )
     }
   )
 }
@@ -178,10 +230,14 @@ strict_decode_jwt_json_text <- function(segment_raw, field_name) {
   }
 
   text <- tryCatch(rawToChar(segment_raw), error = function(e) {
-    err_parse(c(
+    err_parse(
       paste0("Failed to decode JWT ", field_name, " JSON text"),
-      "i" = conditionMessage(e)
-    ))
+      context = safe_parse_failure_context(
+        NULL,
+        paste0("jwt_", field_name, "_text"),
+        e
+      )
+    )
   })
 
   if (!isTRUE(validUTF8(text))) {
@@ -305,13 +361,16 @@ parse_jwt_payload_or_null <- function(jwt) {
     return(NULL)
   }
 
-  if (any(parts$payload_raw == as.raw(0))) {
+  if (any(parts[["payload_raw"]] == as.raw(0))) {
     return(NULL)
   }
 
-  payload_text <- tryCatch(rawToChar(parts$payload_raw), error = function(...) {
-    NULL
-  })
+  payload_text <- tryCatch(
+    rawToChar(parts[["payload_raw"]]),
+    error = function(...) {
+      NULL
+    }
+  )
   if (
     !is_valid_string(payload_text) ||
       !isTRUE(validUTF8(payload_text)) ||
@@ -323,7 +382,14 @@ parse_jwt_payload_or_null <- function(jwt) {
   Encoding(payload_text) <- "UTF-8"
 
   payload <- tryCatch(
-    jsonlite::fromJSON(payload_text, simplifyVector = TRUE),
+    {
+      reject_duplicate_json_object_members(
+        payload_text,
+        "JWT payload",
+        on_error = function(message) stop(message)
+      )
+      jsonlite::fromJSON(payload_text, simplifyVector = TRUE)
+    },
     error = function(...) NULL
   )
   if (is.data.frame(payload)) {
@@ -447,6 +513,27 @@ jwt_validate_scalar_string_field <- function(
   value
 }
 
+#' Internal: read one JOSE header field by exact name
+#'
+#' Used by JOSE validators so near-match member names such as `algx` or `ctyx`
+#' cannot satisfy security-critical checks via R partial matching.
+#'
+#' @param header Parsed JOSE header list.
+#' @param field Exact member name to read.
+#' @return The exact member value, or `NULL` when absent.
+#' @keywords internal
+#' @noRd
+jwt_header_field_exact <- function(header, field) {
+  stopifnot(
+    is.list(header),
+    is.character(field),
+    length(field) == 1L,
+    !is.na(field)
+  )
+
+  header[[field]]
+}
+
 #' Internal: validate the JOSE crit header
 #'
 #' Used by `validate_jose_header_fields()` to normalize supported `crit`
@@ -495,18 +582,47 @@ jwt_validate_crit_field <- function(value, signal_error) {
   crit
 }
 
+#' Internal: validate the JOSE b64 header
+#'
+#' @param value Parsed `b64` header value.
+#' @param signal_error Function used to report validation failures.
+#' @return A scalar logical or `NULL`; otherwise signals through
+#'   `signal_error()`.
+#' @keywords internal
+#' @noRd
+jwt_validate_b64_field <- function(value, signal_error) {
+  if (is.null(value)) {
+    return(NULL)
+  }
+  if (!is.logical(value) || length(value) != 1L || is.na(value)) {
+    signal_error("JWT b64 header must be a single non-missing boolean")
+  }
+
+  value
+}
+
 #' Reject duplicate JSON object members
 #'
 #' Used before JWT header and payload JSON is parsed.
 #'
 #' @param json_text JSON text to inspect.
 #' @param label Human-readable label used in parse errors.
+#' @param max_depth Maximum permitted object/array nesting depth.
+#' @param on_error Error function; best-effort observers use a quiet local error.
+#' @param on_duplicate Optional internal callback receiving the duplicate name.
 #' @return Invisibly returns `NULL` on success. Otherwise this function raises a
 #'   parse error.
 #' @keywords internal
 #' @noRd
-reject_duplicate_json_object_members <- function(json_text, label) {
-  chars <- strsplit(enc2utf8(json_text), "", fixed = TRUE)[[1]]
+reject_duplicate_json_object_members <- function(
+  json_text,
+  label,
+  max_depth = 64L,
+  on_error = err_parse,
+  on_duplicate = NULL
+) {
+  json_text <- enc2utf8(json_text)
+  chars <- strsplit(json_text, "", fixed = TRUE)[[1]]
   if (!length(chars)) {
     return(invisible(NULL))
   }
@@ -519,22 +635,18 @@ reject_duplicate_json_object_members <- function(json_text, label) {
     ch <- chars[[index]]
 
     if (identical(ch, '"')) {
-      token <- character(0)
       index <- index + 1L
+      token_start <- index
       escaping <- FALSE
 
       while (index <= length(chars)) {
         ch_inner <- chars[[index]]
         if (isTRUE(escaping)) {
-          token <- c(token, ch_inner)
           escaping <- FALSE
         } else if (identical(ch_inner, "\\")) {
-          token <- c(token, ch_inner)
           escaping <- TRUE
         } else if (identical(ch_inner, '"')) {
           break
-        } else {
-          token <- c(token, ch_inner)
         }
         index <- index + 1L
       }
@@ -557,29 +669,73 @@ reject_duplicate_json_object_members <- function(json_text, label) {
           lookahead <= length(chars) &&
           identical(chars[[lookahead]], ":")
       ) {
-        key <- jwt_decode_json_string_token(paste(token, collapse = ""))
-        level <- length(container_stack)
-        seen <- seen_stack[[level]] %||% character(0)
-        if (key %in% seen) {
-          err_parse(paste0(label, " contains duplicate member name: ", key))
+        token_end <- index - 1L
+        token <- if (token_end < token_start) {
+          ""
+        } else {
+          substr(json_text, token_start, token_end)
         }
-        seen_stack[[level]] <- c(seen, key)
+        key <- jwt_decode_json_string_token(token)
+        level <- length(container_stack)
+        seen <- seen_stack[[level]]
+        key_id <- paste0(
+          "k:",
+          base64url_encode(charToRaw(enc2utf8(key)))
+        )
+        if (exists(key_id, envir = seen, inherits = FALSE)) {
+          if (is.function(on_duplicate)) {
+            on_duplicate(key)
+          }
+          on_error(protocol_diagnostic_message(
+            paste0(label, " contains duplicate member name"),
+            key
+          ))
+        }
+        assign(key_id, TRUE, envir = seen)
       }
     } else if (identical(ch, "{")) {
-      container_stack <- c(container_stack, "object")
-      seen_stack[[length(container_stack)]] <- character(0)
+      level <- length(container_stack) + 1L
+      if (level > max_depth) {
+        on_error(paste0(label, " exceeds the maximum JSON nesting depth"))
+      }
+      container_stack[[level]] <- "object"
+      seen_stack[level] <- list(new.env(hash = TRUE, parent = emptyenv()))
     } else if (identical(ch, "[")) {
-      container_stack <- c(container_stack, "array")
-      seen_stack[[length(container_stack)]] <- NULL
+      level <- length(container_stack) + 1L
+      if (level > max_depth) {
+        on_error(paste0(label, " exceeds the maximum JSON nesting depth"))
+      }
+      container_stack[[level]] <- "array"
+      seen_stack[level] <- list(NULL)
     } else if (identical(ch, "}") || identical(ch, "]")) {
       if (length(container_stack) > 0L) {
         last_index <- length(container_stack)
-        container_stack <- container_stack[-last_index]
-        seen_stack <- seen_stack[-last_index]
+        length(container_stack) <- last_index - 1L
+        length(seen_stack) <- last_index - 1L
       }
     }
 
     index <- index + 1L
+  }
+
+  invisible(NULL)
+}
+
+#' Enforce a small decoded JOSE header limit
+#'
+#' JOSE headers are parsed before authentication, so their size is bounded
+#' independently of the enclosing callback or response-body limit.
+#'
+#' @param header_text Decoded JOSE header JSON.
+#' @param label Human-readable label used in parse errors.
+#' @return Invisibly returns `NULL` on success.
+#' @keywords internal
+#' @noRd
+validate_jose_header_size <- function(header_text, label) {
+  max_bytes <- 4096L
+  actual_bytes <- nchar(enc2utf8(header_text), type = "bytes")
+  if (actual_bytes > max_bytes) {
+    err_parse(paste0(label, " exceeds the maximum size"))
   }
 
   invisible(NULL)
@@ -600,29 +756,44 @@ validate_jose_header_fields <- function(header, signal_error) {
   if (!is.list(header) || is.null(names(header))) {
     signal_error("JWT header must be a JSON object")
   }
+  for (field in c("crit", "b64")) {
+    if (
+      field %in% names(header) && is.null(jwt_header_field_exact(header, field))
+    ) {
+      signal_error(paste0("JWT ", field, " header must not be null"))
+    }
+  }
   alg <- jwt_validate_scalar_string_field(
-    header$alg %||% NULL,
+    jwt_header_field_exact(header, "alg") %||% NULL,
     "alg",
     signal_error = signal_error,
     required = TRUE
   )
   kid <- jwt_validate_scalar_string_field(
-    header$kid %||% NULL,
+    jwt_header_field_exact(header, "kid") %||% NULL,
     "kid",
     signal_error = signal_error
   )
   typ <- jwt_validate_scalar_string_field(
-    header$typ %||% NULL,
+    jwt_header_field_exact(header, "typ") %||% NULL,
     "typ",
     signal_error = signal_error
   )
-  crit <- jwt_validate_crit_field(header$crit %||% NULL, signal_error)
+  crit <- jwt_validate_crit_field(
+    jwt_header_field_exact(header, "crit") %||% NULL,
+    signal_error
+  )
+  b64 <- jwt_validate_b64_field(
+    jwt_header_field_exact(header, "b64") %||% NULL,
+    signal_error
+  )
 
   list(
     alg = alg,
     kid = kid,
     typ = typ,
-    crit = crit
+    crit = crit,
+    b64 = b64
   )
 }
 
@@ -647,33 +818,40 @@ enforce_inbound_jwt_header_policy <- function(
   on_typ_invalid = NULL,
   on_crit_invalid = NULL
 ) {
-  typ <- header_fields$typ
+  if (identical(header_fields[["b64"]], FALSE)) {
+    signal_error(
+      "JWT b64=false header is not allowed for JWT profile tokens"
+    )
+  }
+
+  typ <- header_fields[["typ"]]
   if (!is.null(typ)) {
+    bare_typ <- sub("^application/", "", tolower(typ))
     if (
       !(is.character(typ) &&
         length(typ) == 1L &&
-        identical(toupper(typ), "JWT"))
+        identical(bare_typ, "jwt"))
     ) {
       if (is.function(on_typ_invalid)) {
         on_typ_invalid()
       }
-      signal_error(paste0(
-        "JWT typ header invalid: expected 'JWT' when present, got ",
-        paste(as.character(typ), collapse = ", ")
+      signal_error(protocol_diagnostic_message(
+        "JWT typ header invalid: expected 'JWT' or 'application/jwt' when present",
+        typ
       ))
     }
   }
 
-  crit <- header_fields$crit
+  crit <- header_fields[["crit"]]
   if (!is.null(crit)) {
     unsupported <- setdiff(crit, supported_crit)
     if (length(unsupported) > 0L) {
       if (is.function(on_crit_invalid)) {
         on_crit_invalid()
       }
-      signal_error(paste0(
-        "JWT contains unsupported critical header parameter(s): ",
-        paste(unsupported, collapse = ", ")
+      signal_error(protocol_diagnostic_message(
+        "JWT contains unsupported critical header parameter(s)",
+        unsupported
       ))
     }
   }
@@ -694,8 +872,8 @@ enforce_inbound_jwt_header_policy <- function(
 jwt_verification_parts <- function(jwt) {
   parts <- jwt_compact_parts(jwt)
   list(
-    data = charToRaw(parts$signing_input),
-    sig = parts$signature_raw
+    data = charToRaw(parts[["signing_input"]]),
+    sig = parts[["signature_raw"]]
   )
 }
 
@@ -721,10 +899,10 @@ verify_jws_signature_no_time <- function(jwt, key, alg) {
     {
       if (alg_upper %in% c("RS256", "RS384", "RS512")) {
         size <- as.integer(substring(alg_upper, 3L))
-        digest <- openssl::sha2(parts$data, size = size)
+        digest <- openssl::sha2(parts[["data"]], size = size)
         return(isTRUE(openssl::signature_verify(
           digest,
-          parts$sig,
+          parts[["sig"]],
           hash = NULL,
           pubkey = key
         )))
@@ -740,18 +918,18 @@ verify_jws_signature_no_time <- function(jwt, key, alg) {
         )
         if (
           is.na(expected_width) ||
-            length(parts$sig) != expected_width
+            length(parts[["sig"]]) != expected_width
         ) {
           return(FALSE)
         }
 
         bitsize <- expected_width %/% 2L
         sig_der <- openssl::ecdsa_write(
-          parts$sig[seq_len(bitsize)],
-          parts$sig[seq_len(bitsize) + bitsize]
+          parts[["sig"]][seq_len(bitsize)],
+          parts[["sig"]][seq_len(bitsize) + bitsize]
         )
         digest <- openssl::sha2(
-          parts$data,
+          parts[["data"]],
           size = as.integer(substring(alg_upper, 3L))
         )
 
@@ -763,10 +941,13 @@ verify_jws_signature_no_time <- function(jwt, key, alg) {
         )))
       }
 
-      if (identical(alg_upper, "EDDSA")) {
+      if (alg_upper %in% c("ED25519", "EDDSA")) {
+        if (identical(alg_upper, "ED25519") && !inherits(key, "ed25519")) {
+          return(FALSE)
+        }
         return(isTRUE(openssl::signature_verify(
-          parts$data,
-          parts$sig,
+          parts[["data"]],
+          parts[["sig"]],
           hash = NULL,
           pubkey = key
         )))
@@ -812,13 +993,13 @@ verify_hmac_jws_signature_no_time <- function(jwt, secret, alg) {
   tryCatch(
     {
       expected <- openssl::sha2(
-        parts$data,
+        parts[["data"]],
         size = as.integer(substring(toupper(alg), 3L)),
         key = secret_raw
       )
       # Compare HMAC tags as raw bytes through the shared constant-time helper.
       constant_time_compare(
-        parts$sig,
+        parts[["sig"]],
         as.raw(expected)
       )
     },
