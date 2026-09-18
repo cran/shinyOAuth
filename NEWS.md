@@ -1,3 +1,9 @@
+# shinyOAuth 0.6.1
+
+* Fix to accept an empty `scope` response when requesting no scopes,
+preventing token exchange parse errors. Empty grants remain explicit 
+during refresh and never inherit prior scopes.
+
 # shinyOAuth 0.6.0
 
 * Added optional connections for apps using one or more OAuth authorizations:

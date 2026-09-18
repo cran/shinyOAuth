@@ -1,7 +1,7 @@
 Package: shinyOAuth
 Title: OIDC Authentication and OAuth Authorization for 'shiny'
         Applications
-Version: 0.6.0
+Version: 0.6.1
 Authors@R: 
     person("Luka", "Koning", email = "koningluka@gmail.com", role = c("aut", "cre", "cph"))
 Description: Provides a simple, configurable framework for 'OpenID Connect'
@@ -32,8 +32,8 @@ URL: https://github.com/lukakoning/shinyOAuth,
 BugReports: https://github.com/lukakoning/shinyOAuth/issues
 Config/roxygen2/version: 8.0.0
 NeedsCompilation: no
-Packaged: 2026-09-17 08:15:10 UTC; root
+Packaged: 2026-09-17 22:30:41 UTC; dhrko
 Author: Luka Koning [aut, cre, cph]
 Maintainer: Luka Koning <koningluka@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-09-17 08:50:02 UTC
+Date/Publication: 2026-09-18 06:40:17 UTC
