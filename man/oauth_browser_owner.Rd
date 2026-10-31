@@ -26,16 +26,17 @@ oauth_account_owner(
 }
 \arguments{
 \item{idle_timeout}{Maximum owner inactivity in seconds. Resource and status
-reads do not count as activity. Use the server manager's \code{touch()} from a user
-input event handler; connecting, explicit refresh and disconnect also count.}
+reads do not count as activity. The manager's \code{touch()} records explicit
+activity; connecting, explicit refresh and disconnect also count.}
 
 \item{absolute_timeout}{Maximum owner lifetime in seconds, independent of
 activity. Must be at least \code{idle_timeout}.}
 
 \item{same_site}{Owner-cookie policy, \code{"Lax"} for top-level authorization
 navigation or \code{"Strict"}. Embedded cross-site ownership is not supported.
-With \code{"Strict"}, \code{\link[=oauth_connections_ui]{oauth_connections_ui()}} serves an intermediate same-origin
-document after validating a callback, before checking the existing owner.}
+With \code{"Strict"}, \code{\link[=oauth_connections_ui]{oauth_connections_ui()}} may show a brief intermediate page
+when returning from another site, so the browser can restore the saved
+session. See Deployment details below if a proxy changes browser headers.}
 
 \item{allow_http_loopback}{Explicit development-only exception for HTTP on
 localhost or a loopback address. Default \code{FALSE} requires HTTPS. The exception
@@ -57,8 +58,8 @@ return \code{NULL} if unauthenticated, otherwise a plain list containing \code{s
 \code{session_id}, \code{generation}, \code{authenticated_at} and \code{expires_at}. The first
 three are non-empty strings; the timestamps are finite Unix seconds. Subject
 is the stable local account ID. Session ID and generation identify the current
-local authentication session. Do not derive these from unverified Shiny inputs,
-URL values, email addresses or the external provider's token response.}
+local authentication session, as established by the application's verified
+local login rather than the external OAuth authorization.}
 
 \item{reauth_after_seconds}{Maximum age of the verified local authentication,
 in seconds. Required for account retention; refresh cannot reset this age.}
@@ -73,18 +74,33 @@ opaque server-issued cookie and server-side owner registry. Account policies
 use the trusted local-session resolver described below.
 }
 \description{
-Choose who may use saved OAuth connections: the browser that created them,
-or an account already authenticated by your application. Supply the policy to
-\code{\link[=oauth_connections]{oauth_connections()}} with the matching retention mode. These factories do not
-set cookies, authenticate users or enable retention on \code{\link[=oauth_module_server]{oauth_module_server()}}
-calls by themselves.
+Defines ownership of saved connections for \code{\link[=oauth_connections]{oauth_connections()}}: either the
+browser that created them or an account authenticated by the application.
+The manager applies the policy when its matching retention mode is enabled;
+these functions create configuration only.
 }
 \details{
 Browser retention identifies an authorized browser session, not a verified
 person. The owner cookie is HttpOnly, host-only, has root path and uses Secure
-and a \verb{__Host-} name on HTTPS. It contains no token or patient data. Server-side
+and a \verb{__Host-} name on HTTPS. It contains no OAuth token or patient data. Server-side
 idle and absolute limits are authoritative. A cookie is never accepted as an
 owner without a matching live server record for this application origin.
+
+Account retention requires finite idle, absolute and local reauthentication
+lifetimes. The internal session registry re-runs \code{resolver} when resolving or
+validating an owner and checks the intended subject/session generation.
+Expiry or logout retires that generation until a fresh local authentication
+session is supplied. A resolver error fails closed with a redacted error.
+Local-session validation belongs to the application's resolver, including
+signature, expiry, revocation and account changes.
+}
+\section{Deployment details}{
+
+Browser cookies are shared across ports on a hostname, so another HTTPS
+service receiving the owner cookie could reuse it. Cookie names do not
+establish separate trust boundaries for those services.
+With \code{same_site = "Strict"}, external-entry recovery needs same-origin Fetch
+Metadata, \code{Referer} or \code{Origin} headers; a proxy must preserve that information.
 
 Cookie rotation invalidates the previous session generation immediately and
 preserves the original absolute lifetime. Local logout removes the live owner
@@ -97,17 +113,9 @@ A full owner registry rejects new retained owners without evicting live
 sessions or retirement records. Browser session end does not release ownership; logout or
 idle/absolute expiry does. Account logout retains its retired generation until
 \code{authenticated_at + reauth_after_seconds} so it cannot be enrolled again.
-Size \code{max_entries} for that entire window, not only simultaneous Shiny sessions.
-
-Account retention requires finite idle, absolute and local reauthentication
-lifetimes. The internal session registry re-runs \code{resolver} when resolving or
-validating an owner and checks the intended subject/session generation.
-Expiry or logout retires that generation until a fresh local authentication
-session is supplied. A resolver error fails closed with a redacted error.
-The application remains responsible for validating its local session, including
-signature, expiry, revocation and account changes. Supplying this configuration
-is not proof that an arbitrary user ID is authenticated.
+Retired generations count toward \code{max_entries} throughout that window.
 }
+
 \examples{
 # Browser connections expire after 15 minutes idle or 8 hours in total.
 oauth_browser_owner(idle_timeout = 15 * 60, absolute_timeout = 8 * 3600)

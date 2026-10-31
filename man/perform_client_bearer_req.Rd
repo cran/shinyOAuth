@@ -23,19 +23,11 @@ perform_client_bearer_req(
 \arguments{
 \item{token}{Either an \link{OAuthToken} object or a raw access token string.}
 
-\item{url}{Either the absolute URL to call or an \code{\link[httr2:request]{httr2::request()}} object
-to authorize and perform. When you pass a request object, shinyOAuth uses
-it as the base request, still applies token authentication and request
-defaults, and then layers any explicit \code{method}, \code{headers}, \code{query}, and
-\code{follow_redirect} overrides on top.
-Inherited httr2 authentication, caching, and retry policies, and curl
-authentication or method-changing options are rejected. Use
-\code{\link[httr2:req_method]{httr2::req_method()}} and httr2 body helpers to configure the request.
-HEAD requests with bodies are rejected because httr2 can transmit them
-as POST despite the explicit method.
-Authenticated response caching is
-unsupported. shinyOAuth owns retries; configure them with \code{idempotent}
-and the \verb{shinyOAuth.retry_*} options.}
+\item{url}{The absolute API URL, or a prepared \code{\link[httr2:request]{httr2::request()}} object.
+The URL must be at most 8192 bytes before and after adding \code{query}.
+The helper adds current authentication and defaults to a prepared request,
+then applies explicit \code{method}, \code{headers}, \code{query} and redirect overrides.
+See Prepared requests for customization restrictions.}
 
 \item{method}{Optional HTTP method (character). Defaults to "GET". When
 the effective token type is \code{DPoP}, this must be the final request method
@@ -45,16 +37,18 @@ reflected by the server and disclose credentials.}
 
 \item{headers}{Optional named list or named character vector of extra
 headers to set on the request. Header names are case-insensitive.
-Any user-supplied \code{Authorization} or \code{DPoP} header is ignored to ensure
-the token authentication set by this function is not overridden.}
+Names must be unique HTTP field-name tokens, and values must not contain
+prohibited control characters. DPoP requests reject \code{Host} overrides.
+This function manages the \code{Authorization} and \code{DPoP} headers and ignores
+user-supplied replacements.}
 
 \item{query}{Optional named list of query parameters to append to the URL.}
 
 \item{follow_redirect}{Logical or \code{NULL}. \code{FALSE} (the default) disables
 HTTP redirects even when \code{shinyOAuth.allow_redirect} is enabled.
 \code{NULL} inherits that global option (disabled by default).
-Set to \code{TRUE} only if you trust all possible redirect targets and
-understand the security implications.}
+\code{TRUE} enables redirects. DPoP requests reject enabled redirects because
+each target needs a new proof.}
 
 \item{check_url}{Logical. If \code{TRUE} (the default), validates \code{url} against
 \code{\link[=is_ok_host]{is_ok_host()}} before attaching the access token. This rejects relative
@@ -62,15 +56,12 @@ URLs, plain HTTP to non-loopback hosts, and when
 \code{options(shinyOAuth.allowed_hosts)} is set, hosts outside the allowlist.
 Without an allowlist this performs HTTPS and URL-syntax validation only
 (with the configured non-HTTPS exceptions); any HTTPS host is accepted.
-Set to \code{FALSE} only if you have already validated the URL and understand
-the security implications.}
+\code{FALSE} skips this policy check; URL length and resource-host restrictions
+still apply.}
 
-\item{client}{Optional \link{OAuthClient}. Required when the effective
-token type is \code{DPoP}, because the client carries the configured DPoP proof
-key, and also when using sender-constrained mTLS / certificate-bound
-tokens so shinyOAuth can attach the configured client certificate and
-validate any \code{cnf} thumbprint from an \link{OAuthToken} and observe any \code{cnf}
-thumbprint carried on a raw JWT access-token string.}
+\item{client}{Optional \link{OAuthClient}; required for DPoP or mTLS-bound tokens
+so the request can use the matching signing key or certificate and check
+any token-binding information.}
 
 \item{token_type}{Optional override for the access token type when \code{token}
 is supplied as a raw string. Supported values are \code{Bearer} and \code{DPoP}.
@@ -92,9 +83,8 @@ allowed independently of this setting.}
 \item{resource_hosts}{Optional non-empty character vector of trusted resource
 host patterns, using \code{\link[=is_ok_host]{is_ok_host()}} matching rules. This call-scoped
 allowlist adds to the global policy and is enforced even if \code{check_url}
-is \code{FALSE}. Use exact hostnames for URLs derived from lower-trust input.
-It constrains the initial URL, not redirect destinations or resolved IPs;
-retain \code{follow_redirect = FALSE}. \code{NULL} adds no resource-specific policy.}
+is \code{FALSE}. It constrains the initial URL, not redirect destinations or
+resolved IPs. \code{NULL} adds no resource-specific policy.}
 
 \item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 }

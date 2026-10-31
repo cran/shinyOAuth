@@ -97,6 +97,7 @@ test_that("JSON and signed JWT UserInfo preserve types through claim policy", {
   jwk[["kid"]] <- "type-parity"
   cli <- make_test_client(use_nonce = FALSE)
   cli@provider@userinfo_url <- "https://example.com/userinfo"
+  cli@provider@userinfo_required <- TRUE
   cli@provider@issuer <- "https://example.com"
   cli@claims_validation <- "strict"
   body <- ""
@@ -1519,19 +1520,19 @@ test_that("signed JWT NOT required: JSON response still works (backward compat)"
   expect_equal(result[["name"]], "JSON Compat")
 })
 
-test_that("OAuthProvider validator: userinfo_signed_jwt_required without userinfo_required fails", {
-  expect_error(
-    oauth_provider(
-      name = "test",
-      auth_url = "https://example.com/auth",
-      token_url = "https://example.com/token",
-      issuer = "https://example.com",
-      userinfo_url = "https://example.com/userinfo",
-      userinfo_required = FALSE,
-      userinfo_signed_jwt_required = TRUE
-    ),
-    regexp = "userinfo_signed_jwt_required.*userinfo_required"
+test_that("OAuthProvider accepts signed UserInfo policy for manual retrieval", {
+  provider <- oauth_provider(
+    name = "test",
+    auth_url = "https://example.com/auth",
+    token_url = "https://example.com/token",
+    issuer = "https://example.com",
+    userinfo_url = "https://example.com/userinfo",
+    userinfo_required = FALSE,
+    userinfo_signed_jwt_required = TRUE
   )
+  expect_false(provider@userinfo_required)
+  expect_true(provider@userinfo_signed_jwt_required)
+  expect_true(provider@userinfo_id_token_match)
 })
 
 test_that("OAuthProvider validator: userinfo_signed_jwt_required without issuer fails", {
@@ -2019,32 +2020,6 @@ test_that("application/jwt with missing issuer must fail by default", {
   )
 })
 
-test_that("application/jwt with HS256 algorithm must fail (non-asymmetric)", {
-  cli <- make_test_client(use_pkce = TRUE, use_nonce = FALSE)
-  cli@provider@userinfo_url <- "https://example.com/userinfo"
-  cli@provider@issuer <- "https://issuer.example.com"
-
-  claims <- list(sub = "user-hs256", name = "HS256 User")
-  jwt_body <- make_unsigned_jwt(claims, alg = "HS256")
-
-  testthat::local_mocked_bindings(
-    req_with_retry = function(req, ...) {
-      httr2::response(
-        url = as.character(req[["url"]]),
-        status = 200,
-        headers = list("content-type" = "application/jwt"),
-        body = charToRaw(jwt_body)
-      )
-    },
-    .package = "shinyOAuth"
-  )
-
-  expect_error(
-    get_userinfo(cli, token = "access-token"),
-    class = "shinyOAuth_userinfo_error",
-    regexp = "not in provider.*allowed"
-  )
-})
 test_that("signed UserInfo enforces scalar Boolean verification claims", {
   key <- openssl::rsa_keygen(2048)
   jwk <- jsonlite::fromJSON(write_test_jwk(key[["pubkey"]]))

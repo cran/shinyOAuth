@@ -411,15 +411,22 @@ state_decrypt_gcm <- function(
     )
   }
   payload_json <- try(rawToChar(decoded), silent = TRUE)
-  if (inherits(payload_json, "try-error")) {
+  if (
+    inherits(payload_json, "try-error") ||
+      !isTRUE(validUTF8(payload_json))
+  ) {
     audit_fail("token_payload_utf8_invalid")
     state_fail(
       "state token payload is not valid UTF-8",
       context = list(phase = "decrypt")
     )
   }
+  Encoding(payload_json) <- "UTF-8"
   obj <- try(
-    jsonlite::fromJSON(payload_json, simplifyVector = FALSE),
+    {
+      reject_duplicate_json_object_members(payload_json, "State envelope JSON")
+      jsonlite::parse_json(payload_json, simplifyVector = FALSE)
+    },
     silent = TRUE
   )
   # Ensure predictable structure: must be a named list (not data.frame)
@@ -571,7 +578,15 @@ state_decrypt_gcm <- function(
     )
   }
   parsed <- try(
-    jsonlite::fromJSON(rawToChar(res), simplifyVector = FALSE),
+    {
+      payload_json <- rawToChar(res)
+      if (!isTRUE(validUTF8(payload_json))) {
+        err_parse("Decrypted state JSON contains invalid UTF-8")
+      }
+      Encoding(payload_json) <- "UTF-8"
+      reject_duplicate_json_object_members(payload_json, "Decrypted state JSON")
+      jsonlite::parse_json(payload_json, simplifyVector = FALSE)
+    },
     silent = TRUE
   )
   if (

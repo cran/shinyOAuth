@@ -1,3 +1,91 @@
+test_that("ID token nonce types are checked even when nonce use is disabled", {
+  client <- oauth_client(
+    oauth_provider(
+      name = "nonce-types",
+      issuer = "https://example.test",
+      auth_url = "https://example.test/auth",
+      token_url = "https://example.test/token",
+      use_nonce = FALSE,
+      userinfo_required = FALSE
+    ),
+    client_id = "client",
+    client_secret = "secret",
+    redirect_uri = "http://localhost:8100",
+    scopes = "openid"
+  )
+  key <- openssl::rsa_keygen()
+  jwk <- jsonlite::fromJSON(
+    write_test_jwk(key[["pubkey"]]), simplifyVector = FALSE
+  )
+  local_mocked_bindings(fetch_jwks = function(...) list(keys = list(jwk)))
+  now <- floor(as.numeric(Sys.time()))
+  sign <- function(nonce, include = TRUE) {
+    claims <- list(
+      iss = client@provider@issuer, aud = client@client_id, sub = "user-1",
+      iat = now, exp = now + 300
+    )
+    if (include) claims["nonce"] <- list(nonce)
+    input <- paste(
+      base64url_encode(charToRaw('{"alg":"RS256"}')),
+      base64url_encode(charToRaw(jsonlite::toJSON(
+        claims, auto_unbox = TRUE, null = "null"
+      ))),
+      sep = "."
+    )
+    paste(input, base64url_encode(openssl::signature_create(
+      charToRaw(input), openssl::sha256, key
+    )), sep = ".")
+  }
+
+  absent <- sign(NULL, include = FALSE)
+  matching <- sign("transaction-nonce")
+  expect_true(attr(
+    validate_id_token(client, absent), "signature_verified", exact = TRUE
+  ))
+  expect_true(attr(
+    validate_id_token(client, matching), "signature_verified", exact = TRUE
+  ))
+  expect_true(attr(
+    validate_id_token(client, matching, expected_nonce = "transaction-nonce"),
+    "signature_verified", exact = TRUE
+  ))
+  expect_error(
+    validate_id_token(client, absent, expected_nonce = "transaction-nonce"),
+    "missing nonce", class = "shinyOAuth_id_token_error"
+  )
+  expect_error(
+    validate_id_token(client, matching, expected_nonce = "other-nonce"),
+    "nonce mismatch", class = "shinyOAuth_id_token_error"
+  )
+
+  for (nonce in list(
+    NULL, 123, TRUE, FALSE, list(), list("transaction-nonce"),
+    list("first", "second"), list(value = "transaction-nonce")
+  )) {
+    jwt <- sign(nonce)
+    expect_true("nonce" %in% names(parse_jwt_payload(jwt)))
+    for (expected in list(NULL, "transaction-nonce")) {
+      expect_error(
+        validate_id_token(client, jwt, expected_nonce = expected),
+        "nonce claim must be a JSON string",
+        class = "shinyOAuth_id_token_error"
+      )
+    }
+    expect_error(
+      verify_token_set(
+        client,
+        list(
+          access_token = "token", token_type = "Bearer", scope = "openid",
+          id_token = jwt
+        ),
+        nonce = NULL
+      ),
+      "nonce claim must be a JSON string",
+      class = "shinyOAuth_id_token_error"
+    )
+  }
+})
+
 test_that("ID tokens and both UserInfo formats preserve standard claim types", {
   client <- oauth_client(
     oauth_provider(
@@ -76,11 +164,27 @@ test_that("ID tokens and both UserInfo formats preserve standard claim types", {
       '[null]'
     )
   )
+  for (field in c(
+    "name", "given_name", "family_name", "middle_name", "nickname",
+    "preferred_username", "profile", "picture", "website", "email", "gender",
+    "birthdate", "zoneinfo", "locale", "phone_number"
+  )) {
+    invalid[[field]] <- c('1', 'true', 'null', '["text"]', '{}')
+  }
+  invalid[["updated_at"]] <- c('"yesterday"', 'true', 'null', '[1700000000]', '{}', '1e999')
+  invalid[["address"]] <- c(
+    '"line"', 'true', 'null', '[]', '["line"]',
+    '{"country":1}', '{"country":["country"]}', '{"formatted":null}'
+  )
   valid <- c(
     '',
     ',"email_verified":true,"phone_number_verified":false,"acr":"mfa","amr":["pwd","otp"]',
     ',"email_verified":false,"phone_number_verified":true,"acr":"","amr":[]',
-    ',"amr":["pwd"]'
+    ',"amr":["pwd"]',
+    ',"name":"Example User","email":"user@example.com","updated_at":1700000000',
+    ',"address":{}',
+    ',"address":{"formatted":"Line 1\\nLine 2","country":"NL","extension":123}',
+    ',"groups":["staff"],"custom":{"key":[123]}'
   )
   for (channel in c("id_token", "userinfo_json", "userinfo_jwt")) {
     for (extra in valid) {

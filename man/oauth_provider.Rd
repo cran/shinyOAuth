@@ -65,7 +65,10 @@ oauth_provider(
   endpoint_auth_metadata = list(),
   ...,
   allowed_algs = NULL,
-  allow_missing_token_type = FALSE
+  allow_missing_token_type = FALSE,
+  token_target_mode = "none",
+  token_response_scope_format = "space",
+  userinfo_id_selector_policy_id = NA_character_
 )
 }
 \arguments{
@@ -130,13 +133,11 @@ OpenSSL public key, a PEM public-key string, a parsed JWK object, or a JWK
 JSON string.}
 
 \item{signed_request_object_required}{Logical. Whether the provider requires
-signed Request Objects for authorization requests. When \code{TRUE}, clients
-should use \code{request_object_mode = "request"} or
-\code{request_object_mode = "request_uri"}.
-This setting enforces local construction only; it does not configure the
-authorization server. Register \code{require_signed_request_object = true} (or
-the server's equivalent) and verify unsigned requests are rejected before
-relying on downgrade-resistant request integrity.}
+signed Request Objects for authorization requests. When \code{TRUE}, client
+construction requires \code{request_object_mode = "request"} or \code{"request_uri"}.
+This represents the provider's registration policy and enforces local
+construction. Provider-side rejection of unsigned requests depends on that
+registration, not on this local flag.}
 
 \item{request_parameter_supported}{Logical or \code{NA}. Whether discovery
 metadata explicitly advertises support for the authorization-request
@@ -156,10 +157,9 @@ metadata says caller-managed \code{request_uri} values must be pre-registered.
 \code{NA} means the provider did not say. Discovery-derived providers apply the
 OpenID Connect default (\code{FALSE}) when this metadata is omitted.
 shinyOAuth can publish caller-managed \code{request_uri} values through
-\code{oauth_module_server()}. When this is \code{TRUE}, make sure the provider has a
-matching public request URI or wildcard prefix registered for the client.
-shinyOAuth stores this metadata for caller awareness, but it cannot verify
-provider-side registration state automatically.}
+\code{oauth_module_server()}. \code{TRUE} means the public URI or a matching prefix
+belongs in the provider's client registration. The package stores this
+requirement as metadata; provider-side registration is outside local validation.}
 
 \item{token_endpoint_auth_signing_alg_values_supported}{Optional vector of
 JWS algorithms that the provider advertises for JWT-based client
@@ -184,8 +184,8 @@ auto-enable callback issuer enforcement when the caller leaves
 \code{response_mode} values advertised by the provider. Discovery-backed
 providers use the discovery metadata value, defaulting to \code{c("query", "fragment")} when omitted per OIDC Discovery/RFC 8414. Generic providers
 may leave this empty when capabilities are not known. Provider metadata may
-include response modes that shinyOAuth does not implement; clients still
-fail fast if they request one of those unsupported modes.}
+include response modes that shinyOAuth does not implement. Requesting an
+unsupported mode raises an error.}
 
 \item{mtls_endpoint_aliases}{Optional named list of RFC 8705 mTLS endpoint
 aliases. Names should follow the metadata keys such as \code{token_endpoint},
@@ -216,43 +216,38 @@ the discovery metadata exactly, including any trailing slash.
 \item \code{"none"}: do not validate discovery issuer consistency.
 }
 
-In most cases, keep the default \code{"url"}. Use \code{"host"} only for providers
-that publish tenant-independent metadata with a templated issuer, such as
-some Microsoft aliases.}
+The Microsoft helper configures tenant-independent issuer handling for
+supported alias tenants.}
 
 \item{use_nonce}{Whether to tie the ID token to this login using a random nonce.
-Keep enabled for OIDC. The nonce is sent in the request and checked in the
-returned ID token.}
+The package sends it in the request and checks it in the returned ID token.}
 
 \item{use_pkce}{Whether to protect the code exchange using Proof Key for Code
-Exchange (PKCE). Leave enabled; public clients require it.
+Exchange (PKCE), which public clients require.
 It sends a \code{code_challenge} with the login
 request and a matching secret \code{code_verifier} during token exchange.}
 
-\item{pkce_method}{PKCE code challenge method ("S256" or "plain"). "S256" is
-recommended. Use "plain" only if you are working with a provider that does
-not support "S256".}
+\item{pkce_method}{PKCE code challenge method: \code{"S256"} (default), or
+\code{"plain"} for compatibility with providers that require it.}
 
 \item{userinfo_required}{Whether to fetch a user profile after token exchange.
 The result is stored in \code{token@userinfo}; a failed required fetch stops
 login. In \code{\link[=oauth_provider]{oauth_provider()}}, this defaults to \code{TRUE} when \code{userinfo_url}
 is supplied and \code{FALSE} otherwise.}
 
-\item{userinfo_id_token_match}{Whether fetched userinfo requires a validated ID
-token for comparison. When both are available, their actual \code{sub} values
-are always compared. \code{TRUE} also stops login if the validated ID token is
-absent. Requires \code{userinfo_required} and either \code{id_token_validation} or
-\code{use_nonce}. \code{\link[=oauth_provider]{oauth_provider()}} enables this by default when those
-requirements are met.}
+\item{userinfo_id_token_match}{Require the fetched profile to belong to the
+validated login identity. Defaults to \code{TRUE} when a UserInfo URL and ID-token
+or nonce validation are enabled, including for manual \code{\link[=get_userinfo]{get_userinfo()}} calls.
+Pass the complete \link{OAuthToken} for this check. An explicit \code{FALSE} permits
+profile retrieval without a validated identity; when both are available,
+their actual \code{sub} values must still match.}
 
-\item{userinfo_signed_jwt_required}{Whether to require the user profile to arrive
-as a signed JWT (\code{application/jwt}). Default \code{FALSE}; ordinary JSON
-userinfo is accepted. When \code{TRUE}, requires \code{userinfo_required} and
-\code{issuer}; the signature must validate with an asymmetric algorithm from
-\code{userinfo_allowed_algs}. Unsigned, HMAC-signed, and encrypted userinfo
-JWTs are not accepted by the normal configuration. Discovery does not
-enable this automatically: provider support does not mean your app's
-registration requests signed userinfo.}
+\item{userinfo_signed_jwt_required}{Require a profile signed by the provider.
+Default \code{FALSE} accepts ordinary JSON profiles. When \code{TRUE}, configure a
+UserInfo URL and issuer, and arrange signed responses with the provider.
+Signatures use \code{userinfo_allowed_algs}; unsigned, HMAC-signed and encrypted
+profiles are not accepted by normal configuration. This requirement also
+applies to manual retrieval when \code{userinfo_required = FALSE}.}
 
 \item{userinfo_id_selector}{A function that extracts the user ID from the userinfo response.
 Should take a single argument (the userinfo list) and return the user ID
@@ -279,8 +274,8 @@ This requires the provider to be a valid OpenID Connect provider with a configur
 the client's scope to include \code{openid}).
 
 Both the S7 constructor and \code{\link[=oauth_provider]{oauth_provider()}} enable this when an issuer
-is provided and \code{infer_oidc_from_issuer = TRUE}. Set an explicit \code{FALSE} only
-when intentionally opting out of ID token validation.}
+is provided and \code{infer_oidc_from_issuer = TRUE}. An explicit \code{FALSE}
+disables automatic ID token validation.}
 
 \item{extra_auth_params}{Extra parameters for authorization URL}
 
@@ -321,7 +316,10 @@ HTTP cache directives can shorten this lifetime. Responses marked
 \code{no-store} are not retained, and \code{no-cache} responses are fetched again
 before reuse. Advertised freshness also accounts for \code{Age} and \code{Expires}.
 The package also attempts a rate-limited refresh when a key is missing
-or no longer verifies a signature.}
+or no longer verifies a signature.
+For async login and token operations, custom caches use synchronous fallback
+unless they explicitly declare worker safety; see \code{\link[=custom_cache]{custom_cache()}} and its
+\code{worker_safe} argument.}
 
 \item{jwks_pins}{Optional character vector of RFC 7638 JWK thumbprints
 (base64url) to pin against. If non-empty, fetched JWKS must contain keys
@@ -338,14 +336,12 @@ RSA/EC/OKP public key in JWKS must match one of the configured pins)}
 \item{jwks_host_issuer_match}{When TRUE, enforce that the discovery \code{jwks_uri} host
 matches the issuer host exactly. Defaults to FALSE at the class
 level, but helper constructors for OIDC (e.g., \code{\link[=oauth_provider_oidc]{oauth_provider_oidc()}} and
-\code{\link[=oauth_provider_oidc_discover]{oauth_provider_oidc_discover()}}) enable this by default for safer config.
+\code{\link[=oauth_provider_oidc_discover]{oauth_provider_oidc_discover()}}) enable this by default.
 The generic helper \code{\link[=oauth_provider]{oauth_provider()}} will also automatically set this to
 TRUE when an \code{issuer} is provided and either \code{id_token_validation} or
-\code{id_token_required} is TRUE (OIDC-like configuration). Set explicitly to
-FALSE to opt out. For providers that legitimately publish JWKS on a
-different host (for example Google), prefer setting
-\code{jwks_host_allow_only} to the exact hostname rather than disabling this
-check.}
+\code{id_token_required} is TRUE (OIDC-like configuration). An explicit FALSE
+disables issuer-host matching. \code{jwks_host_allow_only} takes precedence and
+can specify a different exact hostname, as used by the Google helper.}
 
 \item{jwks_host_allow_only}{Optional explicit hostname that the jwks_uri must match.
 When provided, jwks_uri host must equal this value (exact match). You can
@@ -355,25 +351,14 @@ literal, pass a full URL (e.g., \verb{https://[::1]:8443}) - the port is ignored
 and only the hostname part is used for matching. Takes precedence over
 \code{jwks_host_issuer_match}.}
 
-\item{id_token_allowed_algs}{Optional vector of allowed JWT algorithms for ID tokens.
-Use to restrict acceptable \code{alg} values on a per-provider basis. Supported
-asymmetric algorithms include \code{RS256}, \code{RS384}, \code{RS512}, \code{ES256},
-\code{ES384}, \code{ES512}, and \code{Ed25519} or legacy \code{EdDSA} with Ed25519 OKP keys (including \code{at_hash}
-validation). Ed448 verification is unsupported and fails closed.
-Symmetric HMAC algorithms \code{HS256}, \code{HS384}, \code{HS512} are also supported but
-require that you supply a \code{client_secret} and explicitly enable HMAC
-verification via the option \code{options(shinyOAuth.allow_hs = TRUE)}.
-Defaults to \code{c("RS256","RS384","RS512","ES256","ES384","ES512","Ed25519","EdDSA")},
-which intentionally excludes HS*.
-Each RSA verification key is bound to one algorithm: its JWK \code{alg}, if
-supplied, or the sole RSA algorithm in this allowlist. When several RSA
-algorithms are allowed, an unlabelled key is bound to \code{RS256} (and rejected
-if \code{RS256} is excluded). To use unlabelled keys with \code{RS384} or \code{RS512},
-configure only that RSA algorithm. EC curves already select one supported
-algorithm; legacy \code{EdDSA} with an Ed25519 key uses the Ed25519 operation.
-Only include \verb{HS*} if you are certain the \code{client_secret} is stored strictly
-server-side and is never shipped to, or derivable by, the browser or other
-untrusted environments.}
+\item{id_token_allowed_algs}{Signing algorithms accepted for ID tokens.
+Defaults to \code{c("RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "Ed25519", "EdDSA")}; Ed448 and unsupported algorithms are rejected.
+Use a narrower set to match your provider registration.
+HMAC (\code{HS256}, \code{HS384}, \code{HS512}) requires a server-only client secret,
+\code{options(shinyOAuth.allow_hs = TRUE)}, and exactly one HS algorithm.
+Reused keys or secrets must not have conflicting algorithm settings.
+For RSA key metadata, defaults and rotation, see
+\href{https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html#provider-key-set-validation}{signing-key validation}.}
 
 \item{allowed_token_types}{Character vector of acceptable OAuth token types
 returned by the token endpoint (case-insensitive). Successful token
@@ -383,7 +368,7 @@ fails fast with a \code{shinyOAuth_token_error}. The \code{\link[=oauth_provider
 defaults to \code{c("Bearer")}. When the \link{OAuthClient} is configured with
 \code{dpop_private_key}, shinyOAuth also accepts \code{token_type = "DPoP"} and uses
 DPoP proofs on supported token and downstream requests. Other non-Bearer
-token types (for example \code{MAC}) still fail fast rather than being misused.
+token types (for example \code{MAC}) are rejected.
 Set \code{allowed_token_types = character()} explicitly only to disable the
 value allowlist while still requiring \code{token_type} itself.}
 
@@ -427,11 +412,11 @@ JARM responses.}
 
 \item{jarm_tolerate_duplicate_top_level_iss}{Logical. Whether shinyOAuth
 should tolerate repeated identical top-level \code{iss} members in signed JARM
-payloads for this provider. This is an interoperability escape hatch for
+payloads for this provider. This is a compatibility setting for
 providers that emit duplicate identical top-level \code{iss} claims. When
 \code{TRUE}, shinyOAuth collapses repeated identical top-level \code{iss} members
 before duplicate-member rejection. Conflicting duplicates and nested
-duplicate \code{iss} members still fail closed. Defaults to \code{FALSE}.}
+duplicate \code{iss} members are rejected. Defaults to \code{FALSE}.}
 
 \item{endpoint_auth_metadata}{Named list of independent \code{introspection} and
 \code{revocation} authentication metadata. Each entry has \code{methods} and
@@ -444,12 +429,30 @@ compatibility.}
 
 \item{allowed_algs}{Compatibility alias for \code{id_token_allowed_algs}. Supply only one spelling.}
 
-\item{allow_missing_token_type}{Logical, default \code{FALSE}. Opt in only for a
-provider known to issue Bearer tokens while omitting \code{token_type} from its
-token responses, contrary to OAuth 2.0. When \code{TRUE}, login and refresh assume
+\item{allow_missing_token_type}{Logical, default \code{FALSE}. Compatibility for
+providers that issue Bearer tokens without the OAuth-required \code{token_type}.
+When \code{TRUE}, login and refresh assume
 \code{"Bearer"} only when the field is absent. Explicit null, empty, invalid, or
 unsupported values still fail validation. The fallback never applies to
-clients configured with DPoP; other token and binding checks remain enforced.}
+clients configured with DPoP.}
+
+\item{token_target_mode}{How this provider obtains API-specific tokens:
+\code{"none"} (default), \code{"rfc8707"}, or \code{"microsoft"}. This applies to client
+\code{token_targets} and depends on provider support. The Microsoft helper
+selects \code{"microsoft"} automatically; discovery does not enable
+targets. See \code{vignette("token-targets", package = "shinyOAuth")}
+(\href{https://lukakoning.github.io/shinyOAuth/articles/token-targets.html}{online guide})
+for setup and permission rules.}
+
+\item{token_response_scope_format}{Separator used for permissions in token
+responses: \code{"space"} (default) or \code{"comma"}. The GitHub helper sets \code{"comma"}
+automatically. Set it explicitly for a custom provider using that format.}
+
+\item{userinfo_id_selector_policy_id}{Optional version name for a custom
+\code{userinfo_id_selector}, or \code{NA_character_}. Identifies settings or helper
+behavior outside the function body that affect identity selection. These
+form part of the client's policy: a new version ID lets pending logins and
+saved connections detect a change.}
 }
 \value{
 \link{OAuthProvider} object
@@ -484,12 +487,12 @@ generic_oidc_provider <- oauth_provider_oidc(
   base_url = "https://my-issuer.example.com"
 )
 
-# Configure a OIDC provider via OIDC discovery
+# Look up an OIDC provider's settings with discovery
 # (requires network access)
 if (interactive()) {
   # Using Auth0 sample issuer as an example
   oidc_discovery_provider <- oauth_provider_oidc_discover(
-    issuer = "https://samples.auth0.com"
+    issuer = "https://samples.auth0.com/"
   )
 }
 

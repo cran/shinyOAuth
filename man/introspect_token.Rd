@@ -22,13 +22,13 @@ introspect_token(
 
 \item{token_kind}{Which token to introspect: "access" (default) or "refresh".}
 
-\item{async}{If \code{TRUE}, return a promise resolving to the result.
-Configure mirai daemons or a future plan first; mirai takes priority.
-Use a non-sequential future plan to move work outside the main R process.
+\item{async}{If \code{TRUE}, return a promise resolving to the result, using
+configured mirai daemons or a future plan; mirai takes priority. A
+non-sequential backend moves work outside the main R process.
 Default \code{FALSE} waits and returns the result directly.}
 
-\item{shiny_session}{Optional captured Shiny session details for audit events.
-Normally supplied by the module; leave \code{NULL} when calling directly.}
+\item{shiny_session}{Optional captured Shiny session details for audit events,
+normally supplied by the module.}
 
 \item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 
@@ -51,16 +51,14 @@ unsupported or the response could not be parsed.
 }
 \description{
 Ask the provider to check an access or refresh token. This is called token
-introspection and requires a configured \code{introspection_url}. Use it when you
-need the provider's current token status rather than only a locally recorded
-expiry time: a token may have been revoked before its expiry. To require it
+introspection and requires a configured \code{introspection_url}. A token may be
+revoked before its expiry; introspection checks its current status. To require it
 automatically during login and refresh, set \code{introspect = TRUE} on
 \code{\link[=oauth_client]{oauth_client()}}.
 }
 \details{
-Read \code{result[["active"]]}: \code{TRUE} means active, \code{FALSE} means inactive, and \code{NA}
-means the result is unknown. Use \code{isTRUE(result[["active"]])} if your code must
-require a definite confirmation.
+\code{result[["active"]]} is \code{TRUE} for an active token, \code{FALSE} for an inactive
+token, and \code{NA} when the result is unknown.
 
 Unsupported endpoints, missing tokens, unsuccessful HTTP responses, and
 unusable response bodies return a descriptive \code{status}. The provider must
@@ -90,7 +88,7 @@ if (interactive()) {
   result <- introspect_token(client, token)
   isTRUE(result[["active"]])
 
-  # Requires a refresh token. Keep the returned replacement.
+  # Returns replacement credentials using the refresh token.
   token <- refresh_token(client, token)
 
   # Requires a revocation endpoint to invalidate the token at the provider.

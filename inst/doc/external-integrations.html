@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Use your Shiny login with other R packages</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Use your Shiny login with other R
+packages</h1>
+
+
+
+<div id="reuse-a-login-in-another-package" class="section level2">
+<h2>Reuse a login in another package</h2>
+<p>An R package or database driver may need an access token, a
+credential for calling a service on the user’s behalf. Reuse the login
+managed by shinyOAuth so the user does not need to sign in a second
+time.</p>
+<p>A connection gives your server code access to that login. Ask it for
+a current token just before calling the other package; shinyOAuth can
+refresh it when needed. In reactive server code, with <code>auth</code>
+from <code>oauth_module_server()</code>:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>connection <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>token <span class="ot">&lt;-</span> connection<span class="sc">$</span><span class="fu">access_token</span>(<span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span>)</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="fu">existing_sdk_read_records</span>(<span class="at">access_token =</span> token)</span></code></pre></div>
+<p><code>existing_sdk_read_records()</code> stands for your package’s
+function. A scope is a permission name defined by the service;
+<code>required_scopes</code> checks the permissions needed for this
+operation. The other package sends its own request.</p>
+<p>The examples build on the login setup in <a href="usage.html">Usage</a>.</p>
+</div>
+<div id="a-complete-shiny-example" class="section level2">
+<h2>A complete Shiny example</h2>
+<p>This template uses <code>httr2</code> so you can see where the token
+goes. Replace the placeholder URLs, scopes and credentials with your
+provider’s settings. The read button loads records; the output checks
+that the saved result still belongs to the current login before
+displaying it.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">library</span>(shiny)</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="fu">library</span>(shinyOAuth)</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a></span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  <span class="at">name =</span> <span class="st">&quot;records&quot;</span>,</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="at">auth_url =</span> <span class="st">&quot;https://login.example/authorize&quot;</span>,</span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="at">token_url =</span> <span class="st">&quot;https://login.example/token&quot;</span>,</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">userinfo_required =</span> <span class="cn">FALSE</span></span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>)</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>  provider,</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_ID&quot;</span>),</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example/callback&quot;</span>,</span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;records.read&quot;</span>, <span class="st">&quot;records.write&quot;</span>),</span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a>  <span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span></span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>)</span>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a></span>
+<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">oauth_ui</span>(<span class="fu">fluidPage</span>(</span>
+<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;login&quot;</span>, <span class="st">&quot;Sign in&quot;</span>),</span>
+<span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;again&quot;</span>, <span class="st">&quot;Sign in again&quot;</span>),</span>
+<span id="cb2-22"><a href="#cb2-22" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;logout&quot;</span>, <span class="st">&quot;Sign out&quot;</span>),</span>
+<span id="cb2-23"><a href="#cb2-23" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;load&quot;</span>, <span class="st">&quot;Load records&quot;</span>),</span>
+<span id="cb2-24"><a href="#cb2-24" tabindex="-1"></a>  <span class="fu">textOutput</span>(<span class="st">&quot;permissions&quot;</span>),</span>
+<span id="cb2-25"><a href="#cb2-25" tabindex="-1"></a>  <span class="fu">verbatimTextOutput</span>(<span class="st">&quot;records&quot;</span>)</span>
+<span id="cb2-26"><a href="#cb2-26" tabindex="-1"></a>), <span class="at">id =</span> <span class="st">&quot;auth&quot;</span>, <span class="at">client =</span> client)</span>
+<span id="cb2-27"><a href="#cb2-27" tabindex="-1"></a></span>
+<span id="cb2-28"><a href="#cb2-28" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb2-29"><a href="#cb2-29" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb2-30"><a href="#cb2-30" tabindex="-1"></a>    <span class="st">&quot;auth&quot;</span>, client, <span class="at">auto_redirect =</span> <span class="cn">FALSE</span>, <span class="at">refresh_proactively =</span> <span class="cn">TRUE</span></span>
+<span id="cb2-31"><a href="#cb2-31" tabindex="-1"></a>  )</span>
+<span id="cb2-32"><a href="#cb2-32" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input<span class="sc">$</span>login, {</span>
+<span id="cb2-33"><a href="#cb2-33" tabindex="-1"></a>    auth<span class="sc">$</span><span class="fu">request_login</span>()</span>
+<span id="cb2-34"><a href="#cb2-34" tabindex="-1"></a>    <span class="fu">invisible</span>(<span class="cn">NULL</span>)</span>
+<span id="cb2-35"><a href="#cb2-35" tabindex="-1"></a>  })</span>
+<span id="cb2-36"><a href="#cb2-36" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input<span class="sc">$</span>again, {</span>
+<span id="cb2-37"><a href="#cb2-37" tabindex="-1"></a>    auth<span class="sc">$</span><span class="fu">reauthorize</span>()</span>
+<span id="cb2-38"><a href="#cb2-38" tabindex="-1"></a>    <span class="fu">invisible</span>(<span class="cn">NULL</span>)</span>
+<span id="cb2-39"><a href="#cb2-39" tabindex="-1"></a>  })</span>
+<span id="cb2-40"><a href="#cb2-40" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input<span class="sc">$</span>logout, auth<span class="sc">$</span><span class="fu">logout</span>())</span>
+<span id="cb2-41"><a href="#cb2-41" tabindex="-1"></a></span>
+<span id="cb2-42"><a href="#cb2-42" tabindex="-1"></a>  output<span class="sc">$</span>permissions <span class="ot">&lt;-</span> <span class="fu">renderText</span>({</span>
+<span id="cb2-43"><a href="#cb2-43" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> <span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb2-44"><a href="#cb2-44" tabindex="-1"></a>    <span class="cf">if</span> (connection<span class="sc">$</span><span class="fu">has_scopes</span>(<span class="st">&quot;records.write&quot;</span>)) <span class="st">&quot;Editing available&quot;</span> <span class="cf">else</span> <span class="st">&quot;Read only&quot;</span></span>
+<span id="cb2-45"><a href="#cb2-45" tabindex="-1"></a>  })</span>
+<span id="cb2-46"><a href="#cb2-46" tabindex="-1"></a></span>
+<span id="cb2-47"><a href="#cb2-47" tabindex="-1"></a>  records <span class="ot">&lt;-</span> <span class="fu">eventReactive</span>(input<span class="sc">$</span>load, {</span>
+<span id="cb2-48"><a href="#cb2-48" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> <span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb2-49"><a href="#cb2-49" tabindex="-1"></a>    data <span class="ot">&lt;-</span> <span class="fu">tryCatch</span>({</span>
+<span id="cb2-50"><a href="#cb2-50" tabindex="-1"></a>      response <span class="ot">&lt;-</span> httr2<span class="sc">::</span><span class="fu">request</span>(<span class="st">&quot;https://api.example/records&quot;</span>) <span class="sc">|&gt;</span></span>
+<span id="cb2-51"><a href="#cb2-51" tabindex="-1"></a>        httr2<span class="sc">::</span><span class="fu">req_auth_bearer_token</span>(</span>
+<span id="cb2-52"><a href="#cb2-52" tabindex="-1"></a>          connection<span class="sc">$</span><span class="fu">access_token</span>(<span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span>)</span>
+<span id="cb2-53"><a href="#cb2-53" tabindex="-1"></a>        ) <span class="sc">|&gt;</span></span>
+<span id="cb2-54"><a href="#cb2-54" tabindex="-1"></a>        httr2<span class="sc">::</span><span class="fu">req_perform</span>()</span>
+<span id="cb2-55"><a href="#cb2-55" tabindex="-1"></a>      httr2<span class="sc">::</span><span class="fu">resp_body_json</span>(response)</span>
+<span id="cb2-56"><a href="#cb2-56" tabindex="-1"></a>    }, <span class="at">shinyOAuth_access_error =</span> <span class="cf">function</span>(error) {</span>
+<span id="cb2-57"><a href="#cb2-57" tabindex="-1"></a>      <span class="fu">showNotification</span>(<span class="st">&quot;Authorization unavailable. Try again or sign in again.&quot;</span>)</span>
+<span id="cb2-58"><a href="#cb2-58" tabindex="-1"></a>      <span class="fu">req</span>(<span class="cn">FALSE</span>)</span>
+<span id="cb2-59"><a href="#cb2-59" tabindex="-1"></a>    })</span>
+<span id="cb2-60"><a href="#cb2-60" tabindex="-1"></a>    <span class="fu">list</span>(<span class="at">authorization =</span> connection<span class="sc">$</span>id, <span class="at">data =</span> data)</span>
+<span id="cb2-61"><a href="#cb2-61" tabindex="-1"></a>  })</span>
+<span id="cb2-62"><a href="#cb2-62" tabindex="-1"></a></span>
+<span id="cb2-63"><a href="#cb2-63" tabindex="-1"></a>  output<span class="sc">$</span>records <span class="ot">&lt;-</span> <span class="fu">renderPrint</span>({</span>
+<span id="cb2-64"><a href="#cb2-64" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> <span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb2-65"><a href="#cb2-65" tabindex="-1"></a>    result <span class="ot">&lt;-</span> <span class="fu">records</span>()</span>
+<span id="cb2-66"><a href="#cb2-66" tabindex="-1"></a>    <span class="fu">req</span>(<span class="fu">identical</span>(result<span class="sc">$</span>authorization, connection<span class="sc">$</span>id))</span>
+<span id="cb2-67"><a href="#cb2-67" tabindex="-1"></a>    <span class="fu">req</span>(connection<span class="sc">$</span><span class="fu">has_scopes</span>(<span class="st">&quot;records.read&quot;</span>))</span>
+<span id="cb2-68"><a href="#cb2-68" tabindex="-1"></a>    result<span class="sc">$</span>data</span>
+<span id="cb2-69"><a href="#cb2-69" tabindex="-1"></a>  })</span>
+<span id="cb2-70"><a href="#cb2-70" tabindex="-1"></a>}</span>
+<span id="cb2-71"><a href="#cb2-71" tabindex="-1"></a></span>
+<span id="cb2-72"><a href="#cb2-72" tabindex="-1"></a><span class="fu">shinyApp</span>(ui, server, <span class="at">uiPattern =</span> <span class="st">&quot;.*&quot;</span>)</span></code></pre></div>
+<p><code>uiPattern = &quot;.*&quot;</code> allows the example’s
+<code>/callback</code> route. <code>req(auth$connection())</code> waits
+for a login, and <code>$has_scopes()</code> checks whether an optional
+feature is available. The call to
+<code>$access_token(required_scopes = ...)</code> checks the operation’s
+permissions before returning credentials.</p>
+<p>The output compares the saved connection ID and current permissions
+before displaying records, so results from an earlier login disappear
+after logout or a change of account.</p>
+</div>
+<div id="refresh-and-signing-in-again" class="section level2">
+<h2>Refresh and signing in again</h2>
+<p><code>$access_token()</code> checks the token’s remaining lifetime
+and refreshes when needed. For a slow operation, use
+<code>min_valid_for_seconds</code> to require more remaining token
+lifetime. If no usable token is available, the call raises an error; it
+does not open a login page or repeat the other package’s operation.</p>
+<p>Offer <code>auth$reauthorize()</code> when the user needs to sign in
+again. It preserves locally reduced permissions and ends the previous
+local login. Cancelling does not restore it. An ordinary new login
+requests the client’s original scopes.</p>
+<p>Token retrieval follows the module’s <a href="usage.html#token-expiry-and-session-length">expiry and
+maximum-login-age settings</a>.</p>
+</div>
+<div id="sdk-token-callbacks-and-database-drivers" class="section level2">
+<h2>SDK token callbacks and database drivers</h2>
+<p>Some client libraries, often called SDKs, accept a function that
+supplies a token when needed. Build that client inside the user’s Shiny
+session:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>sdk <span class="ot">&lt;-</span> <span class="fu">reactive</span>({</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  connection <span class="ot">&lt;-</span> <span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="fu">example_sdk_client</span>(</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>    <span class="at">token =</span> <span class="cf">function</span>() connection<span class="sc">$</span><span class="fu">access_token</span>(<span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span>)</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  )</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>})</span></code></pre></div>
+<p><code>example_sdk_client()</code> stands for the package’s
+constructor. The reactive expression builds a client for the current
+connection and rebuilds it when login changes; its callback remains
+bound to that connection.</p>
+<p>If a database driver only accepts a token string, acquire it just
+before opening or updating the database connection.</p>
+<p>Exported bearer tokens carry the provider’s full grant, even when the
+app applies narrower local permission checks.
+<code>$access_token()</code> rejects DPoP and certificate-bound tokens;
+<code>$request()</code> supplies the matching proof or certificate for
+those requests.</p>
+</div>
+<div id="several-accounts-and-optional-profile-retrieval" class="section level2">
+<h2>Several accounts and optional profile retrieval</h2>
+<p>With a connection manager, choose a saved login with
+<code>auth$connection(connection_id)</code>. Use
+<code>auth$reauthorize(connection_id)</code> to replace it; the
+replacement gets a new connection ID. See <a href="multiple-authorizations.html">Multiple authorizations</a>.</p>
+<p>For one login with separate tokens for several APIs, see <a href="token-targets.html">Token targets</a>.</p>
+<p>For Microsoft APIs other than Graph, configure
+<code>userinfo_required = FALSE</code> on the provider to skip the Graph
+profile request. <code>connection$identity()</code> reads selected
+previously validated identity fields.</p>
+</div>
+<div id="advanced-connection-lifetime-and-permissions" class="section level2">
+<h2>Advanced: connection lifetime and permissions</h2>
+<p>A connection belongs to one Shiny session, and its methods check that
+ownership before resolving credentials. Refresh preserves its ID;
+logout, replacement and session closure invalidate it, even if the same
+account signs in again.</p>
+<p>Reads of <code>connection()</code>, <code>$access_token()</code> and
+<code>$has_scopes()</code> do not rerun on refresh alone when login and
+permissions stay the same. Use <code>$summary()</code> for status, and
+<code>auth$touch()</code> to record explicit user activity for a
+retained login.</p>
+<div id="reducing-permissions-and-replacing-a-login" class="section level3">
+<h3>Reducing permissions and replacing a login</h3>
+<p><code>$refresh(scopes = ...)</code> can reduce permissions while
+preserving required scopes. Later refreshes and reauthorization keep
+that reduction. <code>required_scopes</code> on
+<code>$access_token()</code> specifies the permissions needed for that
+operation. A provider can reject narrowing; <a href="token-targets.html#advanced-microsoft-permissions-and-consent">Microsoft
+targets</a> do not support explicit API narrowing.</p>
+<p>For OIDC, include <code>offline_access</code> when explicitly
+narrowing if later reauthorization should still request refresh consent.
+Automatic refresh does not remove that request just because the response
+omits it.</p>
+<p>Standalone SMART replacements keep requested patient and encounter
+context. Narrowing can remove optional encounter context, while retained
+patient permissions still require patient context. See <a href="smart-on-fhir.html">SMART on FHIR</a>.</p>
+</div>
+</div>
+<div id="advanced-asynchronous-token-acquisition" class="section level2">
+<h2>Advanced: asynchronous token acquisition</h2>
+<p>Use <code>async = TRUE</code> when refreshing a token should not
+block the app. Set up workers first, as shown in <a href="usage.html#asynchronous-execution">Usage</a>:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="co"># Configure mirai daemons or a non-sequential future plan before starting Shiny.</span></span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="co"># Inside the owning Shiny session:</span></span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>connection <span class="ot">&lt;-</span> <span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>pending <span class="ot">&lt;-</span> connection<span class="sc">$</span><span class="fu">access_token</span>(<span class="at">required_scopes =</span> <span class="st">&quot;records.read&quot;</span>, <span class="at">async =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>promises<span class="sc">::</span><span class="fu">then</span>(pending, <span class="cf">function</span>(token) {</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="co"># Recheck before starting work after an asynchronous boundary.</span></span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  current <span class="ot">&lt;-</span> <span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>  <span class="fu">req</span>(<span class="fu">identical</span>(current<span class="sc">$</span>id, connection<span class="sc">$</span>id))</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  <span class="fu">req</span>(current<span class="sc">$</span><span class="fu">has_scopes</span>(<span class="st">&quot;records.read&quot;</span>))</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>  <span class="fu">existing_sdk_read_records</span>(<span class="at">access_token =</span> token)</span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a>})</span></code></pre></div>
+<p>The callback compares the current connection and permissions because
+logout or a permission change can occur while token acquisition runs.
+The other package still needs its own background-request mechanism if
+its calls block R.</p>
+<div id="handling-token-errors" class="section level3">
+<h3>Handling token errors</h3>
+<p>Token-acquisition errors inherit
+<code>shinyOAuth_access_error</code>. Inspect
+<code>error$context$reason</code> when you want to offer a specific
+recovery action:</p>
+<table>
+<colgroup>
+<col width="50%" />
+<col width="50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Reason</th>
+<th>Suggested response</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>authorization_unavailable</code></td>
+<td>Obtain a current connection after login.</td>
+</tr>
+<tr class="even">
+<td><code>insufficient_scope</code></td>
+<td>Explain which permission is missing.</td>
+</tr>
+<tr class="odd">
+<td><code>refresh_pending</code></td>
+<td>Await async work or let the user retry later.</td>
+</tr>
+<tr class="even">
+<td><code>refresh_unavailable</code></td>
+<td>Try later or offer a new login.</td>
+</tr>
+<tr class="odd">
+<td><code>interaction_required</code></td>
+<td>Offer a new login.</td>
+</tr>
+<tr class="even">
+<td><code>lifetime_unavailable</code></td>
+<td>The replacement token is too short-lived for the operation.</td>
+</tr>
+<tr class="odd">
+<td><code>unsupported_token_binding</code></td>
+<td>Use <code>$request()</code> with the configured DPoP or mTLS
+transport.</td>
+</tr>
+</tbody>
+</table>
+<p>Argument and configuration errors are separate. Token methods never
+open a login page or repeat an SDK or database operation after an
+error.</p>
+</div>
+</div>
+<div id="advanced-background-tasks-and-saved-results" class="section level2">
+<h2>Advanced: background tasks and saved results</h2>
+<p>Acquire the token in the owning session before starting background
+work. Pass plain inputs and that short-lived token to the worker,
+keeping the connection and refresh credential in the session. This
+example uses Shiny’s <code>ExtendedTask</code> (Shiny 1.8.1 or
+newer):</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="co"># Configure future::plan(future::multisession) before starting the app.</span></span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="co"># Inside server(), with auth already created:</span></span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>load_records <span class="ot">&lt;-</span> shiny<span class="sc">::</span>ExtendedTask<span class="sc">$</span><span class="fu">new</span>(<span class="cf">function</span>(token, authorization_id) {</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  promises<span class="sc">::</span><span class="fu">future_promise</span>({</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>    <span class="fu">list</span>(</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>      <span class="at">authorization_id =</span> authorization_id,</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>      <span class="at">data =</span> <span class="fu">existing_sdk_read_records</span>(<span class="at">access_token =</span> token)</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>    )</span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>  })</span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a>})</span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a></span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>shiny<span class="sc">::</span><span class="fu">observeEvent</span>(input<span class="sc">$</span>load, {</span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a>  shiny<span class="sc">::</span><span class="fu">req</span>(load_records<span class="sc">$</span><span class="fu">status</span>() <span class="sc">!=</span> <span class="st">&quot;running&quot;</span>)</span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a>  connection <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a>  token <span class="ot">&lt;-</span> connection<span class="sc">$</span><span class="fu">access_token</span>(<span class="st">&quot;records.read&quot;</span>, <span class="at">min_valid_for_seconds =</span> <span class="dv">120</span>)</span>
+<span id="cb5-16"><a href="#cb5-16" tabindex="-1"></a>  load_records<span class="sc">$</span><span class="fu">invoke</span>(token, connection<span class="sc">$</span>id)</span>
+<span id="cb5-17"><a href="#cb5-17" tabindex="-1"></a>})</span>
+<span id="cb5-18"><a href="#cb5-18" tabindex="-1"></a></span>
+<span id="cb5-19"><a href="#cb5-19" tabindex="-1"></a>output<span class="sc">$</span>records <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">renderTable</span>({</span>
+<span id="cb5-20"><a href="#cb5-20" tabindex="-1"></a>  connection <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb5-21"><a href="#cb5-21" tabindex="-1"></a>  shiny<span class="sc">::</span><span class="fu">req</span>(connection<span class="sc">$</span><span class="fu">has_scopes</span>(<span class="st">&quot;records.read&quot;</span>))</span>
+<span id="cb5-22"><a href="#cb5-22" tabindex="-1"></a>  result <span class="ot">&lt;-</span> load_records<span class="sc">$</span><span class="fu">result</span>()</span>
+<span id="cb5-23"><a href="#cb5-23" tabindex="-1"></a>  shiny<span class="sc">::</span><span class="fu">req</span>(<span class="fu">identical</span>(result<span class="sc">$</span>authorization_id, connection<span class="sc">$</span>id))</span>
+<span id="cb5-24"><a href="#cb5-24" tabindex="-1"></a>  result<span class="sc">$</span>data</span>
+<span id="cb5-25"><a href="#cb5-25" tabindex="-1"></a>})</span></code></pre></div>
+<p>The requested token lifetime covers worker startup and the operation.
+Before displaying results, the output checks connection ID and
+permissions; the default <code>req()</code> behavior clears output when
+those checks fail.</p>
+<p>See the <a href="https://shiny.posit.co/r/articles/improve/nonblocking/">Shiny
+background-task guide</a> for scheduling, and <a href="https://lukakoning.github.io/shinyOAuth/reference/OAuthConnection.html">OAuthConnection</a>
+for connection lifetime and permission-reduction details.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

@@ -537,6 +537,7 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
   context <- sanitize_event_diagnostics(sanitize_event_url_fields(context))
   expose <- isTRUE(allow_expose_error_body())
   status <- NA_integer_
+  retry_after <- NA_real_
   desc <- NULL
   url <- NULL
   transport_error <- NULL
@@ -562,6 +563,12 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
   }
 
   if (!is.null(resp) && inherits(resp, "httr2_response")) {
+    # Keep only a bounded delay, never the response or its raw headers. This
+    # metadata must also survive serialization of refresh failures from workers.
+    retry_after <- parse_retry_after_header(resp)
+    if (is.finite(retry_after)) {
+      retry_after <- min(retry_after, 3600)
+    }
     st <- try(httr2::resp_status(resp), silent = TRUE)
     status <- if (!inherits(st, "try-error") && length(st) == 1) {
       st
@@ -611,12 +618,24 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
     bs <- try(httr2::resp_body_string(resp), silent = TRUE)
     if (!inherits(bs, "try-error")) {
       body_digest <- string_digest(bs)
-      # RFC 6749 §5.2: try to extract structured error fields from JSON body
+      # These fields affect refresh-credential retirement. Preserve wire types
+      # and reject duplicate members before trusting RFC 6749 section 5.2 data.
+      # Malformed bodies must still produce the original HTTP condition.
       parsed <- try(
-        jsonlite::fromJSON(bs, simplifyVector = TRUE),
+        {
+          reject_duplicate_json_object_members(
+            bs,
+            "OAuth error JSON",
+            on_error = function(...) stop("Malformed OAuth error JSON", call. = FALSE)
+          )
+          jsonlite::parse_json(bs, simplifyVector = FALSE)
+        },
         silent = TRUE
       )
-      if (!inherits(parsed, "try-error") && is.list(parsed)) {
+      if (
+        !inherits(parsed, "try-error") && is.list(parsed) &&
+          json_text_is_object(bs)
+      ) {
         if (
           is_valid_string(parsed[["error"]]) &&
             is_oauth_error_text(parsed[["error"]])
@@ -741,6 +760,7 @@ err_http <- function(msg, resp = NULL, context = list(), trace_id = NULL) {
     class = c("shinyOAuth_http_error", "shinyOAuth_error"),
     trace_id = trace_id,
     status = status,
+    retry_after = retry_after,
     url = url,
     body_digest = body_digest,
     oauth_error = oauth_error,

@@ -23,10 +23,10 @@
 #' - `response_mode = "form_post"` and [oauth_form_post_ui()] when requesting
 #'   `email` or `name`.
 #'
-#' Read identity information from the validated ID token's claims. Apple has
-#' no userinfo endpoint, so `userinfo_required` is `FALSE`. The one-time
-#' `user` payload that Apple may send with a form POST callback is not mapped
-#' into `token@userinfo`; do not rely on this helper to retrieve that payload.
+#' Identity information comes from the validated ID token's claims. Apple has
+#' no UserInfo endpoint, so `userinfo_required` is `FALSE`. The one-time `user`
+#' payload that Apple may send with a form POST callback is not mapped into
+#' `token@userinfo`.
 #' Apple's documented `email_verified` strings (`"true"` and `"false"`) are
 #' normalized to logical values in validated claims after signature and issuer
 #' verification. Other providers retain the standard JSON Boolean requirement.
@@ -52,7 +52,7 @@ oauth_provider_apple <- function(name = "apple") {
 #' @description
 #' Use your Apple developer key to create the client secret expected by Sign in
 #' with Apple. Pass the returned string as `client_secret` to [oauth_client()].
-#' Unlike a fixed password, this secret expires; replace it before its expiry.
+#' The returned secret expires after `expires_in` seconds.
 #'
 #' @details
 #' The helper signs a JWT with ES256. It places your Team ID in `iss`, your
@@ -66,7 +66,8 @@ oauth_provider_apple <- function(name = "apple") {
 #'   documents this as a 10-character identifier
 #' @param private_key Apple private key as an `openssl::key` or PEM string. The
 #'   key must be compatible with `ES256` (P-256 ECDSA)
-#' @param expires_in Positive lifetime in seconds. Must be no more than
+#' @param expires_in Positive whole-number lifetime in seconds. Must be at least
+#'   one second and no more than
 #'   `15777000` seconds (six months). Defaults to `15776700` seconds, leaving a
 #'   five-minute margin below Apple's documented maximum
 #' @param issued_at Issue time for the JWT. Defaults to `Sys.time()`
@@ -116,9 +117,10 @@ oauth_client_secret_apple <- function(
       length(expires_in) != 1L ||
       is.na(expires_in) ||
       !is.finite(expires_in) ||
-      expires_in <= 0
+      expires_in < 1 ||
+      expires_in != floor(expires_in)
   ) {
-    err_input("expires_in must be a single positive number of seconds")
+    err_input("expires_in must be a single positive whole number of seconds")
   }
   if (expires_in > 15777000) {
     err_input(

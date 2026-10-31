@@ -129,11 +129,12 @@ build_client_assertion <- function(client, aud) {
   }
 
   if (identical(style, "client_secret_jwt")) {
+    check_client_hmac_algorithm(client, alg, "client assertion signing")
     min_secret_bytes <- min_hmac_key_bytes(alg)
     size <- min_secret_bytes * 8L
     secret <- client@client_secret %||%
       err_config("client_secret missing for client_secret_jwt")
-    if (nchar(secret, type = "bytes") < min_secret_bytes) {
+    if (length(hmac_secret_bytes(secret)) < min_secret_bytes) {
       err_config(
         paste0(
           "client_secret_jwt with client_assertion_alg '",
@@ -160,6 +161,7 @@ build_client_assertion <- function(client, aud) {
 
   if (identical(style, "private_key_jwt")) {
     key <- normalize_private_key_input(client@client_assertion_private_key)
+    check_client_rsa_algorithm(client, key, alg, "client assertion signing")
     clm <- outbound_jwt_claim(claims)
     # Hard-fail impossible alg/key pairs before signing. jose::jwt_encode_sig()
     # can otherwise emit mismatched JOSE alg headers instead of rejecting them.
@@ -309,7 +311,7 @@ resolve_request_object_signing_alg <- function(client) {
         )
       )
     }
-    if (nchar(client@client_secret, type = "bytes") < 32) {
+    if (length(hmac_secret_bytes(client@client_secret)) < 32) {
       err_config(
         paste(
           "request_object_mode = 'request' or 'request_uri' requires",
@@ -329,7 +331,7 @@ resolve_request_object_signing_alg <- function(client) {
     if (!is_valid_string(client@client_secret)) {
       err_config("HS* request_object_signing_alg requires client_secret")
     }
-    if (nchar(client@client_secret, type = "bytes") < 32) {
+    if (length(hmac_secret_bytes(client@client_secret)) < 32) {
       err_config(
         "HS* request_object_signing_alg requires client_secret >= 32 bytes"
       )
@@ -435,6 +437,16 @@ min_hmac_key_bytes <- function(alg) {
   )
 }
 
+#' Normalize an HMAC secret to the exact bytes used for signing and verification
+#'
+#' @param secret Scalar character secret.
+#' @return UTF-8 key bytes.
+#' @keywords internal
+#' @noRd
+hmac_secret_bytes <- function(secret) {
+  charToRaw(enc2utf8(secret))
+}
+
 #' Check whether a private key can sign a JWT with a given alg.
 #'
 #' @param key Private key object.
@@ -476,7 +488,7 @@ private_key_jws_alg_compatibility <- function(key, alg) {
 
   if (inherits(key, "ecdsa")) {
     jwk <- try(
-      jsonlite::fromJSON(jose::write_jwk(key), simplifyVector = TRUE),
+      jsonlite::parse_json(jose::write_jwk(key), simplifyVector = TRUE),
       silent = TRUE
     )
     if (!inherits(jwk, "try-error") && is.list(jwk)) {
@@ -505,33 +517,49 @@ private_key_jws_alg_compatibility <- function(key, alg) {
   NA
 }
 
-# jose's RSA digest size defaults to 256 independently of the supplied header.
-# Select SHA-384 explicitly for RS384 (RFC 7518 section 3.3). For OKP keys,
-# retain our explicit-header encoder and delegate Ed25519 to OpenSSL.
+# Serialize all algorithms identically with full numeric precision. jose's
+# encoder rounds nested numbers to four decimal places, which changes OIDC
+# claims requests. OpenSSL signs the exact serialized input; ECDSA signatures
+# use fixed-width R || S rather than ASN.1 DER (RFC 7518 section 3.4).
 encode_asymmetric_jwt_with_header <- function(claims, key, header) {
   alg <- canonicalize_jws_alg(header[["alg"]])
   if (!private_key_can_sign_jws_alg(key, alg)) {
     err_config("JWT signing algorithm is incompatible with the private key")
-  }
-  if (identical(alg, "RS384")) {
-    return(jose::jwt_encode_sig(claims, key = key, size = 384, header = header))
-  }
-  if (!(alg %in% c("Ed25519", "EdDSA"))) {
-    return(jose::jwt_encode_sig(claims, key = key, header = header))
   }
   encode <- function(value) {
     base64url_encode(charToRaw(enc2utf8(jsonlite::toJSON(
       unclass(value),
       auto_unbox = TRUE,
       null = "null",
-      digits = NA
+      digits = 17
     ))))
   }
   header[["alg"]] <- alg
   signing_input <- paste(encode(header), encode(claims), sep = ".")
-  signature <- openssl::ed25519_sign(charToRaw(signing_input), key)
-  if (length(signature) != 64L) {
-    err_config("Ed25519 produced an invalid signature length")
+  if (alg %in% c("Ed25519", "EdDSA")) {
+    signature <- openssl::ed25519_sign(charToRaw(signing_input), key)
+    if (length(signature) != 64L) {
+      err_config("Ed25519 produced an invalid signature length")
+    }
+  } else {
+    hash <- switch(alg,
+      RS256 = openssl::sha256, RS384 = openssl::sha384,
+      ES256 = openssl::sha256, ES384 = openssl::sha384, ES512 = openssl::sha512
+    )
+    signature <- openssl::signature_create(
+      charToRaw(signing_input), hash = hash, key = key
+    )
+    if (inherits(key, "ecdsa")) {
+      params <- openssl::ecdsa_parse(signature)
+      width <- switch(alg, ES256 = 32L, ES384 = 48L, ES512 = 66L)
+      pad <- function(value) {
+        if (length(value) > width) {
+          err_config("ECDSA produced an invalid signature component length")
+        }
+        c(raw(width - length(value)), value)
+      }
+      signature <- c(pad(params[["r"]]), pad(params[["s"]]))
+    }
   }
   paste(signing_input, base64url_encode(signature), sep = ".")
 }
@@ -577,8 +605,9 @@ encode_hmac_jwt_with_header <- function(
     )
   }
 
+  key_raw <- hmac_secret_bytes(secret)
   min_secret_bytes <- min_hmac_key_bytes(alg)
-  if (nchar(secret, type = "bytes") < min_secret_bytes) {
+  if (length(key_raw) < min_secret_bytes) {
     err_config(paste0(
       alg,
       " requires client_secret >= ",
@@ -591,19 +620,18 @@ encode_hmac_jwt_with_header <- function(
     header,
     auto_unbox = TRUE,
     null = "null",
-    digits = NA
+    digits = 17
   )
   payload_json <- jsonlite::toJSON(
     claims,
     auto_unbox = TRUE,
     null = "null",
-    digits = NA
+    digits = 17
   )
 
   encoded_header <- base64url_encode(charToRaw(enc2utf8(header_json)))
   encoded_payload <- base64url_encode(charToRaw(enc2utf8(payload_json)))
   signing_input <- paste0(encoded_header, ".", encoded_payload)
-  key_raw <- charToRaw(enc2utf8(secret))
 
   signature_raw <- switch(
     as.character(size),
@@ -660,6 +688,7 @@ build_authorization_request_object <- function(client, params) {
   }
 
   alg <- resolve_request_object_signing_alg(client)
+  check_client_hmac_algorithm(client, alg, "JAR signing")
   aud <- resolve_request_object_audience(client)
   if (!is_valid_string(aud)) {
     err_config(
@@ -680,7 +709,7 @@ build_authorization_request_object <- function(client, params) {
       nzchar(claims_param)
   ) {
     parsed_claims <- tryCatch(
-      jsonlite::fromJSON(claims_param, simplifyVector = FALSE),
+      jsonlite::parse_json(claims_param, simplifyVector = FALSE),
       error = function(...) NULL
     )
     if (is.list(parsed_claims)) {
@@ -733,6 +762,7 @@ build_authorization_request_object <- function(client, params) {
     )
   } else {
     key <- normalize_private_key_input(client@client_assertion_private_key)
+    check_client_rsa_algorithm(client, key, alg, "JAR signing")
     if (!private_key_can_sign_jws_alg(key, alg, typ = "oauth-authz-req+jwt")) {
       err_config(
         c(

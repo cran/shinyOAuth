@@ -18,33 +18,37 @@
 #' `userinfo_required = TRUE`; that result is available as `auth[["token"]]@userinfo`.
 #'
 #' @details
-#' The provider must have a `userinfo_url`: the OpenID Connect (OIDC) UserInfo
-#' endpoint, or an OAuth provider's profile API. With OIDC, this function checks that
-#' userinfo belongs to the same user as a validated ID token when available.
-#' If provider policy requires that comparison, an absent validated ID token
-#' causes an error. Prefer passing the complete [OAuthToken], which carries
-#' the ID token needed for this check.
+#' Pass the client and complete [OAuthToken] from login, for example
+#' `get_userinfo(client, auth[["token"]])`. The provider needs a `userinfo_url`.
+#' For OIDC, shinyOAuth checks that the returned profile belongs to the validated
+#' login. A raw access-token string cannot provide that identity check.
 #'
-#' Ordinary JSON profiles and signed JWT UserInfo responses are supported.
-#' Signed responses are verified using the provider's signing keys and
-#' `userinfo_allowed_algs`; encrypted UserInfo is not supported. Set
-#' `userinfo_signed_jwt_required` on the provider to require a signed response,
-#' and `userinfo_jwt_required_time_claims` on the client to require time claims
-#' such as `exp`. Present time claims are checked even when not required.
+#' `userinfo_required = FALSE` disables automatic profile retrieval.
 #'
-#' For certificate-bound tokens (mTLS) and key-bound tokens (DPoP), the helper
-#' uses the client's certificate or signing key and checks the token binding.
-#' It handles one DPoP nonce challenge with a fresh-proof retry. See the
+#' @section Advanced response validation:
+#' Normal JSON profiles and signed JWT profiles are supported; encrypted UserInfo
+#' is not. `userinfo_signed_jwt_required` requires a signed response using
+#' `userinfo_allowed_algs`. `userinfo_jwt_required_time_claims` can require expiry
+#' and other time claims; present time claims are always checked.
+#'
+#' By default, OIDC providers with a UserInfo endpoint require a validated identity
+#' token, including for manual retrieval. Explicit `userinfo_id_token_match = FALSE`
+#' allows retrieval without one, but when both are available their `sub` values
+#' must always match. Standard profile fields are checked for the expected JSON
+#' types; extension fields retain their provider-defined values.
+#'
+#' For DPoP or mTLS-bound tokens, the client supplies the matching signing key or
+#' certificate. See the
 #' [advanced security vignette](https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html)
-#' for configuration.
+#' for those configurations.
 #'
 #' @param client [OAuthClient] object. The client must have a
 #' `userinfo_url` configured in its [OAuthProvider].
 #' @param token Either an [OAuthToken] object or a raw access token string.
 #' @param token_type Optional override for the access token type when `token`
 #'   is provided as a raw string. Supported values are `Bearer` and `DPoP`.
-#' @param shiny_session Optional captured Shiny session details for audit events.
-#'   Normally supplied by the module; leave `NULL` when calling directly.
+#' @param shiny_session Optional captured Shiny session details for audit events,
+#'   normally supplied by the module.
 #'
 #' @return A list containing the user information returned by the provider.
 #'   For JSON responses, arrays are simplified to vectors or data frames where
@@ -250,7 +254,7 @@ fetch_userinfo <- function(
                 "UserInfo response JSON"
               )
               assert_json_text_is_object(body_txt, "UserInfo response JSON")
-              jsonlite::fromJSON(body_txt, simplifyVector = FALSE)
+              jsonlite::parse_json(body_txt, simplifyVector = FALSE)
             },
             silent = TRUE
           )
@@ -356,7 +360,7 @@ fetch_userinfo <- function(
           validate_essential_claims(oauth_client, ui, "userinfo")
         }
         if (!is_jwt_response) {
-          ui <- jsonlite::fromJSON(body_txt, simplifyVector = TRUE)
+          ui <- jsonlite::parse_json(body_txt, simplifyVector = TRUE)
         }
 
         otel_set_span_attributes(
@@ -745,7 +749,8 @@ decode_userinfo_jwt <- function(
           ao <- try(prov@jwks_host_allow_only, silent = TRUE)
           if (inherits(ao, "try-error")) NA_character_ else ao
         },
-        jwks_uri_override = provider_jwks_uri(prov)
+        jwks_uri_override = provider_jwks_uri(prov),
+        tls_minimum = client_tls_minimum(oauth_client)
       ))
     ) {
       did_force_refresh <- TRUE

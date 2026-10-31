@@ -1,6 +1,39 @@
 # Internal, data-only transaction context. The manager owns the meaning of its
 # target/owner/resource/profile fields; the core binds a bounded immutable JSON
 # snapshot without serializing functions, environments, credentials or clients.
+
+# Up to 16 target limits can repeat the same 8192-byte authorization scope set.
+# Leave room for their JSON encoding and the bounded transaction metadata.
+authorization_context_max_bytes <- 262144L
+
+# Check local preparation before a replacement ends the current authorization.
+# The browser binding is not part of the encrypted payload, and this fresh probe
+# is never stored or published. The real login still gets its own binding/state.
+preflight_reauthorization <- function(
+  client,
+  scopes = NULL,
+  target_limits = NULL,
+  extra_scopes = NULL,
+  context = NULL,
+  max_age = NULL
+) {
+  # The replacement must still be able to select its code-redemption target.
+  # Check before ending the current authorization or preparing browser state.
+  token_target_request(client, limits = target_limits)
+  prepare_call_internal(
+    client,
+    raw_to_hex_lower(openssl::rand_bytes(64L)),
+    .requested_max_age = max_age,
+    .defer_build = TRUE,
+    .transaction_context = context,
+    .requested_scopes = scopes,
+    .target_limits = target_limits,
+    .accepted_extra_scopes = extra_scopes,
+    .preflight = TRUE
+  )
+  invisible(NULL)
+}
+
 authorization_context_json <- function(context) {
   if (is.null(context)) {
     return(NULL)
@@ -8,8 +41,25 @@ authorization_context_json <- function(context) {
   invalid <- function() {
     err_config("Authorization context must be a bounded named data list")
   }
-  check <- function(value, depth = 0L) {
-    if (depth > 8L || is.object(value) || length(value) > 128L) {
+  remaining <- authorization_context_max_bytes
+  check <- function(value, depth = 0L, field = NULL) {
+    # Scope fields can carry the SMART profile's larger permission sets.
+    # Client-specific validation still runs before requests and acceptance.
+    scope_field <- field %in% c("requested_scopes", "accepted_extra_scopes")
+    max_items <- if (isTRUE(scope_field)) 256L else 128L
+    max_bytes <- if (isTRUE(scope_field)) 65536L else 8192L
+    if (depth > 8L || is.object(value) || length(value) > max_items) {
+      invalid()
+    }
+    remaining <<- remaining -
+      1L -
+      sum(nchar(names(value), type = "bytes")) -
+      if (is.character(value) && !anyNA(value)) {
+        sum(nchar(value, type = "bytes"))
+      } else {
+        0L
+      }
+    if (is.na(remaining) || remaining < 0L) {
       invalid()
     }
     if (is.null(value)) {
@@ -22,13 +72,15 @@ authorization_context_json <- function(context) {
       ) {
         invalid()
       }
-      lapply(value, check, depth = depth + 1L)
+      for (i in seq_along(value)) {
+        check(value[[i]], depth + 1L, if (is.null(nm)) NULL else nm[[i]])
+      }
     } else if (
       !(is.character(value) || is.logical(value) || is.numeric(value)) ||
         anyNA(value) ||
         !is.null(attributes(value)) ||
         (is.numeric(value) && !all(is.finite(value))) ||
-        (is.character(value) && sum(nchar(value, type = "bytes")) > 4096L)
+        (is.character(value) && sum(nchar(value, type = "bytes")) > max_bytes)
     ) {
       invalid()
     }
@@ -44,7 +96,7 @@ authorization_context_json <- function(context) {
     null = "null",
     digits = NA
   ))
-  if (nchar(json, type = "bytes") > 4096L) {
+  if (nchar(json, type = "bytes") > authorization_context_max_bytes) {
     invalid()
   }
   json
@@ -54,7 +106,10 @@ authorization_context_digest <- function(json) {
   if (is.null(json)) {
     return(NULL)
   }
-  if (!is_valid_string(json) || nchar(json, type = "bytes") > 4096L) {
+  if (
+    !is_valid_string(json) ||
+      nchar(json, type = "bytes") > authorization_context_max_bytes
+  ) {
     err_invalid_state("Invalid authorization context binding")
   }
   unclass(as.character(openssl::sha256(charToRaw(enc2utf8(json)))))

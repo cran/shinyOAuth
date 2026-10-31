@@ -26,7 +26,8 @@ documents this as a 10-character identifier}
 \item{private_key}{Apple private key as an \code{openssl::key} or PEM string. The
 key must be compatible with \code{ES256} (P-256 ECDSA)}
 
-\item{expires_in}{Positive lifetime in seconds. Must be no more than
+\item{expires_in}{Positive whole-number lifetime in seconds. Must be at least
+one second and no more than
 \code{15777000} seconds (six months). Defaults to \code{15776700} seconds, leaving a
 five-minute margin below Apple's documented maximum}
 
@@ -40,7 +41,7 @@ A compact signed JWT string suitable for \code{oauth_client(..., client_secret =
 \description{
 Use your Apple developer key to create the client secret expected by Sign in
 with Apple. Pass the returned string as \code{client_secret} to \code{\link[=oauth_client]{oauth_client()}}.
-Unlike a fixed password, this secret expires; replace it before its expiry.
+The returned secret expires after \code{expires_in} seconds.
 }
 \details{
 The helper signs a JWT with ES256. It places your Team ID in \code{iss}, your

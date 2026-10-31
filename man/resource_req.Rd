@@ -22,7 +22,9 @@ resource_req(
 \arguments{
 \item{token}{Either an \link{OAuthToken} object or a raw access token string.}
 
-\item{url}{The absolute URL to call.}
+\item{url}{The absolute URL to call. Resource URLs must not exceed 8192 bytes,
+including the query and fragment, both before and after applying \code{query}.
+This limit also applies when \code{check_url = FALSE}.}
 
 \item{method}{Optional HTTP method (character). Defaults to "GET". When
 the effective token type is \code{DPoP}, this must be the final request method
@@ -32,16 +34,18 @@ reflected by the server and disclose credentials.}
 
 \item{headers}{Optional named list or named character vector of extra
 headers to set on the request. Header names are case-insensitive.
-Any user-supplied \code{Authorization} or \code{DPoP} header is ignored to ensure
-the token authentication set by this function is not overridden.}
+Names must be unique HTTP field-name tokens, and values must not contain
+prohibited control characters. DPoP requests reject \code{Host} overrides.
+This function manages the \code{Authorization} and \code{DPoP} headers and ignores
+user-supplied replacements.}
 
 \item{query}{Optional named list of query parameters to append to the URL.}
 
 \item{follow_redirect}{Logical or \code{NULL}. \code{FALSE} (the default) disables
 HTTP redirects even when \code{shinyOAuth.allow_redirect} is enabled.
 \code{NULL} inherits that global option (disabled by default).
-Set to \code{TRUE} only if you trust all possible redirect targets and
-understand the security implications.}
+\code{TRUE} enables redirects. DPoP requests reject enabled redirects because
+each target needs a new proof.}
 
 \item{check_url}{Logical. If \code{TRUE} (the default), validates \code{url} against
 \code{\link[=is_ok_host]{is_ok_host()}} before attaching the access token. This rejects relative
@@ -49,15 +53,12 @@ URLs, plain HTTP to non-loopback hosts, and when
 \code{options(shinyOAuth.allowed_hosts)} is set, hosts outside the allowlist.
 Without an allowlist this performs HTTPS and URL-syntax validation only
 (with the configured non-HTTPS exceptions); any HTTPS host is accepted.
-Set to \code{FALSE} only if you have already validated the URL and understand
-the security implications.}
+\code{FALSE} skips this policy check; URL length and resource-host restrictions
+still apply.}
 
-\item{client}{Optional \link{OAuthClient}. Required when the effective
-token type is \code{DPoP}, because the client carries the configured DPoP proof
-key, and also when using sender-constrained mTLS / certificate-bound
-tokens so shinyOAuth can attach the configured client certificate and
-validate any \code{cnf} thumbprint from an \link{OAuthToken} and observe any \code{cnf}
-thumbprint carried on a raw JWT access-token string.}
+\item{client}{Optional \link{OAuthClient}; required for DPoP or mTLS-bound tokens
+so the request can use the matching signing key or certificate and check
+any token-binding information.}
 
 \item{token_type}{Optional override for the access token type when \code{token}
 is supplied as a raw string. Supported values are \code{Bearer} and \code{DPoP}.
@@ -73,18 +74,15 @@ request. This is primarily useful after a resource server challenges with
 \item{resource_hosts}{Optional non-empty character vector of trusted resource
 host patterns, using \code{\link[=is_ok_host]{is_ok_host()}} matching rules. This call-scoped
 allowlist adds to the global policy and is enforced even if \code{check_url}
-is \code{FALSE}. Use exact hostnames for URLs derived from lower-trust input.
-It constrains the initial URL, not redirect destinations or resolved IPs;
-retain \code{follow_redirect = FALSE}. \code{NULL} adds no resource-specific policy.}
+is \code{FALSE}. It constrains the initial URL, not redirect destinations or
+resolved IPs. \code{NULL} adds no resource-specific policy.}
 
 \item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 }
 \value{
-An \link[httr2:httr2]{httr2} request object, ready to be performed with
-\code{\link[httr2:req_perform]{httr2::req_perform()}}. Callers may still add headers or query
-parameters, but when the effective token type is \code{DPoP} they must not
-change the request method or base URL after calling
-\code{\link[=resource_req]{resource_req()}} because the proof is already bound to those values.
+An \link[httr2:httr2]{httr2} request object, accepted by \code{\link[=perform_resource_req]{perform_resource_req()}} for
+bounded response handling. A DPoP proof is bound to the method and base URL
+at preparation time; later changes to either invalidate it.
 }
 \description{
 Build an \link[httr2:httr2]{httr2} request that uses the user's access token. Use this when
@@ -92,25 +90,34 @@ you want to inspect or customize a request before sending it. To build and
 send in one step, use \code{\link[=perform_resource_req]{perform_resource_req()}}.
 }
 \details{
-Only send a token to an API you intend to authorize. The package applies its
-URL policy, timeouts, and redirect defaults. It supports Bearer authentication
-and tokens tied to a key (DPoP) or certificate (mTLS). For DPoP or mTLS,
-also supply \code{client} so the request uses the matching key or
-certificate.
+The package applies its URL policy, timeouts and redirect defaults. It supports
+Bearer authentication and tokens tied to a key (DPoP) or certificate (mTLS).
+For DPoP or mTLS, \code{client} supplies the matching key or certificate.
 
-Managed Authorization credentials cannot be combined with an \code{access_token}
-query parameter or form field. Inspection covers URL/query inputs and prebuilt
-httr2 form, raw and string bodies labelled \code{application/x-www-form-urlencoded}.
-JSON business fields are unaffected. File, multipart and streaming bodies are
-not parsed; callers must ensure these contain no additional OAuth credential
-transport. Later request changes outside these helpers require a new check.
+\code{\link[=perform_resource_req]{perform_resource_req()}} sends the prepared request with the package's
+response-size limits. \code{\link[httr2:req_perform]{httr2::req_perform()}} uses httr2's transport settings.
 }
+\section{Advanced request restrictions}{
+
+The helper rejects additional \code{access_token} credentials in ordinary URL and
+form inputs. File, multipart and streaming bodies, and changes made after
+preparation, are outside that check.
+
+\code{\link[=perform_resource_req]{perform_resource_req()}} limits both downloaded bytes and decoded gzip data.
+Direct httr2 execution does not provide shinyOAuth's decoded-response limit;
+its curl limit depends on the installed libcurl version. Prepared requests can
+be sent with \code{perform_resource_req(token, request, client = client)}.
+}
+
 \section{DPoP note}{
 
 DPoP proofs bind the current HTTP method and target URI (without query or
-fragment). Use the \code{query} argument to preserve encoded resource paths;
+fragment). Literal \code{.} and \code{..} path segments are removed before signing
+and sending; percent-encoded path segments remain escaped.
+Use the \code{query} argument to preserve encoded resource paths;
 external URL modifiers can decode reserved path characters. Changing the
 method, scheme, host, or path invalidates the proof.
+Automatic redirects are unsupported; each target URL requires its own proof.
 }
 
 \examples{
@@ -120,33 +127,32 @@ if (interactive()) {
   # Inside reactive server code, after login has succeeded:
   token <- auth[["token"]]
 
-  # Recommended for most callers: build + perform in one step.
+  # Build and send in one step.
   response <- perform_resource_req(
     token,
     "https://api.example.com/resource",
     query = list(limit = 5)
   )
 
-  # Build only when you need to inspect the request yourself.
+  # Prepare a request before sending it.
   request <- resource_req(
     token,
     "https://api.example.com/resource",
     query = list(limit = 5)
   )
 
-  # Inspect request settings without printing authentication headers.
-  # httr2::req_perform(request) sends it when ready.
+  # Sending the prepared request applies the same response-size limits.
+  response <- perform_resource_req(token, request)
 
   # Or start from your own httr2 request and still let shinyOAuth perform it
-  # so DPoP nonce retries remain available.
+  # so response limits and DPoP nonce retries remain available.
   custom_request <- httr2::request("https://api.example.com/resource") |>
     httr2::req_headers(Accept = "application/json") |>
     httr2::req_url_query(limit = 5)
 
   response <- perform_resource_req(token, custom_request)
 
-  # Constrain dynamic URLs before attaching a token. check_url alone does not
-  # restrict HTTPS hosts unless a global allowed_hosts policy is configured.
+  # resource_hosts restricts this dynamic URL to api.example.com.
   response <- perform_resource_req(
     token,
     input[["resource_url"]],

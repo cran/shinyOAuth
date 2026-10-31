@@ -523,9 +523,16 @@ resolve_dpop_alg <- function(client) {
 #' @keywords internal
 #' @noRd
 dpop_public_jwk <- function(key) {
+  private_key_public_jwk(key, arg_name = "dpop_private_key")
+}
+
+# Export only public members, including OKP keys unsupported by jose's exporter.
+# Share this representation with assertion/JAR policy binding so the signed
+# transaction binds the same key that is used for outbound signatures.
+private_key_public_jwk <- function(key, arg_name = "private key") {
   pub <- try(openssl::read_pubkey(openssl::write_pem(key)), silent = TRUE)
   if (inherits(pub, "try-error")) {
-    err_config("Failed to derive public key from dpop_private_key")
+    err_config(paste0("Failed to derive public key from ", arg_name))
   }
   if (inherits(pub, "ed25519")) {
     public_bytes <- as.list(pub)[["data"]]
@@ -541,15 +548,15 @@ dpop_public_jwk <- function(key) {
 
   jwk_json <- try(jose::jwk_write(pub), silent = TRUE)
   if (inherits(jwk_json, "try-error")) {
-    err_config("Failed to serialize DPoP public key as JWK")
+    err_config("Failed to serialize public key as JWK")
   }
 
   jwk <- try(
-    jsonlite::fromJSON(jwk_json, simplifyVector = FALSE),
+    jsonlite::parse_json(jwk_json, simplifyVector = FALSE),
     silent = TRUE
   )
   if (inherits(jwk, "try-error") || !is.list(jwk)) {
-    err_parse("Failed to parse serialized DPoP public JWK")
+    err_parse("Failed to parse serialized public JWK")
   }
 
   private_members <- intersect(
@@ -558,7 +565,7 @@ dpop_public_jwk <- function(key) {
   )
   if (length(private_members) > 0L) {
     err_config(
-      "Serialized DPoP JWK unexpectedly contained private key material"
+      "Serialized public JWK unexpectedly contained private key material"
     )
   }
 
@@ -571,13 +578,14 @@ dpop_public_jwk <- function(key) {
 #'
 #' @param url Request URL to normalize.
 #' @return Absolute URL string without query string or fragment, normalized for
-#'   scheme/host case and default HTTP(S) ports.
+#'   scheme/host case, default HTTP(S) ports, and literal dot path segments.
 #' @keywords internal
 #' @noRd
 dpop_target_uri <- function(url) {
   if (!is_valid_string(url)) {
     err_input("DPoP target URL must be a non-empty string")
   }
+  url <- normalize_dpop_request_url(url)
 
   parsed <- try(httr2::url_parse(url), silent = TRUE)
   if (inherits(parsed, "try-error")) {
@@ -615,6 +623,98 @@ dpop_target_uri <- function(url) {
     hostname,
     if (!is.null(port) && nzchar(port)) paste0(":", port) else "",
     url_raw_path(url)
+  )
+}
+
+#' Normalize a DPoP request path for proof construction and transport
+#'
+#' Used before proof construction and transport so the proof binds to the same
+#' path even when curl's path_as_is option is enabled. Applies RFC 3986 section
+#' 5.2.4 to the escaped absolute path without decoding percent-encoded segments
+#' or changing the query or fragment. Unicode DNS hosts are converted to ASCII
+#' A-labels and non-ASCII path characters are percent-encoded as UTF-8 (RFC 3987
+#' section 3.1) before signing and transport.
+#'
+#' @param url Validated absolute request URL.
+#' @return Request URL with literal dot segments removed and a URI-encoded path.
+#' @keywords internal
+#' @noRd
+normalize_dpop_request_url <- function(url) {
+  parsed <- httr2::url_parse(url)
+  host <- text_force_utf8(parsed[["hostname"]])
+  if (!is.null(host) && any(utf8ToInt(host) > 127L)) {
+    ascii_host <- host_normalize_idna(host)
+    # Host comparisons drop a final root dot; transport and proof binding must
+    # preserve it because it is part of the actual request authority.
+    if (endsWith(host, ".")) {
+      ascii_host <- paste0(ascii_host, ".")
+    }
+    if (any(utf8ToInt(ascii_host) > 127L)) {
+      err_input("Failed to convert DPoP target hostname to ASCII")
+    }
+    parsed[["hostname"]] <- ascii_host
+    parsed[["path"]] <- ""
+    parsed[["query"]] <- NULL
+    parsed[["fragment"]] <- NULL
+    url <- paste0(
+      sub("/$", "", httr2::url_build(parsed)),
+      url_raw_path(url),
+      sub("^[^?#]*", "", url)
+    )
+  }
+  path <- url_raw_path(url)
+  # RFC 3987: convert non-ASCII path characters to percent-encoded UTF-8 before
+  # signing and sending. Preserve existing escapes and reserved delimiters.
+  bytes <- as.integer(charToRaw(enc2utf8(path)))
+  if (any(bytes > 127L)) {
+    path <- paste0(
+      vapply(
+        bytes,
+        function(byte) {
+          if (byte > 127L) sprintf("%%%02X", byte) else rawToChar(as.raw(byte))
+        },
+        character(1)
+      ),
+      collapse = ""
+    )
+    url <- paste0(
+      sub("^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]*).*", "\\1", url),
+      path,
+      sub("^[^?#]*", "", url)
+    )
+  }
+  if (!grepl("(^|/)\\.\\.?(/|$)", path)) {
+    return(url)
+  }
+  segments <- strsplit(path, "/", fixed = TRUE)[[1L]]
+  if (endsWith(path, "/")) {
+    segments <- c(segments, "")
+  }
+  # Reserve space once. Growing or slicing the stack on each push/pop copies
+  # progressively larger vectors for long paths with literal dot segments.
+  normalized <- character(length(segments) + 1L)
+  position <- 0L
+  for (segment in segments) {
+    if (identical(segment, ".")) {
+      next
+    }
+    if (identical(segment, "..")) {
+      if (position > 1L) {
+        position <- position - 1L
+      }
+    } else {
+      position <- position + 1L
+      normalized[[position]] <- segment
+    }
+  }
+  if (segments[[length(segments)]] %in% c(".", "..")) {
+    position <- position + 1L
+    normalized[[position]] <- ""
+  }
+  paste0(
+    sub("^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]*).*", "\\1", url),
+    paste(normalized[seq_len(position)], collapse = "/"),
+    sub("^[^?#]*", "", url)
   )
 }
 
@@ -678,6 +778,7 @@ build_dpop_proof <- function(
 
   key <- resolve_dpop_private_key(client)
   alg <- resolve_dpop_alg(client)
+  check_client_rsa_algorithm(client, key, alg, "DPoP signing")
   if (!private_key_can_sign_jws_alg(key, alg, typ = "dpop+jwt")) {
     err_config(
       c(
@@ -757,11 +858,26 @@ req_add_dpop_proof <- function(
     return(req)
   }
 
+  follow <- req[["options"]][["followlocation"]] %||% allow_redirect()
+  if (
+    !identical(follow, FALSE) && !identical(follow, 0L) && !identical(follow, 0)
+  ) {
+    err_input(c(
+      "DPoP requests cannot follow HTTP redirects because each target requires a new proof",
+      "i" = "Use follow_redirect = FALSE for resource requests and disable shinyOAuth.allow_redirect for provider requests."
+    ))
+  }
+  req <- httr2::req_options(req, followlocation = FALSE)
+
   method <- resolve_client_bearer_method(req = req)
   url <- req[["url"]] %||% NA_character_
   if (!is_valid_string(url)) {
     err_config("Request URL missing while building DPoP proof")
   }
+  url <- normalize_dpop_request_url(url)
+  # Literal dot segments are already removed; preserve escaped segments on wire.
+  req <- httr2::req_url(req, url) |>
+    httr2::req_options(path_as_is = TRUE)
   if (!is_valid_string(nonce)) {
     request_kind <- if (is_valid_string(access_token)) "resource" else "token"
     nonce <- dpop_nonce_cache_get(
@@ -829,35 +945,49 @@ parse_http_auth_challenges <- function(value) {
     return(list())
   }
 
+  # Bound untrusted work before allocating or scanning. Header/body transport
+  # limits and HTTP timeouts do not constrain CPU spent parsing a response.
+  if (nchar(value, type = "bytes") > 65536L) {
+    err_token(
+      "WWW-Authenticate response header exceeds the maximum of 65536 bytes"
+    )
+  }
   chars <- strsplit(value, "", fixed = TRUE)[[1]]
-  parts <- character()
-  current <- character()
+  separators <- integer(255L)
+  count <- 0L
   quoted <- FALSE
   escaped <- FALSE
-  for (ch in chars) {
+  for (i in seq_along(chars)) {
+    ch <- chars[[i]]
     if (escaped) {
-      current <- c(current, ch)
       escaped <- FALSE
       next
     }
     if (quoted && identical(ch, "\\")) {
-      current <- c(current, ch)
       escaped <- TRUE
       next
     }
     if (identical(ch, '"')) {
       quoted <- !quoted
-      current <- c(current, ch)
       next
     }
     if (!quoted && identical(ch, ",")) {
-      parts <- c(parts, paste0(current, collapse = ""))
-      current <- character()
-      next
+      if (count == length(separators)) {
+        err_token(
+          "WWW-Authenticate response header exceeds the maximum of 256 challenge/parameter parts"
+        )
+      }
+      count <- count + 1L
+      separators[[count]] <- i
     }
-    current <- c(current, ch)
   }
-  parts <- trimws(c(parts, paste0(current, collapse = "")))
+  separators <- separators[seq_len(count)]
+  # Slice each part once instead of copying a growing vector per character.
+  parts <- trimws(substring(
+    value,
+    c(1L, separators + 1L),
+    c(separators - 1L, length(chars))
+  ))
   parts <- parts[nzchar(parts)]
 
   token_pattern <- "[!#$%&'*+.^_`|~0-9A-Za-z-]+"
@@ -951,7 +1081,10 @@ resp_is_dpop_nonce_challenge <- function(resp) {
 
   if (identical(status, 400L)) {
     body <- try(
-      httr2::resp_body_json(resp, simplifyVector = TRUE),
+      jsonlite::parse_json(
+        httr2::resp_body_string(resp),
+        simplifyVector = TRUE
+      ),
       silent = TRUE
     )
     if (is.list(body)) {
@@ -997,6 +1130,8 @@ resp_is_dpop_nonce_challenge <- function(resp) {
 #'   nonce regardless, as required by RFC 9449.
 #' @param nonce Optional nonce to use for the initial DPoP proof before any
 #'   server challenge is received.
+#' @param track_start Attach the successful attempt's conservative start time
+#'   to the response for short-lived PAR request URI accounting.
 #' @return httr2 response object.
 #' @keywords internal
 #' @noRd
@@ -1005,10 +1140,18 @@ req_with_dpop_retry <- function(
   client,
   access_token = NULL,
   idempotent = TRUE,
-  nonce = NULL
+  nonce = NULL,
+  track_start = FALSE
 ) {
+  started_at <- as.numeric(Sys.time())
+  finish <- function(resp) {
+    if (isTRUE(track_start)) {
+      attr(resp, "shinyOAuth.request_started_at") <- started_at
+    }
+    resp
+  }
   if (!client_has_dpop(client)) {
-    return(req_with_retry(req, idempotent = idempotent))
+    return(finish(req_with_retry(req, idempotent = idempotent)))
   }
 
   url <- req[["url"]] %||% NA_character_
@@ -1067,7 +1210,7 @@ req_with_dpop_retry <- function(
   }
 
   if (!resp_is_dpop_nonce_challenge(resp)) {
-    return(resp)
+    return(finish(resp))
   }
 
   attr(resp, "shinyOAuth.otel_attributes") <- compact_list(c(
@@ -1079,10 +1222,11 @@ req_with_dpop_retry <- function(
   ))
 
   if (!is_valid_string(nonce)) {
-    return(resp)
+    return(finish(resp))
   }
 
   current_nonce <- nonce
+  started_at <- as.numeric(Sys.time())
   retry_req <- req_add_dpop_proof(
     req,
     client,
@@ -1111,5 +1255,5 @@ req_with_dpop_retry <- function(
     )
   ))
 
-  resp
+  finish(resp)
 }

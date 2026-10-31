@@ -14,12 +14,12 @@ generic_oidc_provider <- oauth_provider_oidc(
   base_url = "https://my-issuer.example.com"
 )
 
-# Configure a OIDC provider via OIDC discovery
+# Look up an OIDC provider's settings with discovery
 # (requires network access)
 if (interactive()) {
   # Using Auth0 sample issuer as an example
   oidc_discovery_provider <- oauth_provider_oidc_discover(
-    issuer = "https://samples.auth0.com"
+    issuer = "https://samples.auth0.com/"
   )
 }
 

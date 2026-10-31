@@ -7,7 +7,8 @@
 oauth_provider_microsoft(
   name = "microsoft",
   tenant = c("common", "organizations", "consumers"),
-  id_token_validation = NULL
+  id_token_validation = NULL,
+  userinfo_required = TRUE
 )
 }
 \arguments{
@@ -22,6 +23,11 @@ Microsoft alias tenants (\code{common}, \code{organizations}, \code{consumers}).
 \code{common} and \code{organizations} use Microsoft's tenant-independent issuer and
 signing-key validation rules; \code{consumers} uses the stable consumer tenant
 issuer}
+
+\item{userinfo_required}{Retrieve profile information from Microsoft Graph.
+Set FALSE for an API token with a different audience.
+Manual \code{get_userinfo()} calls require the complete validated
+\link{OAuthToken} when OIDC validation is enabled.}
 }
 \value{
 \link{OAuthProvider} object configured for Microsoft identity platform
@@ -37,17 +43,23 @@ allows work or school accounts, \code{"consumers"} allows personal Microsoft
 accounts, and \code{"common"} allows both. Your app registration and app access
 rules must also permit the intended accounts.
 
+Profiles are fetched from Microsoft Graph by default. Set
+\code{userinfo_required = FALSE} for an API token that cannot call Graph.
+}
+\section{Advanced identity settings}{
+
 ID token validation is enabled for these tenant choices. For a directory ID,
 the issuer must match that directory. \code{"common"} and \code{"organizations"} use
 Microsoft's tenant-independent issuer template and signing-key issuer rules.
 \code{"consumers"} uses the consumer tenant issuer. The helper restricts ID token
-algorithms to RS256 and fetches userinfo from Microsoft Graph.
+algorithms to RS256.
 
 Setting \code{id_token_validation = FALSE} disables ID token and nonce checks and
-leaves OAuth plus profile retrieval. Keep the default for OIDC sign-in.
-Tenant domains and other unrecognized tenant identifiers require this
-explicit opt-out; otherwise use the directory GUID to retain OIDC validation.
+leaves OAuth plus any configured profile retrieval. Tenant domains and other
+unrecognized tenant identifiers require that setting; directory GUIDs and
+the aliases above support OIDC validation automatically.
 }
+
 \examples{
 if (
   # Example requires configured Microsoft Entra ID (Azure AD) tenant:
@@ -155,12 +167,9 @@ if (
     })
   }
 
-  # Need to open app in 'localhost:8100' to match with redirect_uri
-  # of the public Azure CLI app (above). Browser must use 'localhost'
-  # too to properly set the browser cookie. But Shiny only redirects to
-  # '127.0.0.1' & blocks process once it runs. So we disable browser
-  # launch by Shiny & then use 'later::later()' to open the browser
-  # ourselves a short moment after the app starts
+  # Open localhost:8100 to match the Azure CLI app's registered redirect URI
+  # and keep browser cookies on the same host. Schedule the browser launch
+  # before runApp() starts blocking R.
   later::later(
     function() {
       utils::browseURL("http://localhost:8100")

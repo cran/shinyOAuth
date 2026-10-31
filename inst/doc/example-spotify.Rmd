@@ -9,17 +9,13 @@ vignette: >
 
 ## Overview
 
-This example lets a user connect their Spotify account and displays their
-top tracks. It uses the same provider, client, and module setup as
-[Usage](usage.html), then calls Spotify's API with the access token.
-Spotify supplies profile data through its API rather than an OIDC ID token.
+This app shows a user's top tracks after they authorize access to Spotify.
+Spotify handles sign-in and returns an access token, a credential your app can
+use to ask its API for data. The app never needs the user's Spotify password.
 
-The helper identifies accounts using immutable `account_id`, as specified in
-[Spotify's May 2026 changes](https://developer.spotify.com/documentation/web-api/references/changes/may-2026).
-Before upgrading an existing app, migrate stored `id` mappings and audit digests
-using both identifiers from an authenticated profile. Do not merge accounts by
-email or display name. `allow_legacy_id = TRUE` permits a temporary fallback only
-when `account_id` is missing; it does not preserve old mappings when both exist.
+Scopes name the permissions to request. Here `user-top-read` allows reading
+listening preferences; other data needs different permissions. For the shared
+login setup, see [Usage](usage.html).
 
 ## Spotify app registration
 
@@ -37,9 +33,9 @@ when `account_id` is missing; it does not preserve old mappings when both exist.
 ## Shiny app example
 
 Save this as `app.R`, run it, and open `http://127.0.0.1:8100` in a regular
-browser. After connecting Spotify, click **Load top tracks**.
+browser. After connecting Spotify, click Load top tracks.
 
-```{r, eval = FALSE}
+```{r spotify-app, eval = FALSE}
 library(shiny)
 library(shinyOAuth)
 
@@ -48,7 +44,8 @@ client <- oauth_client(
   client_id = Sys.getenv("SPOTIFY_OAUTH_CLIENT_ID"),
   client_secret = Sys.getenv("SPOTIFY_OAUTH_CLIENT_SECRET"),
   redirect_uri = "http://127.0.0.1:8100",
-  scopes = c("user-read-private", "user-top-read")
+  scopes = c("user-read-private", "user-top-read"),
+  resource_bases = c(spotify = "https://api.spotify.com/v1")
 )
 
 ui <- oauth_ui(fluidPage(
@@ -59,24 +56,42 @@ ui <- oauth_ui(fluidPage(
 
 server <- function(input, output, session) {
   auth <- oauth_module_server("auth", client)
+  tracks <- reactiveVal(NULL)
 
-  tracks <- eventReactive(input[["load"]], {
-    req(auth[["authenticated"]])
-    tryCatch({
-      response <- perform_resource_req(
-        auth[["token"]],
-        "https://api.spotify.com/v1/me/top/tracks",
-        query = list(limit = 10, time_range = "short_term")
+  observe({
+    connection <- auth[["connection"]]()
+    result <- isolate(tracks())
+    if (is.null(connection) ||
+        !connection[["has_scopes"]]("user-top-read") ||
+        (!is.null(result) &&
+         !identical(result[["authorization"]], connection[["id"]]))) {
+      tracks(NULL)
+    }
+  })
+
+  observeEvent(input[["load"]], {
+    connection <- req(auth[["connection"]]())
+    req(connection[["has_scopes"]]("user-top-read"))
+    data <- tryCatch({
+      response <- connection[["request"]](
+        "spotify", "me/top/tracks",
+        query = list(limit = 10, time_range = "short_term"),
+        required_scopes = "user-top-read",
+        refresh = TRUE
       )
       httr2::resp_check_status(response)
       body <- httr2::resp_body_json(response, simplifyVector = FALSE)
       vapply(body[["items"]], function(track) track[["name"]], character(1))
     }, error = function(e) NULL)
+    tracks(list(authorization = connection[["id"]], data = data))
   })
 
   output[["tracks"]] <- renderTable({
-    req(auth[["authenticated"]])
-    values <- tracks()
+    connection <- req(auth[["connection"]]())
+    req(connection[["has_scopes"]]("user-top-read"))
+    result <- tracks()
+    req(identical(result[["authorization"]], connection[["id"]]))
+    values <- result[["data"]]
     validate(need(!is.null(values), "Could not load tracks. Try again later."))
     validate(need(length(values) > 0, "No listening data to show yet."))
     data.frame(Track = values)
@@ -88,14 +103,15 @@ runApp(shinyApp(ui, server), port = 8100, launch.browser = FALSE)
 
 ## API requests and scopes
 
-`user-top-read` grants permission to read listening preferences. The request
-above asks for up to ten tracks from the short-term range. The module obtains
-and stores the access token; `perform_resource_req()` uses it to call the API.
-`eventReactive()` loads the data when the button is clicked, and
-`renderTable()` displays the result.
+The request asks for up to ten tracks from the short-term range, using the
+`user-top-read` permission. The module obtains and stores the access token;
+the connection checks the operation's scope and approved API address, refreshing
+the token if needed before the request.
+`observeEvent()` loads the data when the button is clicked, and `renderTable()`
+displays it for the current login. The observer clears cached tracks on logout,
+a new login, or loss of permission to read them.
 
-For other data, choose the API URL and requested scopes together. A successful
-login does not mean every API is available to the app. Empty results can be
+Other Spotify endpoints require their corresponding scopes. Empty results can be
 normal for accounts without listening history; API errors can indicate missing
 permissions, app access restrictions, or request limits.
 
@@ -114,8 +130,5 @@ file.show(dashboard_file)  # Read or copy the complete source.
 source(dashboard_file)    # Run after setting your Spotify credentials.
 ```
 
-The source groups the code into client setup, API helpers, UI, and server
-logic. It validates Spotify links and image URLs before rendering them and
-keeps table escaping enabled. Preserve those protections when adapting it;
-profile and track text can contain characters that would otherwise become HTML.
-Available data still depends on Spotify's API access rules for your app.
+The installed dashboard validates Spotify link and image URLs and escapes
+text in its HTML output.

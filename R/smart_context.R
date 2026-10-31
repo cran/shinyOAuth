@@ -3,17 +3,17 @@
 #' @description
 #' `r lifecycle::badge("experimental")`
 #'
-#' Return interpreted patient/encounter and validated user references for the
-#' current accepted token. This is sensitive data; keep it out of general status
-#' tables and logs. Raw token extensions remain available separately on tokens.
+#' Returns the patient and encounter selected for a connection, plus validated
+#' user references when requested. This context identifies the current chart and
+#' user; raw token extensions remain available separately on tokens.
 #'
 #' @param connection An [OAuthConnection] for a [smart_client()], accessed in
 #'   its owning Shiny session.
 #' @return `smart_context()` returns a list with `version`, `fhir_base`, `revision`,
 #'   `changed`, `patient`, `encounter`, `fhirUser` and `need_patient_banner`.
 #'   Absent values are `NULL`. `revision` increases when interpreted context
-#'   changes; key patient-dependent application data by connection ID and this
-#'   revision. Refresh omission carries context forward, except that a changed
+#'   changes. Together, connection ID and revision identify the context for
+#'   patient-dependent data. Refresh omission carries context forward, except that a changed
 #'   or cleared patient clears an omitted encounter. Explicit null clears a
 #'   field, unless patient access still requires patient context. An initial
 #'   launch query never establishes this context.
@@ -29,11 +29,8 @@
 #' are outside these two convenience methods.
 #'
 #' Patient IDs and user identity are different: the first identifies a chart,
-#' the second the authenticated user. Neither changes the local connection owner.
-#' General summaries omit all of this data. The application remains responsible
-#' for displaying patient identity clearly and discarding data from an older
-#' context revision. Experimental `fhirContext` and styling extensions remain
-#' raw data and are not automatically fetched or interpreted.
+#' the second the authenticated user. General summaries omit this data.
+#' Experimental `fhirContext` and styling extensions are retained as raw data.
 #' Location-specific `authorization_details` apply scope, patient and encounter
 #' overrides only for the configured FHIR base, with omitted fields falling back
 #' to this response's top-level values. Other locations never add destinations.

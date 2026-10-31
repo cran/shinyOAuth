@@ -4,33 +4,32 @@ if (interactive()) {
   # Inside reactive server code, after login has succeeded:
   token <- auth[["token"]]
 
-  # Recommended for most callers: build + perform in one step.
+  # Build and send in one step.
   response <- perform_resource_req(
     token,
     "https://api.example.com/resource",
     query = list(limit = 5)
   )
 
-  # Build only when you need to inspect the request yourself.
+  # Prepare a request before sending it.
   request <- resource_req(
     token,
     "https://api.example.com/resource",
     query = list(limit = 5)
   )
 
-  # Inspect request settings without printing authentication headers.
-  # httr2::req_perform(request) sends it when ready.
+  # Sending the prepared request applies the same response-size limits.
+  response <- perform_resource_req(token, request)
 
   # Or start from your own httr2 request and still let shinyOAuth perform it
-  # so DPoP nonce retries remain available.
+  # so response limits and DPoP nonce retries remain available.
   custom_request <- httr2::request("https://api.example.com/resource") |>
     httr2::req_headers(Accept = "application/json") |>
     httr2::req_url_query(limit = 5)
 
   response <- perform_resource_req(token, custom_request)
 
-  # Constrain dynamic URLs before attaching a token. check_url alone does not
-  # restrict HTTPS hosts unless a global allowed_hosts policy is configured.
+  # resource_hosts restricts this dynamic URL to api.example.com.
   response <- perform_resource_req(
     token,
     input[["resource_url"]],

@@ -61,30 +61,23 @@ discovery fails with a configuration error (no fallback).}
 \item{allowed_token_types}{Character vector of allowed token types for
 access tokens issued by this provider. Defaults to 'Bearer'}
 
-\item{jwks_host_issuer_match}{When TRUE (default), enforce that the JWKS host
-discovered from the provider matches the issuer host exactly. For
-providers that serve JWKS from a different host, set
-\code{jwks_host_allow_only} to the exact hostname instead of disabling this.
-Disabling (\code{FALSE}) is not recommended unless you also pin JWKS via
-\code{jwks_host_allow_only} or \code{jwks_pins}.}
+\item{jwks_host_issuer_match}{When TRUE (default), require the discovered
+JWKS host to match the issuer host exactly. \code{jwks_host_allow_only} takes
+precedence and can specify a different exact hostname. \code{FALSE} disables
+issuer-host matching.}
 
 \item{issuer_match}{Character scalar controlling how strictly to validate the
 discovery document's \code{issuer} against the input \code{issuer}.
 \itemize{
 \item \code{"url"} (default): require the issuer used for discovery to match
-exactly, including any trailing slash (recommended). For a full discovery
-URL input, require the discovered issuer's standard metadata location to
-match that URL instead.
-\item \code{"host"}: compare only scheme + host (explicit opt-out; not recommended).
-\item \code{"none"}: do not validate issuer consistency.
-}
+exactly, including any trailing slash. For a full discovery URL input,
+require the discovered issuer's standard metadata location to match that URL.
+\item \code{"host"}: compare only scheme + host.
+\item \code{"none"}: skip issuer-consistency validation.
+}}
 
-Prefer \code{"url"} and tighten hosts via \code{options(shinyOAuth.allowed_hosts)}
-when feasible.}
-
-\item{...}{Additional fields passed to \code{\link[=oauth_provider]{oauth_provider()}} (for example,
-\code{pkce_method = "plain"} when a provider explicitly advertises only plain
-PKCE support and you intentionally want to allow that downgrade).}
+\item{...}{Additional fields passed to \code{\link[=oauth_provider]{oauth_provider()}}, including
+\code{pkce_method = "plain"} for compatibility with plain-only PKCE metadata.}
 
 \item{allowed_algs}{Compatibility alias for \code{id_token_allowed_algs}. Supply only one spelling.}
 }
@@ -107,13 +100,20 @@ copied into the provider when present. Discovering an introspection endpoint
 does not itself require token introspection; set \code{introspect = TRUE} on
 \code{\link[=oauth_client]{oauth_client()}} when login and refresh must perform that check.
 
-Discovery describes what a service supports. Your app's registration may
-require a particular \code{token_auth_style}, secret, or key; configure those to
-match the registration. Automatic selection prefers \code{"header"}, then \code{"body"},
-then \code{"public"} when \code{none} is advertised and PKCE is enabled. For a public
-client registration, set \code{token_auth_style = "public"} explicitly. JWT and
-mTLS methods must also be selected explicitly.
+Discovery describes the service, not your app registration. Use the client ID
+and secret or key issued for your app. If the registration is public (no
+secret), explicitly select \code{token_auth_style = "public"}. Other authentication
+choices and metadata restrictions are described below.
 }
+\section{Advanced authentication selection}{
+
+Automatic selection prefers \code{"header"}, then \code{"body"}, then \code{"public"} when
+\code{none} is advertised and PKCE is enabled. JWT and mTLS methods require an
+explicit choice. Selected methods must match the advertised metadata.
+If \code{token_endpoint_auth_methods_supported} is absent, only the OIDC default
+\code{client_secret_basic} (\code{"header"}) is assumed.
+}
+
 \section{Discovery validation}{
 
 The discovered issuer must match the requested identifier by default.
@@ -165,12 +165,12 @@ generic_oidc_provider <- oauth_provider_oidc(
   base_url = "https://my-issuer.example.com"
 )
 
-# Configure a OIDC provider via OIDC discovery
+# Look up an OIDC provider's settings with discovery
 # (requires network access)
 if (interactive()) {
   # Using Auth0 sample issuer as an example
   oidc_discovery_provider <- oauth_provider_oidc_discover(
-    issuer = "https://samples.auth0.com"
+    issuer = "https://samples.auth0.com/"
   )
 }
 

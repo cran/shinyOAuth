@@ -40,53 +40,43 @@ omit \code{id}, \code{client}, and \code{callback_path}; each client's redirect 
 its route, and both query and form-post clients are supported.}
 }
 \value{
-A Shiny UI function. Pass it to \code{\link[shiny:shinyApp]{shiny::shinyApp()}} and, for non-root
-callback paths, use \code{uiPattern = ".*"} so Shiny routes the callback path to
-this UI function.
+A Shiny UI function for \code{\link[shiny:shinyApp]{shiny::shinyApp()}}.
 }
 \description{
-Accept the provider's login callback as an HTTP POST and continue login with
-\code{\link[=oauth_module_server]{oauth_module_server()}}. Use this when you select \code{response_mode = "form_post"}
-or \code{"form_post.jwt"}, either because the provider requires it or to keep
-callback parameters out of the browser URL. The POST arrives before a Shiny
-session exists; this wrapper receives it and makes the validated callback
-available to the server module. For query-string callbacks, use \code{\link[=oauth_ui]{oauth_ui()}}.
+Accepts the provider's login callback as an HTTP POST for
+\code{response_mode = "form_post"} or \code{"form_post.jwt"}. These modes keep callback
+parameters out of the browser URL. The POST arrives before a Shiny session
+exists; the wrapper receives it and makes the validated callback available
+to \code{\link[=oauth_module_server]{oauth_module_server()}}. \code{\link[=oauth_ui]{oauth_ui()}} handles query-string callbacks.
 }
 \details{
-Set \code{response_mode} on your \code{\link[=oauth_client]{oauth_client()}}, wrap your UI here, and use
-the same \code{id} and \code{client} in \code{\link[=oauth_module_server]{oauth_module_server()}}. The wrapper includes
-the browser setup and privacy header supplied by \code{\link[=oauth_ui]{oauth_ui()}}.
-For a callback path below the app root, pass \code{uiPattern = ".*"} to
-\code{\link[shiny:shinyApp]{shiny::shinyApp()}} so Shiny routes the callback to this wrapper.
+The wrapper and \code{\link[=oauth_module_server]{oauth_module_server()}} share the same \code{id} and \code{client}.
+The wrapper includes browser setup and response headers. Callback paths below
+the app root require \code{uiPattern = ".*"} in \code{\link[shiny:shinyApp]{shiny::shinyApp()}} so Shiny routes
+those requests to the wrapper.
 
-The wrapper checks the incoming address and login state, stores the callback
-temporarily, and redirects the browser to a normal Shiny page with a
-single-use handle. Raw callback values do not appear in that redirected URL.
-For \code{"form_post.jwt"}, it also validates the signed response using
-JWT Secured Authorization Response Mode (JARM).
-Every POST receives its own random handle. Handles expire after 120 seconds
-or the smaller of \code{state_payload_max_age} and the state store lifetime.
-The module still verifies the browser binding before consuming login state.
-Each client/provider/module namespace has a separate bounded pool in the
-state store: 256 partitions of
-eight slots, with each login assigned to one partition. When a partition is
-full, a new POST replaces its oldest response. An expired or replaced handle
-fails validation; it can never select the replacement response. Completed
-logins invalidate their remaining candidates and remove locally known
-candidates where possible. Shared stores still require atomic \code{take}.
-With \code{set_if_absent}, slots are claimed atomically with a short TTL; a full
-partition rejects new callbacks until a slot is consumed or expires.
-Otherwise, concurrent writers can also
-replace a candidate; handle validation fails closed in that case. Pending
-form-post handles issued by an older version must be restarted after upgrading.
+The wrapper receives the login result before the Shiny session starts,
+then sends the browser to a clean app URL. Raw callback values stay out of
+that URL. The server module completes the usual login checks.
 }
+\section{Advanced callback storage}{
+
+Responses are held briefly in the client's state store under single-use
+handles. They expire after at most 120 seconds, or sooner if the state policy
+requires it. Pending responses are not replaced to make room for new ones;
+a full callback pool rejects additional responses until space becomes available.
+Shared stores need atomic \code{take} and \code{set_if_absent}; see \code{\link[=custom_cache]{custom_cache()}}.
+Pending callbacks created by an older version must be restarted after upgrading.
+\code{form_post.jwt} also verifies the signed authorization response (JARM).
+}
+
 \section{Deployment behind a proxy}{
 
-If a proxy receives HTTPS and forwards HTTP to Shiny, supply a
-\code{request_uri_resolver} that reconstructs the public address after verifying
-the request came from your trusted proxy. The default resolver does not
-trust forwarded headers. The resulting address must match the configured
-redirect origin and callback path. See the \href{https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html}{advanced security vignette}.
+The default resolver uses the server-observed address and ignores forwarded
+headers. For an HTTPS-terminating proxy, a custom \code{request_uri_resolver} can
+reconstruct the public address from headers accepted at that proxy's trust
+boundary. The wrapper checks the result against the configured redirect
+origin and callback path. See the \href{https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html}{advanced security vignette}.
 
 Callback size limits are documented in the \href{https://lukakoning.github.io/shinyOAuth/articles/package-options.html}{package options reference}.
 }

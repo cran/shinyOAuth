@@ -319,7 +319,7 @@ fetch_jwks <- function(
   }
 
   # Compute a cache key that incorporates issuer + pinning + provider/global
-  # host policy.
+  # host policy and the effective global/request-local TLS minimum.
   cache_key <- jwks_cache_key(
     issuer,
     pins = pins,
@@ -516,7 +516,7 @@ fetch_jwks <- function(
   jwks_body <- httr2::resp_body_string(jresp)
   reject_duplicate_json_object_members(jwks_body, "JWKS JSON")
   jwks <- try(
-    jsonlite::fromJSON(jwks_body, simplifyVector = FALSE),
+    jsonlite::parse_json(jwks_body, simplifyVector = FALSE),
     silent = TRUE
   )
   if (inherits(jwks, "try-error")) {
@@ -799,6 +799,8 @@ normalize_jwks_cache_host_patterns <- function(patterns) {
 #' pinning configuration (sorted unique pins + pin_mode), discovery issuer
 #' policy, provider host-policy fields (`jwks_host_issuer_match`,
 #' `jwks_host_allow_only`), and the effective global host allowlists.
+#' The effective minimum from the global TLS option and local `tls_minimum`
+#' scopes both cached keys and forced-refresh throttles to the transport policy.
 #' Including issuer and host policy prevents cross-policy cache reuse where a
 #' relaxed provider or looser runtime allowlist populates the cache and a
 #' stricter configuration skips validation on hit.
@@ -817,6 +819,8 @@ normalize_jwks_cache_host_patterns <- function(patterns) {
 #'   `options(shinyOAuth.allowed_hosts)`.
 #' @param allowed_non_https_hosts Optional effective value of
 #'   `options(shinyOAuth.allowed_non_https_hosts)`.
+#' @param tls_minimum Optional request/client TLS floor, combined with the
+#'   global `options(shinyOAuth.tls_min_version)` floor.
 #' @return Cache-safe key string.
 #' @keywords internal
 #' @noRd
@@ -842,7 +846,8 @@ jwks_cache_key <- function(
   if (!is.null(pins) && length(pins) > 0) {
     pins_norm <- sort(unique(as.character(pins)))
   }
-  # Normalize host-policy fields
+  # Normalize host-policy fields; reject malformed pins before any cache hit.
+  jwks_host_allow_only <- normalize_jwks_host_pin(jwks_host_allow_only)
   host_match <- isTRUE(jwks_host_issuer_match)
   allow_only <- ""
   if (
@@ -891,14 +896,43 @@ jwks_cache_key <- function(
   ch <- paste0(sprintf("%02x", as.integer(ch_raw)), collapse = "")
   # Use an alphanumeric delimiter to satisfy cache key constraints while keeping clarity
   key <- paste0(ih, "x", ch)
-  if (!is.null(tls_minimum)) {
-    policy <- resolve_tls_policy(minimum = tls_minimum)
-    if (!is.null(policy[["problem"]])) {
-      err_config(policy[["problem"]])
-    }
-    key <- paste0(key, "tls", gsub(".", "", tls_minimum, fixed = TRUE))
+  policy <- resolve_effective_tls_policy(local_minimum = tls_minimum)
+  if (!is.null(policy[["problem"]])) {
+    err_config(policy[["problem"]])
+  }
+  minimum <- policy[["minimum"]]
+  if (!is.null(minimum)) {
+    key <- paste0(key, "tls", gsub(".", "", minimum, fixed = TRUE))
   }
   key
+}
+
+# Normalize explicit pins before cache lookups, discovery or network access.
+normalize_jwks_host_pin <- function(value, fail = err_config) {
+  if (
+    is.null(value) || identical(value, NA_character_) || identical(value, NA)
+  ) {
+    return(NA_character_)
+  }
+  invalid <- function() {
+    fail(
+      "jwks_host_allow_only must be a single hostname or URL, NULL, or scalar NA"
+    )
+  }
+  if (!is_valid_string(value)) {
+    invalid()
+  }
+  host <- tolower(trimws(value))
+  if (grepl("^https?://", host)) {
+    host <- parse_url_host(host, "jwks_host_allow_only")
+  } else if (!grepl("^[A-Za-z0-9.-]+$", host)) {
+    invalid()
+  }
+  host <- sub("\\.$", "", host)
+  if (!is_valid_string(host)) {
+    invalid()
+  }
+  host
 }
 
 #' Internal: ensure JWKS host aligns with issuer
@@ -937,30 +971,15 @@ validate_jwks_host_matches_issuer <- function(
     # Best-effort access without hard S7 dependency here
     check_host <- isTRUE(try(provider@jwks_host_issuer_match, silent = TRUE))
     pinned_host <- try(provider@jwks_host_allow_only, silent = TRUE)
-    if (inherits(pinned_host, "try-error")) pinned_host <- NA_character_
+    if (inherits(pinned_host, "try-error")) {
+      err_config("Could not read provider jwks_host_allow_only policy")
+    }
   }
 
+  pinned_host <- normalize_jwks_host_pin(pinned_host)
   # If a pinned host is configured, enforce exact match to it
-  if (
-    is.character(pinned_host) &&
-      length(pinned_host) == 1 &&
-      !is.na(pinned_host) &&
-      nzchar(pinned_host)
-  ) {
-    ph <- tolower(trimws(pinned_host))
-    # Allow specifying either a bare host ("www.googleapis.com") or a full URL
-    # ("https://www.googleapis.com"). Normalize to host-only for comparison.
-    if (grepl("://", ph, fixed = TRUE)) {
-      # Best-effort: extract host from URL; on failure, keep original string
-      ph <- try(
-        parse_url_host(ph, label = "jwks_host_allow_only"),
-        silent = TRUE
-      )
-      if (inherits(ph, "try-error")) {
-        ph <- tolower(trimws(pinned_host))
-      }
-    }
-    ph <- sub("\\.$", "", ph)
+  if (!is.na(pinned_host)) {
+    ph <- pinned_host
     if (!identical(jwks_host, ph)) {
       err_config(c(
         "x" = "jwks_uri host must equal configured jwks_host_allow_only",

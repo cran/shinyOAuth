@@ -68,7 +68,6 @@
 
 ## ----multiple-app, eval = FALSE-----------------------------------------------
 # base_ui <- fluidPage(
-#   use_shinyOAuth(),
 #   h2("My connected services"),
 #   actionButton("connect_a", "Connect Service A"),
 #   actionButton("connect_b", "Connect Service B"),

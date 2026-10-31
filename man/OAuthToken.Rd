@@ -38,15 +38,17 @@ non-expiring token}
 \item{userinfo}{List containing user information fetched from the provider's
 userinfo endpoint (if fetched)}
 
-\item{cnf}{Optional confirmation claim set returned alongside a
-sender-constrained access token or observed on another token surface. For
-RFC 8705 certificate-bound tokens, this may contain \code{x5t#S256} with the
+\item{cnf}{Optional binding metadata for an access token tied to a key or
+certificate. It can come from a token response, the access token's JWT
+payload, or an introspection response. For RFC 8705 certificate-bound tokens,
+this may contain \code{x5t#S256} with the
 SHA-256 thumbprint of the client certificate that must accompany later
 requests. For DPoP-bound tokens, this may contain \code{jkt} with the RFC 7638
 thumbprint of the public JWK bound to the token. When \code{cnf} is learned by
 locally parsing a raw JWT access token, shinyOAuth is observing the token
-payload and is not independently verifying the access-token signature;
-introspection or another provider proof surface is stronger assurance.}
+payload and is not independently verifying the access-token signature.
+A token or introspection response received directly from the provider gives
+stronger confirmation.}
 
 \item{granted_scopes}{Normalized scope tokens currently associated with the
 access token. When a provider omits \code{scope} in a token response,
@@ -55,7 +57,8 @@ shinyOAuth carries forward the best-known scope set instead of dropping it.}
 \item{granted_scopes_verified}{Logical flag indicating whether the current
 token response explicitly proved \code{granted_scopes}. \code{FALSE} means the scope
 set was assumed or carried forward because the provider omitted \code{scope}.
-For stronger proof, configure \code{introspection_checks = "scope"}.}
+With \code{introspection_checks = "scope"}, provider introspection can verify
+the granted scope set.}
 
 \item{id_token_validated}{Logical flag indicating whether the ID token was
 cryptographically validated (signature verified and standard claims checked)
@@ -64,7 +67,7 @@ during the OAuth flow. Defaults to \code{FALSE}.}
 \item{original_id_token}{Initial login ID token retained as the refresh
 continuity baseline. Refresh never replaces it with a newer ID token.
 For manually constructed tokens, the first refresh initializes this from
-\code{id_token} if omitted. Treat this property as credential material.}
+\code{id_token} if omitted.}
 
 \item{extra_fields}{List of additional parameters from the latest successful
 token endpoint response. Excludes \code{access_token}, \code{token_type}, \code{refresh_token},
@@ -94,21 +97,17 @@ The Shiny module supplies it as \code{auth[["token"]]}, and \code{\link[=handle_
 it for custom integrations. Pass it to \code{\link[=perform_resource_req]{perform_resource_req()}} to call an
 API, or to the token helpers for refresh, introspection, and revocation.
 
-Read properties with \code{@}, for example \code{auth[["token"]]@userinfo}. Profile fields
-depend on the provider. Keep access and refresh tokens out of the UI and logs.
+Properties use \code{@}, for example \code{auth[["token"]]@userinfo}. Profile fields
+depend on the provider.
 }
 \details{
-The \code{id_token_claims} property is a read-only computed property that returns
-the decoded JWT payload of the ID token as a named list. This surfaces all
-standard and optional OIDC claims (e.g., \code{sub}, \code{iss}, \code{aud}, \code{acr}, \code{amr},
-\code{auth_time}, \code{nonce}, \code{at_hash}, etc.) without requiring manual JWT
-decoding. Returns an empty list when no ID token is present or if the token
-cannot be decoded.
+Read \code{token@id_token_claims} for the decoded ID-token payload as a named list,
+including standard and optional OIDC claims such as \code{sub}, \code{iss}, \code{aud}, \code{acr},
+\code{amr}, \code{auth_time}, \code{nonce} and \code{at_hash}. This property is read-only and returns
+an empty list when the token is absent or cannot be decoded.
 
-Note: \code{id_token_claims} always decodes the JWT payload regardless
-of whether the ID token's signature was verified.
-Check the \code{id_token_validated} property to determine whether the claims
-were cryptographically validated.
+Decoding does not verify the signature. Check \code{id_token_validated} before
+using these claims as a validated identity.
 For validated Apple ID tokens, exact \code{"true"}/\code{"false"} strings in
 \code{email_verified} are returned as logical values, as during validation.
 The original signed \code{id_token} is retained unchanged.
@@ -120,7 +119,7 @@ from a field explicitly returned as \code{null}. These parameters are not ID
 token claims and are not covered by \code{id_token_validated}. The initial
 snapshot records the initial response data, not current access permissions.
 No automatic merging, resource fetching, or interpretation is performed.
-Both lists can contain sensitive data; keep them out of the UI and logs.
+\code{print()} and \code{format()} redact both lists.
 }
 \examples{
 # Inside reactive server code, after a successful login:

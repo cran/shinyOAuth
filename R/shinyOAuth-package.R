@@ -10,10 +10,10 @@
 
 ## usethis namespace: start
 #' @import httr2
-#' @import rlang
+#' @import rlang, except = ":="
 #' @import S7
 #' @importFrom cli cli_format
-#' @importFrom jsonlite fromJSON toJSON
+#' @importFrom jsonlite parse_json toJSON
 #' @importFrom openssl sha256 base64_encode rand_bytes
 #' @importFrom stats runif
 ## usethis namespace: end

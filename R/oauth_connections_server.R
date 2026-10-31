@@ -1,9 +1,10 @@
 #' Connect, restore and use several OAuth authorizations in a Shiny session
 #'
-#' Call once inside `server()` with the manager and ID used by
-#' [oauth_connections_ui()]. The returned methods select stored connections by
-#' opaque IDs and recheck the local owner for every operation. Tokens are kept
-#' on the server and are not returned by summaries.
+#' Let users connect several accounts or services, choose a saved connection,
+#' and call its API from your Shiny server. Call this once inside `server()` with
+#' the manager and ID used by [oauth_connections_ui()]. Connection summaries show
+#' status without exposing tokens; server code can obtain a current token from
+#' the selected connection when another R package needs it.
 #'
 #' @param id Module ID shared with [oauth_connections_ui()].
 #' @param manager Configuration from [oauth_connections()].
@@ -22,34 +23,64 @@
 #'     EHR-only clients report `fresh_ehr_launch_required` and return `FALSE`;
 #'     use their registered [smart_launch_route()] to start authorization.
 #'   * `connections()`: reactive list of redacted connection summaries.
-#'   * `connection(connection_id)`: an [OAuthConnection] for requests and refresh.
-#'   * `touch()`: record explicit user activity after checking the current owner.
-#'     Call from an input event handler; returns `TRUE` invisibly.
+#'   * `connection(connection_id = NULL)`: an [OAuthConnection] for requests, refresh,
+#'     scope checks and server-side `$access_token()` retrieval for external SDKs.
+#'   * `reauthorize(connection_id)`: end this local authorization and start its
+#'     replacement with the retained scope limit, without upstream revocation.
+#'     Local state preparation is checked first; rejection preserves current access.
+#'     The replacement summary includes `replaces_connection_id`. Failed/cancelled
+#'     replacement leaves the old reference invalid. EHR-only clients require a
+#'     fresh EHR launch instead.
+#'   * `touch()`: record explicit user activity after checking the current owner;
+#'     returns `TRUE` invisibly.
 #'   * `disconnect(connection_id, revoke = TRUE)`: remove local usability first,
 #'     then return separate `local` and `remote` revocation results.
+#'     For token targets, `remote$access` summarizes all acquired API tokens;
+#'     incomplete or failed cleanup takes priority over successful cleanup.
 #'   * `disconnect_all(revoke = TRUE)`: cancel pending authorizations and disconnect
 #'     this owner's stored connections; return a list of results.
-#'   * `logout(revoke = TRUE, reload = TRUE)`: invalidate the local owner/session
-#'     generation first, disconnect its connections, and normally reload the UI.
+#'   * `logout(revoke = TRUE, reload = TRUE)`: end the local owner session,
+#'     disconnect its connections, and normally reload the UI.
 #'     This does not log the user out of the external OAuth provider or the app's
 #'     own account authentication system.
 #'   * `errors()`: reactive list of per-client module error codes, with no raw
 #'     provider text. An ended owner is reported as `owner_unavailable`.
 #' @details
-#' References expire with this Shiny session even when their stored grants survive.
-#' A new session obtains new references after owner verification. The manager
-#' coordinates refresh across its connections. Refresh preserves the original
-#' authentication time and retention expiry.
+#' Use `auth$connections()` to populate a selection control, then
+#' `connection <- auth$connection(selected_id)` for the chosen account.
+#' `connection$request()` calls a configured API; `connection$access_token()`
+#' supplies a current token for another R package. See
+#' `vignette("multiple-authorizations", package = "shinyOAuth")`
+#' ([online guide](https://lukakoning.github.io/shinyOAuth/articles/multiple-authorizations.html))
+#' for a complete app and `vignette("external-integrations", package = "shinyOAuth")`
+#' ([online guide](https://lukakoning.github.io/shinyOAuth/articles/external-integrations.html))
+#' for API client and database examples.
+#'
+#' @section Advanced lifetime and refresh behavior:
+#' Each Shiny session needs its own connection references, even when the manager
+#' retains the saved authorizations. A new session obtains these after owner
+#' verification. The manager coordinates refresh across its connections without
+#' changing the original authentication time or retention expiry.
 #' Reactive connection reads also recheck expiry at `refresh_check_interval_ms`,
 #' including references used without `connections()` or `errors()`. These checks
-#' notify dependent expressions when lifecycle state changes; unchanged polling
+#' notify reactive expressions when connection status changes; unchanged polling
 #' does not rerun application requests or extend owner inactivity limits.
 #' Notifications to application code reflect only this owner's record changes.
-#' Resource requests and status reads never reset owner inactivity, including when
-#' reactive expressions rerun after automatic refresh. Call `touch()` from a user
-#' input event handler to count an application action as activity. Do not call it
-#' from polling observers or ordinary reactive readers. Connecting, explicitly
-#' refreshing and disconnecting also count as activity.
+#' Without an ID, `connection()` returns NULL when no authorization remains,
+#' selects the sole retained authorization, or raises `shinyOAuth_access_error`
+#' with reason `selection_required` when several remain. Expired, limited and
+#' uncertain authorizations count toward ambiguity; disconnected rows do not.
+#'
+#' Reactive expressions that read `connection()`, `$access_token()` or
+#' `$has_scopes()` do not rerun on token refresh alone if the login and permissions
+#' stay the same. Token acquisition never extends owner idle limits or replays
+#' application requests. See
+#' `vignette("external-integrations", package = "shinyOAuth")`
+#' ([online guide](https://lukakoning.github.io/shinyOAuth/articles/external-integrations.html)).
+#' Resource requests and status reads do not reset owner inactivity, including
+#' reactive reads after automatic refresh. `touch()` explicitly records activity,
+#' for example from an input event handler. Connecting, explicitly refreshing and
+#' disconnecting also count as activity.
 #'
 #' Remote revocation is best effort: at most ten seconds per disconnect/logout
 #' batch, at most two seconds and one HTTP attempt per credential. Results are
@@ -60,15 +91,14 @@
 #' (RFC 7009 section 2.1). Separate connection IDs do not establish independent
 #' provider grants, even after repeated consent or account selection. Consequently,
 #' default `revoke = TRUE` may also end access for sibling connections or other
-#' applications covered by the provider's revocation policy. Use `revoke = FALSE`
-#' when preserving those authorizations is required. This also applies to
-#' credentials returned by work already in flight. Removed credentials remain
-#' valid remotely until the provider expires
-#' or revokes them. Local summaries and `is_usable()` do not detect such remote
-#' changes: handle API authorization failures and obtain a new authorization.
+#' applications covered by the provider's revocation policy. With `revoke = FALSE`,
+#' disconnect removes local access without requesting remote revocation. This also
+#' applies to credentials returned by work already in flight. Removed credentials
+#' remain valid remotely until the provider expires or revokes them. Local summaries
+#' and `is_usable()` reflect local state, independently of remote provider changes.
 #'
-#' Use this API inside its owning session's reactive context. Session setup
-#' requires a matching HTTP Origin on the Shiny request. Raw HTTP routes cannot
+#' The API checks its owning session's reactive context. Session setup requires
+#' a matching HTTP Origin on the Shiny request. Raw HTTP routes cannot
 #' import credentials or select an owner. The manager supports one R process.
 #' @example inst/examples/oauth_connections.R
 #' @export
@@ -99,7 +129,11 @@ oauth_connections_server <- function(
     err_config("Invalid connection refresh timing")
   }
   shiny::moduleServer(id, function(input, output, session) {
-    controller <- connection_manager_controller(manager, session)
+    controller <- connection_manager_controller(
+      manager,
+      session,
+      refresh_lead_seconds
+    )
     modules <- lapply(names(manager[["clients"]]), function(client_name) {
       oauth_module_server_impl(
         client_name,
@@ -112,6 +146,8 @@ oauth_connections_server <- function(
     })
     names(modules) <- names(manager[["clients"]])
     lifecycle <- shiny::reactiveVal(NULL)
+    authorization <- shiny::reactiveVal(NULL)
+    references <- new.env(parent = emptyenv())
     launch_error <- shiny::reactiveVal(NULL)
     shiny::observeEvent(
       input[["smart_launch"]],
@@ -129,20 +165,68 @@ oauth_connections_server <- function(
       },
       ignoreInit = FALSE
     )
-    connection <- function(connection_id) {
-      record <- controller[["read"]](connection_id)
-      OAuthConnection[["new"]](
+    connection <- function(connection_id = NULL) {
+      authorization()
+      if (is.null(connection_id)) {
+        rows <- shiny::isolate(controller[["records"]]())
+        rows <- Filter(
+          function(record) !identical(record[["status"]], "disconnected"),
+          rows
+        )
+        if (!length(rows)) {
+          return(NULL)
+        }
+        if (length(rows) != 1L) {
+          connection_access_error("selection_required")
+        }
+        connection_id <- rows[[1L]][["stored"]][["id"]]
+      }
+      record <- shiny::isolate(controller[["read"]](connection_id))
+      if (!is.null(references[[connection_id]])) {
+        return(references[[connection_id]][["reference"]])
+      }
+      current <- shiny::reactiveVal(
+        !identical(record[["status"]], "disconnected")
+      )
+      reference <- OAuthConnection[["new"]](
         connection_id,
         record[["client"]],
+        is_current = current,
         resolve = function() {
           controller[["changed"]]()
           lifecycle()
           controller[["read"]](connection_id)
         },
-        refresh = function(scopes = NULL) {
-          controller[["refresh"]](connection_id, async = async, scopes = scopes)
+        refresh = function(scopes = NULL, target = NULL) {
+          controller[["refresh"]](
+            connection_id,
+            async = async,
+            scopes = scopes,
+            target = target
+          )
+        },
+        acquire = function(
+          async = FALSE,
+          target = NULL,
+          wait_only = FALSE,
+          reuse_cached = NULL
+        ) {
+          controller[["acquire"]](
+            connection_id,
+            async = async,
+            target = target,
+            wait_only = wait_only,
+            reuse_cached = reuse_cached
+          )
         }
       )
+      if (shiny::isolate(current())) {
+        references[[connection_id]] <- list(
+          reference = reference,
+          current = current
+        )
+      }
+      reference
     }
     connections <- shiny::reactive({
       controller[["changed"]]()
@@ -178,7 +262,30 @@ oauth_connections_server <- function(
     shiny::observe({
       controller[["changed"]]()
       shiny::invalidateLater(refresh_check_interval_ms, session)
-      rows <- tryCatch(controller[["records"]](), error = function(...) NULL)
+      rows <- tryCatch(controller[["poll"]](), error = function(...) NULL)
+      if (!is.null(rows)) {
+        retained <- vapply(
+          Filter(
+            function(record) !identical(record[["status"]], "disconnected"),
+            rows
+          ),
+          function(record) record[["stored"]][["id"]],
+          character(1)
+        )
+        for (id in setdiff(ls(references, all.names = TRUE), retained)) {
+          references[[id]][["current"]](FALSE)
+          rm(list = id, envir = references)
+        }
+      }
+      authorization(list(
+        available = !is.null(rows),
+        records = lapply(rows, function(record) {
+          list(
+            id = record[["stored"]][["id"]],
+            available = record[["status"]] %in% c("active", "refreshing")
+          )
+        })
+      ))
       # Only lifecycle transitions invalidate reference consumers on a poll.
       # Explicit store changes notify this owner's consumers through changed().
       lifecycle(list(
@@ -186,20 +293,18 @@ oauth_connections_server <- function(
         records = lapply(rows, function(record) {
           list(
             id = record[["stored"]][["id"]],
-            status = connection_record_status(record)
+            status = record[["lifecycle_status"]]
           )
         })
       ))
       for (record in rows) {
-        token <- record[["token"]]
         now <- as.numeric(Sys.time())
         lead <- if (refresh_proactively) refresh_lead_seconds else 0
         if (
           identical(record[["status"]], "active") &&
-            !is.null(token) &&
-            !is.na(token@expires_at) &&
-            token@expires_at <= now + lead &&
-            is_valid_string(token@refresh_token)
+            isTRUE(record[["refreshable"]]) &&
+            !is.na(record[["refresh_at"]]) &&
+            record[["refresh_at"]] <= now + lead
         ) {
           result <- tryCatch(
             controller[["refresh"]](
@@ -234,6 +339,10 @@ oauth_connections_server <- function(
       },
       connections = connections,
       connection = connection,
+      reauthorize = function(connection_id) {
+        client_name <- controller[["reauthorize"]](connection_id)
+        modules[[client_name]][[".reauthorize"]]()
+      },
       touch = function() {
         controller[["guard"]](touch = TRUE)
         invisible(TRUE)

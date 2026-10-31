@@ -28,12 +28,13 @@
 #'   for this provider. Defaults to TRUE
 #' @param token_auth_style Token endpoint client authentication style passed to
 #'   [oauth_provider()]. Defaults to `"header"`.
-#' @param jwks_host_issuer_match When TRUE (default), enforce that the JWKS host
-#'   discovered from the provider matches the issuer host exactly. For
-#'   providers that serve JWKS from a different host (e.g., Google), set
-#'   `jwks_host_allow_only` to the exact hostname instead of disabling this.
-#'   Disabling (`FALSE`) is not recommended unless you also pin JWKS via
-#'   `jwks_host_allow_only` or `jwks_pins`
+#' @param issuer Exact OIDC issuer identifier. Defaults to `base_url`, retaining
+#'   any trailing slash. Supply this explicitly when your provider identifies
+#'   itself with a different URL from the one used to build endpoint addresses.
+#' @param jwks_host_issuer_match When TRUE (default), require the discovered
+#'   JWKS host to match the issuer host exactly. `jwks_host_allow_only` takes
+#'   precedence and can specify a different exact hostname. `FALSE` disables
+#'   issuer-host matching.
 #' @param allowed_token_types Character vector of allowed token types for
 #'  access tokens issued by this provider. Defaults to 'Bearer'
 #' @param ... Additional arguments passed to [oauth_provider()]
@@ -55,14 +56,15 @@ oauth_provider_oidc <- function(
   jwks_host_issuer_match = TRUE,
   allowed_token_types = c("Bearer"),
   ...,
-  token_auth_style = "header"
+  token_auth_style = "header",
+  issuer = base_url
 ) {
-  base_url <- sub("/+$", "", base_url)
+  endpoint_base_url <- sub("/+$", "", base_url)
 
-  auth_url <- paste0(base_url, auth_path)
-  token_url <- paste0(base_url, token_path)
-  userinfo_url <- paste0(base_url, userinfo_path)
-  introspection_url <- paste0(base_url, introspection_path)
+  auth_url <- paste0(endpoint_base_url, auth_path)
+  token_url <- paste0(endpoint_base_url, token_path)
+  userinfo_url <- paste0(endpoint_base_url, userinfo_path)
+  introspection_url <- paste0(endpoint_base_url, introspection_path)
 
   oauth_provider(
     name = name,
@@ -70,7 +72,7 @@ oauth_provider_oidc <- function(
     token_url = token_url,
     userinfo_url = userinfo_url,
     introspection_url = introspection_url,
-    issuer = base_url,
+    issuer = issuer,
     infer_oidc_from_issuer = TRUE,
     use_nonce = use_nonce,
     id_token_validation = id_token_validation,
@@ -89,6 +91,7 @@ oauth_provider_oidc <- function(
 #' Create the provider configuration for a GitHub OAuth App, then pass it with
 #' your app credentials to [oauth_client()]. This configures profile retrieval
 #' from GitHub's API; GitHub does not return an OIDC ID token.
+#' The helper handles GitHub's permission-response format automatically.
 #'
 #' @details
 #' You can register a new GitHub OAuth 2.0 app in your
@@ -117,6 +120,7 @@ oauth_provider_github <- function(name = "github") {
     pkce_method = "S256",
 
     token_auth_style = "body",
+    token_response_scope_format = "comma",
     extra_auth_params = list(),
     extra_token_params = list(),
     extra_token_headers = c(Accept = "application/json"),
@@ -142,13 +146,12 @@ oauth_provider_github <- function(name = "github") {
 #' @details
 #' You can register a new Google OAuth 2.0 app in the
 #' [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
-#' Configure the client ID & secret in your [OAuthClient].
 #'
 #' This preset uses a restricted Google OIDC profile: ID tokens must have
 #' `iss = "https://accounts.google.com"`, matching Google's discovery issuer.
 #' Google's [ID token validation guidance](https://developers.google.com/identity/openid-connect/openid-connect#validatinganidtoken)
 #' also permits `"accounts.google.com"`; this alternate issuer is not accepted
-#' by this preset. Issuer comparison remains exact, as for other OIDC providers.
+#' by this preset.
 #'
 #' @examples
 #' oauth_provider_google()
@@ -195,16 +198,20 @@ oauth_provider_google <- function(name = "google") {
 #' accounts, and `"common"` allows both. Your app registration and app access
 #' rules must also permit the intended accounts.
 #'
+#' Profiles are fetched from Microsoft Graph by default. Set
+#' `userinfo_required = FALSE` for an API token that cannot call Graph.
+#'
+#' @section Advanced identity settings:
 #' ID token validation is enabled for these tenant choices. For a directory ID,
 #' the issuer must match that directory. `"common"` and `"organizations"` use
 #' Microsoft's tenant-independent issuer template and signing-key issuer rules.
 #' `"consumers"` uses the consumer tenant issuer. The helper restricts ID token
-#' algorithms to RS256 and fetches userinfo from Microsoft Graph.
+#' algorithms to RS256.
 #'
 #' Setting `id_token_validation = FALSE` disables ID token and nonce checks and
-#' leaves OAuth plus profile retrieval. Keep the default for OIDC sign-in.
-#' Tenant domains and other unrecognized tenant identifiers require this
-#' explicit opt-out; otherwise use the directory GUID to retain OIDC validation.
+#' leaves OAuth plus any configured profile retrieval. Tenant domains and other
+#' unrecognized tenant identifiers require that setting; directory GUIDs and
+#' the aliases above support OIDC validation automatically.
 #'
 #' @param name Optional friendly name for the provider. Defaults to "microsoft"
 #' @param tenant Tenant identifier ("common", "organizations", "consumers",
@@ -215,6 +222,10 @@ oauth_provider_google <- function(name = "google") {
 #'   `common` and `organizations` use Microsoft's tenant-independent issuer and
 #'   signing-key validation rules; `consumers` uses the stable consumer tenant
 #'   issuer
+#' @param userinfo_required Retrieve profile information from Microsoft Graph.
+#'   Set FALSE for an API token with a different audience.
+#'   Manual `get_userinfo()` calls require the complete validated
+#'   [OAuthToken] when OIDC validation is enabled.
 #'
 #' @return [OAuthProvider] object configured for Microsoft identity platform
 #'
@@ -224,7 +235,8 @@ oauth_provider_google <- function(name = "google") {
 oauth_provider_microsoft <- function(
   name = "microsoft",
   tenant = c("common", "organizations", "consumers"),
-  id_token_validation = NULL
+  id_token_validation = NULL,
+  userinfo_required = TRUE
 ) {
   tenant <- tenant[1]
   if (!is_valid_string(tenant)) {
@@ -244,6 +256,9 @@ oauth_provider_microsoft <- function(
   tenant_independent_alias <- tenant %in% c("common", "organizations")
   consumer_alias <- identical(tenant, "consumers")
   is_guid <- is_guid_like(tenant)
+  if (is_guid) {
+    tenant <- tolower(tenant)
+  }
   if (
     !(is_guid || tenant_independent_alias || consumer_alias) &&
       !identical(id_token_validation, FALSE)
@@ -281,6 +296,7 @@ oauth_provider_microsoft <- function(
 
   oauth_provider(
     name = name,
+    token_target_mode = "microsoft",
 
     auth_url = auth_url,
     token_url = token_url,
@@ -302,8 +318,7 @@ oauth_provider_microsoft <- function(
 
     id_token_allowed_algs = c("RS256"),
 
-    userinfo_required = TRUE,
-    userinfo_id_token_match = isTRUE(id_token_validation),
+    userinfo_required = userinfo_required,
     userinfo_id_selector = function(userinfo) {
       userinfo[["sub"]]
     },
@@ -323,16 +338,14 @@ oauth_provider_microsoft <- function(
 #'
 #' @param name Optional provider name (default "spotify")
 #' @param allow_legacy_id Whether to fall back to Spotify's mutable `id` when
-#'   `account_id` is absent. Default `FALSE`; enable only during migration.
+#'   `account_id` is absent. Default `FALSE`.
 #' @details
-#' Spotify requires scopes to be included in the authorization request.
-#' Set requested scopes on the client with `oauth_client(..., scopes = ...)`.
-#' Identity uses Spotify's immutable `account_id`. Existing installations must
-#' migrate stored account mappings and audit digests from `id` before upgrading.
-#' Link the old and new identifiers only from a successfully authenticated
-#' profile; do not use display names or email to merge accounts. To temporarily
-#' preserve old mappings, explicitly replace `provider@userinfo_id_selector`
-#' with `function(userinfo) userinfo[["id"]]` while completing the migration.
+#' The client's `scopes` specify permissions in the authorization request.
+#' Identity uses Spotify's immutable `account_id`. Earlier versions used `id`,
+#' so stored account mappings and audit digests based on that field will differ.
+#' A custom `provider@userinfo_id_selector`, such as
+#' `function(userinfo) userinfo[["id"]]`, retains the earlier identity mapping;
+#' `allow_legacy_id` only supplies a fallback when `account_id` is absent.
 #'
 #' @return [OAuthProvider] object for use with a Spotify OAuth 2.0 app
 #'
@@ -372,19 +385,26 @@ oauth_provider_spotify <- function(
     extra_token_headers = character(),
     token_auth_style = "header",
 
-    userinfo_id_selector = function(userinfo) {
+    userinfo_id_selector = if (allow_legacy_id) function(userinfo) {
       account_id <- userinfo[["account_id"]]
       if (is_valid_string(account_id)) {
         return(account_id)
       }
       if (
-        isTRUE(allow_legacy_id) &&
-          is.null(account_id) &&
+        is.null(account_id) &&
           is_valid_string(userinfo[["id"]])
       ) {
         return(userinfo[["id"]])
       }
       NA_character_
+    } else function(userinfo) {
+      account_id <- userinfo[["account_id"]]
+      if (is_valid_string(account_id)) account_id else NA_character_
+    },
+    userinfo_id_selector_policy_id = if (allow_legacy_id) {
+      "spotify:account-id-with-legacy:v1"
+    } else {
+      "spotify:account-id:v1"
     },
     userinfo_required = TRUE,
     userinfo_id_token_match = FALSE,
@@ -407,9 +427,9 @@ oauth_provider_spotify <- function(
 #' @param name Optional provider name (default "slack")
 #' @param profile Slack app registration profile: `"confidential"` (default)
 #'   uses HTTP Basic and OIDC nonce validation without PKCE; `"public_pkce"`
-#'   uses S256 PKCE and sends no client secret. Select the public profile only
-#'   after enabling PKCE for that Slack app. Slack marks the app public, and
-#'   reversing that registration setting requires contacting Slack support.
+#'   uses S256 PKCE and sends no client secret, matching a Slack registration
+#'   with PKCE enabled. Enabling PKCE marks the Slack app public; reversing
+#'   that registration setting requires contacting Slack support.
 #'   See <https://docs.slack.dev/authentication/using-pkce/>.
 #'
 #' @return [OAuthProvider] object configured for Slack
@@ -455,15 +475,13 @@ oauth_provider_slack <- function(
 #'  method. One of "header" (client_secret_basic), "body"
 #'  (client_secret_post), "public" (send `client_id` only; `"none"` alias also
 #'  accepted), "private_key_jwt", or "client_secret_jwt". Defaults
-#'  to "body" for Keycloak, which works for many common setups. Use `"public"`
-#'  if you need to suppress `client_secret` even when it is set in the
-#'  environment. If you pass `NULL`, discovery will infer the method from the
+#'  to "body" for Keycloak. `"public"` omits `client_secret`, including one
+#'  supplied through the environment. `NULL` infers the method from the
 #'  provider's `token_endpoint_auth_methods_supported` metadata.
 #' @param jarm_tolerate_duplicate_top_level_iss Logical. Defaults to `TRUE`
 #'  for Keycloak because current Keycloak JARM responses may repeat an
-#'  identical top-level `iss` claim. Set `FALSE` to fail closed on duplicate
-#'  top-level `iss` members instead of applying this interoperability
-#'  workaround.
+#'  identical top-level `iss` claim. Set `FALSE` to reject duplicate top-level
+#'  `iss` members, including identical ones.
 #'
 #' @return [OAuthProvider] object configured for the specified Keycloak realm
 #'

@@ -1,0 +1,262 @@
+---
+title: "Use one login for several APIs"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Use one login for several APIs}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(shinyOAuth)
+```
+
+## One login, different API tokens
+
+A calendar service and a contacts service can require different access tokens,
+even when the same person uses both. A token target names an API and the
+permissions the app needs there. The app chooses the target when requesting a
+token, without requiring a separate login flow for each API.
+
+Targets rely on provider support for RFC 8707 resource indicators or
+Microsoft's API-specific scopes. The provider's registration and consent
+determine which APIs the login can access.
+
+For independent logins or different accounts, use
+[Multiple authorizations](multiple-authorizations.html). For initial login setup,
+start with [Usage](usage.html).
+
+## Configure two APIs
+
+This example uses a provider with RFC 8707 support. A resource identifier names
+an API to the login provider; a scope names a permission. `resource_bases` lists
+the actual HTTP addresses the app may call, which can differ from the resource
+identifiers.
+
+Replace all example settings with your provider's registered values. Microsoft
+uses the alternative setup shown [below](#microsoft-example).
+
+```{r, eval=FALSE}
+# Provider supports RFC 8707 resource indicators.
+provider <- oauth_provider(
+  "workplace", "https://login.example/authorize", "https://login.example/token",
+  token_target_mode = "rfc8707",
+  token_auth_style = "body",
+  userinfo_required = FALSE
+)
+client <- oauth_client(
+  provider,
+  client_id = Sys.getenv("OAUTH_CLIENT_ID"),
+  client_secret = Sys.getenv("OAUTH_CLIENT_SECRET"),
+  redirect_uri = "https://app.example/callback",
+  token_targets = list(
+    calendar = oauth_token_target(
+      resource = "https://calendar.example/",
+      scopes = c("calendar.read", "calendar.write"),
+      required_scopes = "calendar.read",
+      resource_ids = "calendar_api"
+    ),
+    contacts = oauth_token_target(
+      resource = "https://contacts.example/",
+      scopes = "contacts.read",
+      resource_ids = "contacts_api"
+    )
+  ),
+  token_target_default = "calendar",
+  resource_bases = c(
+    calendar_api = "https://calendar.example/v1",
+    contacts_api = "https://contacts.example/v1"
+  )
+)
+```
+
+`token_target_default` chooses the API when a call omits `target`.
+`oauth_token_target()` checks each declaration's fields; plain named lists with
+the same fields remain supported. The client checks provider-specific rules and
+how declarations relate to one another.
+Omitting client `scopes` uses the union of API permissions declared by the targets.
+If you supply `scopes`, include every target's permissions: that explicit list
+remains the limit and is never expanded automatically. Identity and refresh
+consent, such as `profile` or `offline_access`, still need an explicit request;
+OIDC continues to add `openid` when needed.
+`resource_ids` connects each target to its named API address in `resource_bases`.
+You can omit those addresses when only exporting tokens to another package.
+
+## Choose a token when making a call
+
+Get a connection from the module and pass `target` to select the API. Replace
+`existing_contacts_sdk()` with your contacts package's client constructor:
+
+```{r, eval=FALSE}
+server <- function(input, output, session) {
+  auth <- oauth_module_server(
+    "auth", client,
+    reauth_after_seconds = 60 * 60 # One-hour maximum login age
+  )
+  # Alternatively: auth <- oauth_connections_server("auth", manager)
+  # and select auth$connection(connection_id), or auth$connection() when unique.
+
+  contacts <- shiny::reactive({
+    connection <- shiny::req(auth$connection())
+    token <- connection$access_token("contacts.read", target = "contacts")
+    existing_contacts_sdk(access_token = token)$list_contacts()
+  })
+
+  output$can_edit_calendar <- shiny::renderText({
+    connection <- shiny::req(auth$connection())
+    connection$has_scopes("calendar.write", target = "calendar")
+  })
+
+  shiny::observeEvent(input$save_event, {
+    connection <- shiny::req(auth$connection())
+    connection$request(
+      "calendar_api", "events", method = "POST",
+      required_scopes = "calendar.write", target = "calendar", refresh = TRUE,
+      configure = function(req) httr2::req_body_json(req, list(title = input$title))
+    )
+  })
+}
+```
+
+`$access_token()` obtains or refreshes the chosen token when needed.
+`$has_scopes()` checks permissions already recorded; it can return `FALSE`
+before that target's first token acquisition. `$targets()` lists target status
+without exposing credentials.
+
+Use `$is_usable(target = "contacts")` to check whether that API's current token
+is usable, or `$summary(target = "contacts")` to inspect its status and expiry.
+These reads never acquire or refresh a token; an unacquired target has status
+`"not_acquired"` and is not usable.
+
+The example limits login to one hour with `reauth_after_seconds`. Without a
+limit, local authentication can outlast every API token;
+`indefinite_session = TRUE` disables that limit.
+
+## Refresh and sign in again
+
+For RFC 8707 providers, reduce one target's permissions with, for example,
+`connection$refresh(scopes = "calendar.read", target = "calendar")`. The selected
+scopes must include the target's required permissions.
+
+`auth$reauthorize()` starts a replacement login with the reduced permissions.
+For managed connections, pass the connection ID. Once replacement starts,
+cancelling does not restore the old login. An ordinary new login asks for the
+client's original permissions again.
+
+## Microsoft example
+
+Microsoft uses API-qualified scope names to select the token's intended API.
+Use the exact names from your registration. This example exports tokens to
+another package:
+
+```{r, eval=FALSE}
+provider <- oauth_provider_microsoft(
+  tenant = Sys.getenv("MICROSOFT_TENANT_ID"),
+  userinfo_required = FALSE
+)
+client <- oauth_client(
+  provider, Sys.getenv("OAUTH_CLIENT_ID"), Sys.getenv("OAUTH_CLIENT_SECRET"),
+  redirect_uri = "https://app.example/callback",
+  scopes = c(
+    "openid", "offline_access",
+    "https://graph.microsoft.com/Calendars.Read",
+    "api://your-contacts-api/Contacts.Read"
+  ),
+  token_targets = list(
+    calendar = oauth_token_target(
+      resource = "https://graph.microsoft.com",
+      scopes = "https://graph.microsoft.com/Calendars.Read"
+    ),
+    contacts = oauth_token_target(
+      resource = "api://your-contacts-api",
+      scopes = "api://your-contacts-api/Contacts.Read"
+    )
+  ),
+  token_target_default = "calendar"
+)
+```
+
+`userinfo_required = FALSE` skips the Graph profile request, which would be
+inappropriate for a token intended for another API. Add `resource_bases` and
+each target's `resource_ids` if you also want
+to call `$request()`.
+
+## Advanced: provider support and declaration limits
+
+Targets share a login and refresh credential but keep separate API tokens and
+permission limits. Enable `token_target_mode = "rfc8707"` or `"microsoft"` only
+after confirming provider support; discovery does not infer it.
+
+Targets require `userinfo_required = FALSE` and cannot be combined with SMART
+configuration or the client's `resource` argument. Use the module's
+`connection()` method, since the older `oauth_connection()` wrapper does not
+support targets. Up to 16 targets are supported.
+
+### Identity and refresh-consent scopes
+
+For OIDC, put identity scopes such as `openid`, `profile` and `email` at client
+level. `offline_access` requests refresh consent through client `scopes`; it is
+not an API permission and is rejected in `required_scopes`. The provider still
+decides whether to issue a refresh token.
+
+When narrowing a target, retain any identity and refresh-consent scopes you
+still need. Later refreshes preserve reductions; a replacement OIDC login still
+requests `openid` for its new identity check.
+
+`connection$identity()` returns the last validated identity, which can outlast
+an API token. Each target's token and request methods check current API access.
+
+## Advanced: Microsoft permissions and consent
+
+Microsoft can return previously consented permissions beyond those needed for
+the current operation. Connection methods enforce the app's local limits, but
+an exported token carries the provider's full grant.
+
+Explicit API narrowing with `$refresh(scopes = ...)` fails with
+`unsupported_scope_narrowing` and leaves the login usable. Change provider
+consent or use a separate registration if the token itself needs fewer permissions.
+
+### Resource identifiers and scope names
+
+Use the exact registered resource identifier, including any trailing slash,
+and fully qualified scope names. Resources can be URIs or GUIDs. The package
+rejects distinct resources with overlapping prefixes because scope names would
+be ambiguous.
+Microsoft permission checks ignore ASCII case; resource identifiers are exact.
+
+### Static permissions and unusual short names
+
+Use `resource/.default` as a target's sole API scope for static consent, and
+include it in client `scopes`. Put actual permission names in `required_scopes`;
+`.default` itself is not evidence that a permission was granted.
+
+If the provider returns unusual short permission names containing `:` or `/`,
+declare them in `scope_aliases` so the package can interpret the response.
+
+See Microsoft's [scope and consent guidance](https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc)
+and [refresh-token guidance](https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens).
+
+## Advanced: concurrent refreshes and failures
+
+Asynchronous acquisitions coordinate use of the shared refresh credential.
+A synchronous call reports `refresh_pending` while that work is in progress.
+A failure that may have consumed the credential can require a new login for
+the whole connection, even if another API token still works.
+
+With `indefinite_session = TRUE`, the single module can retain usable cached
+tokens after such a failure, but retires the refresh credential. It cannot
+refresh or acquire another target without a new login. The connection manager
+does not have this exception. Local `authenticated` state alone does not prove
+that a selected API token is usable.
+
+### Request customization and background work
+
+`$request(refresh = TRUE)` runs synchronously, checks destination and permissions,
+and obtains usable credentials before sending. It does not replay a failed API
+operation or start a new login. Use `$request()` for DPoP or mTLS-bound tokens;
+`$access_token()` exports bearer tokens only.
+
+Logout, replacement and session end invalidate old connections and late results.
+For SDK callbacks and background-result checks, see
+[External integrations](external-integrations.html).

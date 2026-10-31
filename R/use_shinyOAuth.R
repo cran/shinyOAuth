@@ -10,42 +10,41 @@
 #' Add JavaScript dependency to the UI of a Shiny app
 #'
 #' @description
-#' Add shinyOAuth's JavaScript to a page so [oauth_module_server()] can redirect
-#' the browser and manage its temporary login cookie. Use this inside an
-#' existing `fluidPage()` or `tagList()` when you integrate the browser
-#' dependency directly and configure response headers elsewhere, such as in
-#' your web server or another UI wrapper.
+#' Adds shinyOAuth's JavaScript so [oauth_module_server()] can redirect the
+#' browser and manage its temporary login cookie. This low-level helper supplies
+#' the browser dependency for custom HTTP integrations.
+#'
+#' [oauth_ui()], [oauth_form_post_ui()] and [oauth_connections_ui()] already
+#' include this dependency, callback handling and response headers.
 #'
 #' @details
-#' [oauth_ui()] combines this browser setup with the HTTP header
-#' `Referrer-Policy: no-referrer`, which prevents callback URLs from being
-#' sent as referrers when page resources load. When using [use_shinyOAuth()]
-#' directly, set that header in your HTTP response configuration for protection
-#' from the start of page loading; the optional meta tag takes effect later.
-#' [oauth_ui()] and [oauth_form_post_ui()] already include this dependency.
-#' The dependency alone does not provide a callback bridge. Do not load
-#' application or third-party scripts on raw OAuth callback pages; use
-#' `oauth_ui(ui, id, client)` or a dedicated equivalent endpoint to redirect to
-#' a clean URL before rendering the app. Callback responses must also send
-#' `Cache-Control: no-store` and `Pragma: no-cache`.
+#' The UI wrappers process callbacks before rendering application HTML, redirect
+#' to a clean URL, and send `Referrer-Policy: no-referrer`,
+#' `Cache-Control: no-store` and `Pragma: no-cache`. A custom HTTP integration
+#' provides that handling separately. This dependency cannot set HTTP headers;
+#' its optional referrer meta tag takes effect only after the browser reads it.
 #'
 #' @param inject_referrer_meta If TRUE (default), adds a meta tag to the page:
 #'   an instruction asking the browser not to share the page's address when
 #'   loading images, scripts, or other files. Some files may start loading
-#'   before the browser reads this instruction. Use [oauth_ui()] to provide
-#'   this protection from the start of page loading.
+#'   before the browser reads this instruction. The UI wrappers also set the
+#'   HTTP header, which applies from the start of page loading.
 #'
 #' @return A `tagList` that loads the browser code once.
 #'
 #' @export
 #'
 #' @examples
+#' # Low-level browser setup for a custom HTTP integration.
+#' # Supply equivalent callback handling and response headers separately.
+#' # For ordinary apps, use oauth_ui(ui, id = "auth", client = client).
 #' ui <- shiny::fluidPage(
 #'   use_shinyOAuth()
 #'   # ...
 #' )
 #'
-#' @seealso [oauth_module_server()]
+#' @seealso [oauth_ui()], [oauth_form_post_ui()], [oauth_connections_ui()],
+#'   [oauth_module_server()]
 use_shinyOAuth <- function(inject_referrer_meta = TRUE) {
   assign(".called_js_dependency", TRUE, envir = .watchdog_environment)
 
@@ -95,9 +94,10 @@ use_shinyOAuth <- function(inject_referrer_meta = TRUE) {
 
 #' Warn when the UI dependency is missing
 #'
-#' Emits a once-per-session warning when server code uses the browser-side
-#' helpers before [use_shinyOAuth()] has loaded the JavaScript dependency. Used
-#' by [oauth_module_server()] so missing UI setup is easier to diagnose.
+#' Emits a once-per-R-process warning when server code uses the browser-side
+#' helpers before a UI wrapper or [use_shinyOAuth()] has supplied the JavaScript
+#' dependency. Used by [oauth_module_server()] so missing UI setup is easier to
+#' diagnose. This heuristic does not verify callback or header configuration.
 #'
 #' @return Invisibly returns `TRUE` when a warning is emitted; otherwise
 #'   invisibly returns `NULL`.
@@ -119,12 +119,24 @@ warn_about_missing_js_dependency <- function() {
   }
 
   warn_pkg(
-    "JavaScript dependency not called",
+    "shinyOAuth browser setup not detected",
     c(
-      "!" = "`oauth_module_server()` was called, but no previous call to `use_shinyOAuth()` was detected",
+      "!" = "`oauth_module_server()` was called before the shinyOAuth browser dependency was detected",
       "i" = paste0(
-        "You must add `use_shinyOAuth()` to your UI (e.g., inside `fluidPage()`) ",
-        "to ensure the module functions correctly"
+        "Wrap your complete UI with `oauth_ui(ui, id = \"auth\", client = client)`, ",
+        "using the same module ID and client as `oauth_module_server()`"
+      ),
+      "i" = paste0(
+        "Use `oauth_form_post_ui()` for form_post callbacks, or ",
+        "`oauth_connections_ui()` with a connection manager. These wrappers ",
+        "include the browser dependency; no separate `use_shinyOAuth()` call is needed"
+      ),
+      "i" = paste0(
+        "Use `use_shinyOAuth()` directly only for a custom integration that ",
+        "provides equivalent callback handling and response headers"
+      ),
+      "i" = paste0(
+        "If your UI wrapper has not rendered yet, this reminder may be premature"
       )
     ),
     .frequency = "once",

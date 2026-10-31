@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Use one login for several APIs</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Use one login for several APIs</h1>
+
+
+
+<div id="one-login-different-api-tokens" class="section level2">
+<h2>One login, different API tokens</h2>
+<p>A calendar service and a contacts service can require different
+access tokens, even when the same person uses both. A token target names
+an API and the permissions the app needs there. The app chooses the
+target when requesting a token, without requiring a separate login flow
+for each API.</p>
+<p>Targets rely on provider support for RFC 8707 resource indicators or
+Microsoft’s API-specific scopes. The provider’s registration and consent
+determine which APIs the login can access.</p>
+<p>For independent logins or different accounts, use <a href="multiple-authorizations.html">Multiple authorizations</a>. For
+initial login setup, start with <a href="usage.html">Usage</a>.</p>
+</div>
+<div id="configure-two-apis" class="section level2">
+<h2>Configure two APIs</h2>
+<p>This example uses a provider with RFC 8707 support. A resource
+identifier names an API to the login provider; a scope names a
+permission. <code>resource_bases</code> lists the actual HTTP addresses
+the app may call, which can differ from the resource identifiers.</p>
+<p>Replace all example settings with your provider’s registered values.
+Microsoft uses the alternative setup shown <a href="#microsoft-example">below</a>.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="co"># Provider supports RFC 8707 resource indicators.</span></span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider</span>(</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>  <span class="st">&quot;workplace&quot;</span>, <span class="st">&quot;https://login.example/authorize&quot;</span>, <span class="st">&quot;https://login.example/token&quot;</span>,</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>  <span class="at">token_target_mode =</span> <span class="st">&quot;rfc8707&quot;</span>,</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>  <span class="at">token_auth_style =</span> <span class="st">&quot;body&quot;</span>,</span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>  <span class="at">userinfo_required =</span> <span class="cn">FALSE</span></span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>)</span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a>  provider,</span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_ID&quot;</span>),</span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example/callback&quot;</span>,</span>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a>  <span class="at">token_targets =</span> <span class="fu">list</span>(</span>
+<span id="cb1-14"><a href="#cb1-14" tabindex="-1"></a>    <span class="at">calendar =</span> <span class="fu">oauth_token_target</span>(</span>
+<span id="cb1-15"><a href="#cb1-15" tabindex="-1"></a>      <span class="at">resource =</span> <span class="st">&quot;https://calendar.example/&quot;</span>,</span>
+<span id="cb1-16"><a href="#cb1-16" tabindex="-1"></a>      <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;calendar.read&quot;</span>, <span class="st">&quot;calendar.write&quot;</span>),</span>
+<span id="cb1-17"><a href="#cb1-17" tabindex="-1"></a>      <span class="at">required_scopes =</span> <span class="st">&quot;calendar.read&quot;</span>,</span>
+<span id="cb1-18"><a href="#cb1-18" tabindex="-1"></a>      <span class="at">resource_ids =</span> <span class="st">&quot;calendar_api&quot;</span></span>
+<span id="cb1-19"><a href="#cb1-19" tabindex="-1"></a>    ),</span>
+<span id="cb1-20"><a href="#cb1-20" tabindex="-1"></a>    <span class="at">contacts =</span> <span class="fu">oauth_token_target</span>(</span>
+<span id="cb1-21"><a href="#cb1-21" tabindex="-1"></a>      <span class="at">resource =</span> <span class="st">&quot;https://contacts.example/&quot;</span>,</span>
+<span id="cb1-22"><a href="#cb1-22" tabindex="-1"></a>      <span class="at">scopes =</span> <span class="st">&quot;contacts.read&quot;</span>,</span>
+<span id="cb1-23"><a href="#cb1-23" tabindex="-1"></a>      <span class="at">resource_ids =</span> <span class="st">&quot;contacts_api&quot;</span></span>
+<span id="cb1-24"><a href="#cb1-24" tabindex="-1"></a>    )</span>
+<span id="cb1-25"><a href="#cb1-25" tabindex="-1"></a>  ),</span>
+<span id="cb1-26"><a href="#cb1-26" tabindex="-1"></a>  <span class="at">token_target_default =</span> <span class="st">&quot;calendar&quot;</span>,</span>
+<span id="cb1-27"><a href="#cb1-27" tabindex="-1"></a>  <span class="at">resource_bases =</span> <span class="fu">c</span>(</span>
+<span id="cb1-28"><a href="#cb1-28" tabindex="-1"></a>    <span class="at">calendar_api =</span> <span class="st">&quot;https://calendar.example/v1&quot;</span>,</span>
+<span id="cb1-29"><a href="#cb1-29" tabindex="-1"></a>    <span class="at">contacts_api =</span> <span class="st">&quot;https://contacts.example/v1&quot;</span></span>
+<span id="cb1-30"><a href="#cb1-30" tabindex="-1"></a>  )</span>
+<span id="cb1-31"><a href="#cb1-31" tabindex="-1"></a>)</span></code></pre></div>
+<p><code>token_target_default</code> chooses the API when a call omits
+<code>target</code>. <code>oauth_token_target()</code> checks each
+declaration’s fields; plain named lists with the same fields remain
+supported. The client checks provider-specific rules and how
+declarations relate to one another. Omitting client <code>scopes</code>
+uses the union of API permissions declared by the targets. If you supply
+<code>scopes</code>, include every target’s permissions: that explicit
+list remains the limit and is never expanded automatically. Identity and
+refresh consent, such as <code>profile</code> or
+<code>offline_access</code>, still need an explicit request; OIDC
+continues to add <code>openid</code> when needed.
+<code>resource_ids</code> connects each target to its named API address
+in <code>resource_bases</code>. You can omit those addresses when only
+exporting tokens to another package.</p>
+</div>
+<div id="choose-a-token-when-making-a-call" class="section level2">
+<h2>Choose a token when making a call</h2>
+<p>Get a connection from the module and pass <code>target</code> to
+select the API. Replace <code>existing_contacts_sdk()</code> with your
+contacts package’s client constructor:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>    <span class="st">&quot;auth&quot;</span>, client,</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>    <span class="at">reauth_after_seconds =</span> <span class="dv">60</span> <span class="sc">*</span> <span class="dv">60</span> <span class="co"># One-hour maximum login age</span></span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>  )</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>  <span class="co"># Alternatively: auth &lt;- oauth_connections_server(&quot;auth&quot;, manager)</span></span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  <span class="co"># and select auth$connection(connection_id), or auth$connection() when unique.</span></span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a></span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  contacts <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">reactive</span>({</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>    token <span class="ot">&lt;-</span> connection<span class="sc">$</span><span class="fu">access_token</span>(<span class="st">&quot;contacts.read&quot;</span>, <span class="at">target =</span> <span class="st">&quot;contacts&quot;</span>)</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>    <span class="fu">existing_contacts_sdk</span>(<span class="at">access_token =</span> token)<span class="sc">$</span><span class="fu">list_contacts</span>()</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>  })</span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a></span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>  output<span class="sc">$</span>can_edit_calendar <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">renderText</span>({</span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>    connection<span class="sc">$</span><span class="fu">has_scopes</span>(<span class="st">&quot;calendar.write&quot;</span>, <span class="at">target =</span> <span class="st">&quot;calendar&quot;</span>)</span>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a>  })</span>
+<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a></span>
+<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a>  shiny<span class="sc">::</span><span class="fu">observeEvent</span>(input<span class="sc">$</span>save_event, {</span>
+<span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> shiny<span class="sc">::</span><span class="fu">req</span>(auth<span class="sc">$</span><span class="fu">connection</span>())</span>
+<span id="cb2-22"><a href="#cb2-22" tabindex="-1"></a>    connection<span class="sc">$</span><span class="fu">request</span>(</span>
+<span id="cb2-23"><a href="#cb2-23" tabindex="-1"></a>      <span class="st">&quot;calendar_api&quot;</span>, <span class="st">&quot;events&quot;</span>, <span class="at">method =</span> <span class="st">&quot;POST&quot;</span>,</span>
+<span id="cb2-24"><a href="#cb2-24" tabindex="-1"></a>      <span class="at">required_scopes =</span> <span class="st">&quot;calendar.write&quot;</span>, <span class="at">target =</span> <span class="st">&quot;calendar&quot;</span>, <span class="at">refresh =</span> <span class="cn">TRUE</span>,</span>
+<span id="cb2-25"><a href="#cb2-25" tabindex="-1"></a>      <span class="at">configure =</span> <span class="cf">function</span>(req) httr2<span class="sc">::</span><span class="fu">req_body_json</span>(req, <span class="fu">list</span>(<span class="at">title =</span> input<span class="sc">$</span>title))</span>
+<span id="cb2-26"><a href="#cb2-26" tabindex="-1"></a>    )</span>
+<span id="cb2-27"><a href="#cb2-27" tabindex="-1"></a>  })</span>
+<span id="cb2-28"><a href="#cb2-28" tabindex="-1"></a>}</span></code></pre></div>
+<p><code>$access_token()</code> obtains or refreshes the chosen token
+when needed. <code>$has_scopes()</code> checks permissions already
+recorded; it can return <code>FALSE</code> before that target’s first
+token acquisition. <code>$targets()</code> lists target status without
+exposing credentials.</p>
+<p>Use <code>$is_usable(target = &quot;contacts&quot;)</code> to check whether
+that API’s current token is usable, or
+<code>$summary(target = &quot;contacts&quot;)</code> to inspect its status and
+expiry. These reads never acquire or refresh a token; an unacquired
+target has status <code>&quot;not_acquired&quot;</code> and is not usable.</p>
+<p>The example limits login to one hour with
+<code>reauth_after_seconds</code>. Without a limit, local authentication
+can outlast every API token; <code>indefinite_session = TRUE</code>
+disables that limit.</p>
+</div>
+<div id="refresh-and-sign-in-again" class="section level2">
+<h2>Refresh and sign in again</h2>
+<p>For RFC 8707 providers, reduce one target’s permissions with, for
+example,
+<code>connection$refresh(scopes = &quot;calendar.read&quot;, target = &quot;calendar&quot;)</code>.
+The selected scopes must include the target’s required permissions.</p>
+<p><code>auth$reauthorize()</code> starts a replacement login with the
+reduced permissions. For managed connections, pass the connection ID.
+Once replacement starts, cancelling does not restore the old login. An
+ordinary new login asks for the client’s original permissions again.</p>
+</div>
+<div id="microsoft-example" class="section level2">
+<h2>Microsoft example</h2>
+<p>Microsoft uses API-qualified scope names to select the token’s
+intended API. Use the exact names from your registration. This example
+exports tokens to another package:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>provider <span class="ot">&lt;-</span> <span class="fu">oauth_provider_microsoft</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  <span class="at">tenant =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;MICROSOFT_TENANT_ID&quot;</span>),</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">userinfo_required =</span> <span class="cn">FALSE</span></span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>)</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>client <span class="ot">&lt;-</span> <span class="fu">oauth_client</span>(</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  provider, <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_ID&quot;</span>), <span class="fu">Sys.getenv</span>(<span class="st">&quot;OAUTH_CLIENT_SECRET&quot;</span>),</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;https://app.example/callback&quot;</span>,</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>    <span class="st">&quot;openid&quot;</span>, <span class="st">&quot;offline_access&quot;</span>,</span>
+<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a>    <span class="st">&quot;https://graph.microsoft.com/Calendars.Read&quot;</span>,</span>
+<span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a>    <span class="st">&quot;api://your-contacts-api/Contacts.Read&quot;</span></span>
+<span id="cb3-12"><a href="#cb3-12" tabindex="-1"></a>  ),</span>
+<span id="cb3-13"><a href="#cb3-13" tabindex="-1"></a>  <span class="at">token_targets =</span> <span class="fu">list</span>(</span>
+<span id="cb3-14"><a href="#cb3-14" tabindex="-1"></a>    <span class="at">calendar =</span> <span class="fu">oauth_token_target</span>(</span>
+<span id="cb3-15"><a href="#cb3-15" tabindex="-1"></a>      <span class="at">resource =</span> <span class="st">&quot;https://graph.microsoft.com&quot;</span>,</span>
+<span id="cb3-16"><a href="#cb3-16" tabindex="-1"></a>      <span class="at">scopes =</span> <span class="st">&quot;https://graph.microsoft.com/Calendars.Read&quot;</span></span>
+<span id="cb3-17"><a href="#cb3-17" tabindex="-1"></a>    ),</span>
+<span id="cb3-18"><a href="#cb3-18" tabindex="-1"></a>    <span class="at">contacts =</span> <span class="fu">oauth_token_target</span>(</span>
+<span id="cb3-19"><a href="#cb3-19" tabindex="-1"></a>      <span class="at">resource =</span> <span class="st">&quot;api://your-contacts-api&quot;</span>,</span>
+<span id="cb3-20"><a href="#cb3-20" tabindex="-1"></a>      <span class="at">scopes =</span> <span class="st">&quot;api://your-contacts-api/Contacts.Read&quot;</span></span>
+<span id="cb3-21"><a href="#cb3-21" tabindex="-1"></a>    )</span>
+<span id="cb3-22"><a href="#cb3-22" tabindex="-1"></a>  ),</span>
+<span id="cb3-23"><a href="#cb3-23" tabindex="-1"></a>  <span class="at">token_target_default =</span> <span class="st">&quot;calendar&quot;</span></span>
+<span id="cb3-24"><a href="#cb3-24" tabindex="-1"></a>)</span></code></pre></div>
+<p><code>userinfo_required = FALSE</code> skips the Graph profile
+request, which would be inappropriate for a token intended for another
+API. Add <code>resource_bases</code> and each target’s
+<code>resource_ids</code> if you also want to call
+<code>$request()</code>.</p>
+</div>
+<div id="advanced-provider-support-and-declaration-limits" class="section level2">
+<h2>Advanced: provider support and declaration limits</h2>
+<p>Targets share a login and refresh credential but keep separate API
+tokens and permission limits. Enable
+<code>token_target_mode = &quot;rfc8707&quot;</code> or <code>&quot;microsoft&quot;</code>
+only after confirming provider support; discovery does not infer it.</p>
+<p>Targets require <code>userinfo_required = FALSE</code> and cannot be
+combined with SMART configuration or the client’s <code>resource</code>
+argument. Use the module’s <code>connection()</code> method, since the
+older <code>oauth_connection()</code> wrapper does not support targets.
+Up to 16 targets are supported.</p>
+<div id="identity-and-refresh-consent-scopes" class="section level3">
+<h3>Identity and refresh-consent scopes</h3>
+<p>For OIDC, put identity scopes such as <code>openid</code>,
+<code>profile</code> and <code>email</code> at client level.
+<code>offline_access</code> requests refresh consent through client
+<code>scopes</code>; it is not an API permission and is rejected in
+<code>required_scopes</code>. The provider still decides whether to
+issue a refresh token.</p>
+<p>When narrowing a target, retain any identity and refresh-consent
+scopes you still need. Later refreshes preserve reductions; a
+replacement OIDC login still requests <code>openid</code> for its new
+identity check.</p>
+<p><code>connection$identity()</code> returns the last validated
+identity, which can outlast an API token. Each target’s token and
+request methods check current API access.</p>
+</div>
+</div>
+<div id="advanced-microsoft-permissions-and-consent" class="section level2">
+<h2>Advanced: Microsoft permissions and consent</h2>
+<p>Microsoft can return previously consented permissions beyond those
+needed for the current operation. Connection methods enforce the app’s
+local limits, but an exported token carries the provider’s full
+grant.</p>
+<p>Explicit API narrowing with <code>$refresh(scopes = ...)</code> fails
+with <code>unsupported_scope_narrowing</code> and leaves the login
+usable. Change provider consent or use a separate registration if the
+token itself needs fewer permissions.</p>
+<div id="resource-identifiers-and-scope-names" class="section level3">
+<h3>Resource identifiers and scope names</h3>
+<p>Use the exact registered resource identifier, including any trailing
+slash, and fully qualified scope names. Resources can be URIs or GUIDs.
+The package rejects distinct resources with overlapping prefixes because
+scope names would be ambiguous. Microsoft permission checks ignore ASCII
+case; resource identifiers are exact.</p>
+</div>
+<div id="static-permissions-and-unusual-short-names" class="section level3">
+<h3>Static permissions and unusual short names</h3>
+<p>Use <code>resource/.default</code> as a target’s sole API scope for
+static consent, and include it in client <code>scopes</code>. Put actual
+permission names in <code>required_scopes</code>; <code>.default</code>
+itself is not evidence that a permission was granted.</p>
+<p>If the provider returns unusual short permission names containing
+<code>:</code> or <code>/</code>, declare them in
+<code>scope_aliases</code> so the package can interpret the
+response.</p>
+<p>See Microsoft’s <a href="https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc">scope
+and consent guidance</a> and <a href="https://learn.microsoft.com/en-us/entra/identity-platform/refresh-tokens">refresh-token
+guidance</a>.</p>
+</div>
+</div>
+<div id="advanced-concurrent-refreshes-and-failures" class="section level2">
+<h2>Advanced: concurrent refreshes and failures</h2>
+<p>Asynchronous acquisitions coordinate use of the shared refresh
+credential. A synchronous call reports <code>refresh_pending</code>
+while that work is in progress. A failure that may have consumed the
+credential can require a new login for the whole connection, even if
+another API token still works.</p>
+<p>With <code>indefinite_session = TRUE</code>, the single module can
+retain usable cached tokens after such a failure, but retires the
+refresh credential. It cannot refresh or acquire another target without
+a new login. The connection manager does not have this exception. Local
+<code>authenticated</code> state alone does not prove that a selected
+API token is usable.</p>
+<div id="request-customization-and-background-work" class="section level3">
+<h3>Request customization and background work</h3>
+<p><code>$request(refresh = TRUE)</code> runs synchronously, checks
+destination and permissions, and obtains usable credentials before
+sending. It does not replay a failed API operation or start a new login.
+Use <code>$request()</code> for DPoP or mTLS-bound tokens;
+<code>$access_token()</code> exports bearer tokens only.</p>
+<p>Logout, replacement and session end invalidate old connections and
+late results. For SDK callbacks and background-result checks, see <a href="external-integrations.html">External integrations</a>.</p>
+</div>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

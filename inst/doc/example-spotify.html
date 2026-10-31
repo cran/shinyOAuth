@@ -344,19 +344,13 @@ data</h1>
 
 <div id="overview" class="section level2">
 <h2>Overview</h2>
-<p>This example lets a user connect their Spotify account and displays
-their top tracks. It uses the same provider, client, and module setup as
-<a href="usage.html">Usage</a>, then calls Spotify’s API with the access
-token. Spotify supplies profile data through its API rather than an OIDC
-ID token.</p>
-<p>The helper identifies accounts using immutable
-<code>account_id</code>, as specified in <a href="https://developer.spotify.com/documentation/web-api/references/changes/may-2026">Spotify’s
-May 2026 changes</a>. Before upgrading an existing app, migrate stored
-<code>id</code> mappings and audit digests using both identifiers from
-an authenticated profile. Do not merge accounts by email or display
-name. <code>allow_legacy_id = TRUE</code> permits a temporary fallback
-only when <code>account_id</code> is missing; it does not preserve old
-mappings when both exist.</p>
+<p>This app shows a user’s top tracks after they authorize access to
+Spotify. Spotify handles sign-in and returns an access token, a
+credential your app can use to ask its API for data. The app never needs
+the user’s Spotify password.</p>
+<p>Scopes name the permissions to request. Here
+<code>user-top-read</code> allows reading listening preferences; other
+data needs different permissions. For the shared login setup, see <a href="usage.html">Usage</a>.</p>
 </div>
 <div id="spotify-app-registration" class="section level2">
 <h2>Spotify app registration</h2>
@@ -380,7 +374,7 @@ Premium, and test users need to be on the app’s allowlist.</li>
 <h2>Shiny app example</h2>
 <p>Save this as <code>app.R</code>, run it, and open
 <code>http://127.0.0.1:8100</code> in a regular browser. After
-connecting Spotify, click <strong>Load top tracks</strong>.</p>
+connecting Spotify, click Load top tracks.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(shiny)</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">library</span>(shinyOAuth)</span>
 <span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a></span>
@@ -389,53 +383,73 @@ connecting Spotify, click <strong>Load top tracks</strong>.</p>
 <span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>  <span class="at">client_id =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;SPOTIFY_OAUTH_CLIENT_ID&quot;</span>),</span>
 <span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a>  <span class="at">client_secret =</span> <span class="fu">Sys.getenv</span>(<span class="st">&quot;SPOTIFY_OAUTH_CLIENT_SECRET&quot;</span>),</span>
 <span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a>  <span class="at">redirect_uri =</span> <span class="st">&quot;http://127.0.0.1:8100&quot;</span>,</span>
-<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;user-read-private&quot;</span>, <span class="st">&quot;user-top-read&quot;</span>)</span>
-<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a>)</span>
-<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a></span>
-<span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">oauth_ui</span>(<span class="fu">fluidPage</span>(</span>
-<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a>  <span class="fu">h2</span>(<span class="st">&quot;My top tracks&quot;</span>),</span>
-<span id="cb1-14"><a href="#cb1-14" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;load&quot;</span>, <span class="st">&quot;Load top tracks&quot;</span>),</span>
-<span id="cb1-15"><a href="#cb1-15" tabindex="-1"></a>  <span class="fu">tableOutput</span>(<span class="st">&quot;tracks&quot;</span>)</span>
-<span id="cb1-16"><a href="#cb1-16" tabindex="-1"></a>), <span class="at">id =</span> <span class="st">&quot;auth&quot;</span>, <span class="at">client =</span> client)</span>
-<span id="cb1-17"><a href="#cb1-17" tabindex="-1"></a></span>
-<span id="cb1-18"><a href="#cb1-18" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
-<span id="cb1-19"><a href="#cb1-19" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(<span class="st">&quot;auth&quot;</span>, client)</span>
-<span id="cb1-20"><a href="#cb1-20" tabindex="-1"></a></span>
-<span id="cb1-21"><a href="#cb1-21" tabindex="-1"></a>  tracks <span class="ot">&lt;-</span> <span class="fu">eventReactive</span>(input[[<span class="st">&quot;load&quot;</span>]], {</span>
-<span id="cb1-22"><a href="#cb1-22" tabindex="-1"></a>    <span class="fu">req</span>(auth[[<span class="st">&quot;authenticated&quot;</span>]])</span>
-<span id="cb1-23"><a href="#cb1-23" tabindex="-1"></a>    <span class="fu">tryCatch</span>({</span>
-<span id="cb1-24"><a href="#cb1-24" tabindex="-1"></a>      response <span class="ot">&lt;-</span> <span class="fu">perform_resource_req</span>(</span>
-<span id="cb1-25"><a href="#cb1-25" tabindex="-1"></a>        auth[[<span class="st">&quot;token&quot;</span>]],</span>
-<span id="cb1-26"><a href="#cb1-26" tabindex="-1"></a>        <span class="st">&quot;https://api.spotify.com/v1/me/top/tracks&quot;</span>,</span>
-<span id="cb1-27"><a href="#cb1-27" tabindex="-1"></a>        <span class="at">query =</span> <span class="fu">list</span>(<span class="at">limit =</span> <span class="dv">10</span>, <span class="at">time_range =</span> <span class="st">&quot;short_term&quot;</span>)</span>
-<span id="cb1-28"><a href="#cb1-28" tabindex="-1"></a>      )</span>
-<span id="cb1-29"><a href="#cb1-29" tabindex="-1"></a>      httr2<span class="sc">::</span><span class="fu">resp_check_status</span>(response)</span>
-<span id="cb1-30"><a href="#cb1-30" tabindex="-1"></a>      body <span class="ot">&lt;-</span> httr2<span class="sc">::</span><span class="fu">resp_body_json</span>(response, <span class="at">simplifyVector =</span> <span class="cn">FALSE</span>)</span>
-<span id="cb1-31"><a href="#cb1-31" tabindex="-1"></a>      <span class="fu">vapply</span>(body[[<span class="st">&quot;items&quot;</span>]], <span class="cf">function</span>(track) track[[<span class="st">&quot;name&quot;</span>]], <span class="fu">character</span>(<span class="dv">1</span>))</span>
-<span id="cb1-32"><a href="#cb1-32" tabindex="-1"></a>    }, <span class="at">error =</span> <span class="cf">function</span>(e) <span class="cn">NULL</span>)</span>
-<span id="cb1-33"><a href="#cb1-33" tabindex="-1"></a>  })</span>
-<span id="cb1-34"><a href="#cb1-34" tabindex="-1"></a></span>
-<span id="cb1-35"><a href="#cb1-35" tabindex="-1"></a>  output[[<span class="st">&quot;tracks&quot;</span>]] <span class="ot">&lt;-</span> <span class="fu">renderTable</span>({</span>
-<span id="cb1-36"><a href="#cb1-36" tabindex="-1"></a>    <span class="fu">req</span>(auth[[<span class="st">&quot;authenticated&quot;</span>]])</span>
-<span id="cb1-37"><a href="#cb1-37" tabindex="-1"></a>    values <span class="ot">&lt;-</span> <span class="fu">tracks</span>()</span>
-<span id="cb1-38"><a href="#cb1-38" tabindex="-1"></a>    <span class="fu">validate</span>(<span class="fu">need</span>(<span class="sc">!</span><span class="fu">is.null</span>(values), <span class="st">&quot;Could not load tracks. Try again later.&quot;</span>))</span>
-<span id="cb1-39"><a href="#cb1-39" tabindex="-1"></a>    <span class="fu">validate</span>(<span class="fu">need</span>(<span class="fu">length</span>(values) <span class="sc">&gt;</span> <span class="dv">0</span>, <span class="st">&quot;No listening data to show yet.&quot;</span>))</span>
-<span id="cb1-40"><a href="#cb1-40" tabindex="-1"></a>    <span class="fu">data.frame</span>(<span class="at">Track =</span> values)</span>
-<span id="cb1-41"><a href="#cb1-41" tabindex="-1"></a>  })</span>
-<span id="cb1-42"><a href="#cb1-42" tabindex="-1"></a>}</span>
-<span id="cb1-43"><a href="#cb1-43" tabindex="-1"></a></span>
-<span id="cb1-44"><a href="#cb1-44" tabindex="-1"></a><span class="fu">runApp</span>(<span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>, <span class="at">launch.browser =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a>  <span class="at">scopes =</span> <span class="fu">c</span>(<span class="st">&quot;user-read-private&quot;</span>, <span class="st">&quot;user-top-read&quot;</span>),</span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a>  <span class="at">resource_bases =</span> <span class="fu">c</span>(<span class="at">spotify =</span> <span class="st">&quot;https://api.spotify.com/v1&quot;</span>)</span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a>)</span>
+<span id="cb1-12"><a href="#cb1-12" tabindex="-1"></a></span>
+<span id="cb1-13"><a href="#cb1-13" tabindex="-1"></a>ui <span class="ot">&lt;-</span> <span class="fu">oauth_ui</span>(<span class="fu">fluidPage</span>(</span>
+<span id="cb1-14"><a href="#cb1-14" tabindex="-1"></a>  <span class="fu">h2</span>(<span class="st">&quot;My top tracks&quot;</span>),</span>
+<span id="cb1-15"><a href="#cb1-15" tabindex="-1"></a>  <span class="fu">actionButton</span>(<span class="st">&quot;load&quot;</span>, <span class="st">&quot;Load top tracks&quot;</span>),</span>
+<span id="cb1-16"><a href="#cb1-16" tabindex="-1"></a>  <span class="fu">tableOutput</span>(<span class="st">&quot;tracks&quot;</span>)</span>
+<span id="cb1-17"><a href="#cb1-17" tabindex="-1"></a>), <span class="at">id =</span> <span class="st">&quot;auth&quot;</span>, <span class="at">client =</span> client)</span>
+<span id="cb1-18"><a href="#cb1-18" tabindex="-1"></a></span>
+<span id="cb1-19"><a href="#cb1-19" tabindex="-1"></a>server <span class="ot">&lt;-</span> <span class="cf">function</span>(input, output, session) {</span>
+<span id="cb1-20"><a href="#cb1-20" tabindex="-1"></a>  auth <span class="ot">&lt;-</span> <span class="fu">oauth_module_server</span>(<span class="st">&quot;auth&quot;</span>, client)</span>
+<span id="cb1-21"><a href="#cb1-21" tabindex="-1"></a>  tracks <span class="ot">&lt;-</span> <span class="fu">reactiveVal</span>(<span class="cn">NULL</span>)</span>
+<span id="cb1-22"><a href="#cb1-22" tabindex="-1"></a></span>
+<span id="cb1-23"><a href="#cb1-23" tabindex="-1"></a>  <span class="fu">observe</span>({</span>
+<span id="cb1-24"><a href="#cb1-24" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> auth[[<span class="st">&quot;connection&quot;</span>]]()</span>
+<span id="cb1-25"><a href="#cb1-25" tabindex="-1"></a>    result <span class="ot">&lt;-</span> <span class="fu">isolate</span>(<span class="fu">tracks</span>())</span>
+<span id="cb1-26"><a href="#cb1-26" tabindex="-1"></a>    <span class="cf">if</span> (<span class="fu">is.null</span>(connection) <span class="sc">||</span></span>
+<span id="cb1-27"><a href="#cb1-27" tabindex="-1"></a>        <span class="sc">!</span>connection[[<span class="st">&quot;has_scopes&quot;</span>]](<span class="st">&quot;user-top-read&quot;</span>) <span class="sc">||</span></span>
+<span id="cb1-28"><a href="#cb1-28" tabindex="-1"></a>        (<span class="sc">!</span><span class="fu">is.null</span>(result) <span class="sc">&amp;&amp;</span></span>
+<span id="cb1-29"><a href="#cb1-29" tabindex="-1"></a>         <span class="sc">!</span><span class="fu">identical</span>(result[[<span class="st">&quot;authorization&quot;</span>]], connection[[<span class="st">&quot;id&quot;</span>]]))) {</span>
+<span id="cb1-30"><a href="#cb1-30" tabindex="-1"></a>      <span class="fu">tracks</span>(<span class="cn">NULL</span>)</span>
+<span id="cb1-31"><a href="#cb1-31" tabindex="-1"></a>    }</span>
+<span id="cb1-32"><a href="#cb1-32" tabindex="-1"></a>  })</span>
+<span id="cb1-33"><a href="#cb1-33" tabindex="-1"></a></span>
+<span id="cb1-34"><a href="#cb1-34" tabindex="-1"></a>  <span class="fu">observeEvent</span>(input[[<span class="st">&quot;load&quot;</span>]], {</span>
+<span id="cb1-35"><a href="#cb1-35" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> <span class="fu">req</span>(auth[[<span class="st">&quot;connection&quot;</span>]]())</span>
+<span id="cb1-36"><a href="#cb1-36" tabindex="-1"></a>    <span class="fu">req</span>(connection[[<span class="st">&quot;has_scopes&quot;</span>]](<span class="st">&quot;user-top-read&quot;</span>))</span>
+<span id="cb1-37"><a href="#cb1-37" tabindex="-1"></a>    data <span class="ot">&lt;-</span> <span class="fu">tryCatch</span>({</span>
+<span id="cb1-38"><a href="#cb1-38" tabindex="-1"></a>      response <span class="ot">&lt;-</span> connection[[<span class="st">&quot;request&quot;</span>]](</span>
+<span id="cb1-39"><a href="#cb1-39" tabindex="-1"></a>        <span class="st">&quot;spotify&quot;</span>, <span class="st">&quot;me/top/tracks&quot;</span>,</span>
+<span id="cb1-40"><a href="#cb1-40" tabindex="-1"></a>        <span class="at">query =</span> <span class="fu">list</span>(<span class="at">limit =</span> <span class="dv">10</span>, <span class="at">time_range =</span> <span class="st">&quot;short_term&quot;</span>),</span>
+<span id="cb1-41"><a href="#cb1-41" tabindex="-1"></a>        <span class="at">required_scopes =</span> <span class="st">&quot;user-top-read&quot;</span>,</span>
+<span id="cb1-42"><a href="#cb1-42" tabindex="-1"></a>        <span class="at">refresh =</span> <span class="cn">TRUE</span></span>
+<span id="cb1-43"><a href="#cb1-43" tabindex="-1"></a>      )</span>
+<span id="cb1-44"><a href="#cb1-44" tabindex="-1"></a>      httr2<span class="sc">::</span><span class="fu">resp_check_status</span>(response)</span>
+<span id="cb1-45"><a href="#cb1-45" tabindex="-1"></a>      body <span class="ot">&lt;-</span> httr2<span class="sc">::</span><span class="fu">resp_body_json</span>(response, <span class="at">simplifyVector =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb1-46"><a href="#cb1-46" tabindex="-1"></a>      <span class="fu">vapply</span>(body[[<span class="st">&quot;items&quot;</span>]], <span class="cf">function</span>(track) track[[<span class="st">&quot;name&quot;</span>]], <span class="fu">character</span>(<span class="dv">1</span>))</span>
+<span id="cb1-47"><a href="#cb1-47" tabindex="-1"></a>    }, <span class="at">error =</span> <span class="cf">function</span>(e) <span class="cn">NULL</span>)</span>
+<span id="cb1-48"><a href="#cb1-48" tabindex="-1"></a>    <span class="fu">tracks</span>(<span class="fu">list</span>(<span class="at">authorization =</span> connection[[<span class="st">&quot;id&quot;</span>]], <span class="at">data =</span> data))</span>
+<span id="cb1-49"><a href="#cb1-49" tabindex="-1"></a>  })</span>
+<span id="cb1-50"><a href="#cb1-50" tabindex="-1"></a></span>
+<span id="cb1-51"><a href="#cb1-51" tabindex="-1"></a>  output[[<span class="st">&quot;tracks&quot;</span>]] <span class="ot">&lt;-</span> <span class="fu">renderTable</span>({</span>
+<span id="cb1-52"><a href="#cb1-52" tabindex="-1"></a>    connection <span class="ot">&lt;-</span> <span class="fu">req</span>(auth[[<span class="st">&quot;connection&quot;</span>]]())</span>
+<span id="cb1-53"><a href="#cb1-53" tabindex="-1"></a>    <span class="fu">req</span>(connection[[<span class="st">&quot;has_scopes&quot;</span>]](<span class="st">&quot;user-top-read&quot;</span>))</span>
+<span id="cb1-54"><a href="#cb1-54" tabindex="-1"></a>    result <span class="ot">&lt;-</span> <span class="fu">tracks</span>()</span>
+<span id="cb1-55"><a href="#cb1-55" tabindex="-1"></a>    <span class="fu">req</span>(<span class="fu">identical</span>(result[[<span class="st">&quot;authorization&quot;</span>]], connection[[<span class="st">&quot;id&quot;</span>]]))</span>
+<span id="cb1-56"><a href="#cb1-56" tabindex="-1"></a>    values <span class="ot">&lt;-</span> result[[<span class="st">&quot;data&quot;</span>]]</span>
+<span id="cb1-57"><a href="#cb1-57" tabindex="-1"></a>    <span class="fu">validate</span>(<span class="fu">need</span>(<span class="sc">!</span><span class="fu">is.null</span>(values), <span class="st">&quot;Could not load tracks. Try again later.&quot;</span>))</span>
+<span id="cb1-58"><a href="#cb1-58" tabindex="-1"></a>    <span class="fu">validate</span>(<span class="fu">need</span>(<span class="fu">length</span>(values) <span class="sc">&gt;</span> <span class="dv">0</span>, <span class="st">&quot;No listening data to show yet.&quot;</span>))</span>
+<span id="cb1-59"><a href="#cb1-59" tabindex="-1"></a>    <span class="fu">data.frame</span>(<span class="at">Track =</span> values)</span>
+<span id="cb1-60"><a href="#cb1-60" tabindex="-1"></a>  })</span>
+<span id="cb1-61"><a href="#cb1-61" tabindex="-1"></a>}</span>
+<span id="cb1-62"><a href="#cb1-62" tabindex="-1"></a></span>
+<span id="cb1-63"><a href="#cb1-63" tabindex="-1"></a><span class="fu">runApp</span>(<span class="fu">shinyApp</span>(ui, server), <span class="at">port =</span> <span class="dv">8100</span>, <span class="at">launch.browser =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
 </div>
 <div id="api-requests-and-scopes" class="section level2">
 <h2>API requests and scopes</h2>
-<p><code>user-top-read</code> grants permission to read listening
-preferences. The request above asks for up to ten tracks from the
-short-term range. The module obtains and stores the access token;
-<code>perform_resource_req()</code> uses it to call the API.
-<code>eventReactive()</code> loads the data when the button is clicked,
-and <code>renderTable()</code> displays the result.</p>
-<p>For other data, choose the API URL and requested scopes together. A
-successful login does not mean every API is available to the app. Empty
+<p>The request asks for up to ten tracks from the short-term range,
+using the <code>user-top-read</code> permission. The module obtains and
+stores the access token; the connection checks the operation’s scope and
+approved API address, refreshing the token if needed before the request.
+<code>observeEvent()</code> loads the data when the button is clicked,
+and <code>renderTable()</code> displays it for the current login. The
+observer clears cached tracks on logout, a new login, or loss of
+permission to read them.</p>
+<p>Other Spotify endpoints require their corresponding scopes. Empty
 results can be normal for accounts without listening history; API errors
 can indicate missing permissions, app access restrictions, or request
 limits.</p>
@@ -452,12 +466,8 @@ example above.</p>
 <span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>)</span>
 <span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a><span class="fu">file.show</span>(dashboard_file)  <span class="co"># Read or copy the complete source.</span></span>
 <span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a><span class="fu">source</span>(dashboard_file)    <span class="co"># Run after setting your Spotify credentials.</span></span></code></pre></div>
-<p>The source groups the code into client setup, API helpers, UI, and
-server logic. It validates Spotify links and image URLs before rendering
-them and keeps table escaping enabled. Preserve those protections when
-adapting it; profile and track text can contain characters that would
-otherwise become HTML. Available data still depends on Spotify’s API
-access rules for your app.</p>
+<p>The installed dashboard validates Spotify link and image URLs and
+escapes text in its HTML output.</p>
 </div>
 
 

@@ -294,12 +294,23 @@ validate_id_token <- function(
         ))
       }
 
+      # Restored objects may bypass constructor/property validation. Bind the
+      # shared verification key to one trusted algorithm, never to a choice
+      # between several token-header algorithms (RFC 8725 section 3.1).
+      if (length(intersect(allowed_algs, c("HS256", "HS384", "HS512"))) != 1L) {
+        err_id_token(
+          "HS* ID token validation requires exactly one HS algorithm per client_secret (RFC 8725 section 3.1)"
+        )
+      }
+
       if (!is_valid_string(client_secret)) {
         err_input("HS* validation requires client_secret")
       }
 
+      check_client_hmac_algorithm(client, alg, "ID token verification", err_id_token)
+
       min_secret_bytes <- min_hmac_key_bytes(alg)
-      if (nchar(client_secret, type = "bytes") < min_secret_bytes) {
+      if (length(hmac_secret_bytes(client_secret)) < min_secret_bytes) {
         err_input(paste0(
           alg,
           " requires client_secret >= ",
@@ -452,6 +463,16 @@ validate_id_token <- function(
     if (nbf_val > (now + lwe)) {
       err_id_token("ID token not yet valid (nbf)")
     }
+  }
+  # OIDC Core section 2 defines nonce as a string even when the request omitted
+  # it. Test membership so an explicit JSON null cannot masquerade as absence.
+  if (
+    "nonce" %in% names(payload) &&
+      !(is.character(payload[["nonce"]]) &&
+        length(payload[["nonce"]]) == 1L &&
+        !is.na(payload[["nonce"]]))
+  ) {
+    err_id_token("ID token nonce claim must be a JSON string when present")
   }
   if (is_valid_string(expected_nonce)) {
     if (is.null(payload[["nonce"]])) {

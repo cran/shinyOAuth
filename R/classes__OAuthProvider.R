@@ -26,6 +26,14 @@
 #' @param name Provider name (e.g., "github", "google"). Cosmetic
 #' only; used in logging and audit events
 #'
+#' @param token_target_mode How this provider obtains API-specific tokens:
+#'   `"none"` (default), `"rfc8707"`, or `"microsoft"`. This applies to client
+#'   `token_targets` and depends on provider support. The Microsoft helper
+#'   selects `"microsoft"` automatically; discovery does not enable
+#'   targets. See `vignette("token-targets", package = "shinyOAuth")`
+#'   ([online guide](https://lukakoning.github.io/shinyOAuth/articles/token-targets.html))
+#'   for setup and permission rules.
+#'
 #' @param auth_url URL of the provider's login and permission page.
 #'
 #' @param token_url URL where R exchanges the returned code for tokens.
@@ -48,9 +56,8 @@
 #' - `"host"`: compare only scheme + host.
 #' - `"none"`: do not validate discovery issuer consistency.
 #'
-#' In most cases, keep the default `"url"`. Use `"host"` only for providers
-#' that publish tenant-independent metadata with a templated issuer, such as
-#' some Microsoft aliases.
+#' The Microsoft helper configures tenant-independent issuer handling for
+#' supported alias tenants.
 #'
 #' @param token_auth_style How the client authenticates at the token endpoint.
 #'   One of:
@@ -70,17 +77,15 @@
 #'     (RFC 7523)
 #'
 #' @param use_pkce Whether to protect the code exchange using Proof Key for Code
-#'   Exchange (PKCE). Leave enabled; public clients require it.
+#'   Exchange (PKCE), which public clients require.
 #'   It sends a `code_challenge` with the login
 #'   request and a matching secret `code_verifier` during token exchange.
 #'
-#' @param pkce_method PKCE code challenge method ("S256" or "plain"). "S256" is
-#' recommended. Use "plain" only if you are working with a provider that does
-#' not support "S256".
+#' @param pkce_method PKCE code challenge method: `"S256"` (default), or
+#' `"plain"` for compatibility with providers that require it.
 #'
 #' @param use_nonce Whether to tie the ID token to this login using a random nonce.
-#'   Keep enabled for OIDC. The nonce is sent in the request and checked in the
-#'   returned ID token.
+#'   The package sends it in the request and checks it in the returned ID token.
 #'
 #' @param userinfo_url User info endpoint URL (optional)
 #' @param userinfo_required Whether to fetch a user profile after token exchange.
@@ -98,21 +103,25 @@
 #' `sub` claims are always compared. Helper constructors like [oauth_provider()]
 #' and [oauth_provider_oidc()] provide a default selector that extracts `sub`.
 #'
-#' @param userinfo_id_token_match Whether fetched userinfo requires a validated ID
-#'   token for comparison. When both are available, their actual `sub` values
-#'   are always compared. `TRUE` also stops login if the validated ID token is
-#'   absent. Requires `userinfo_required` and either `id_token_validation` or
-#'   `use_nonce`. [oauth_provider()] enables this by default when those
-#'   requirements are met.
+#' @param userinfo_id_selector_policy_id Optional version name for a custom
+#'   `userinfo_id_selector`, or `NA_character_`. Identifies settings or helper
+#'   behavior outside the function body that affect identity selection. These
+#'   form part of the client's policy: a new version ID lets pending logins and
+#'   saved connections detect a change.
 #'
-#' @param userinfo_signed_jwt_required Whether to require the user profile to arrive
-#'   as a signed JWT (`application/jwt`). Default `FALSE`; ordinary JSON
-#'   userinfo is accepted. When `TRUE`, requires `userinfo_required` and
-#'   `issuer`; the signature must validate with an asymmetric algorithm from
-#'   `userinfo_allowed_algs`. Unsigned, HMAC-signed, and encrypted userinfo
-#'   JWTs are not accepted by the normal configuration. Discovery does not
-#'   enable this automatically: provider support does not mean your app's
-#'   registration requests signed userinfo.
+#' @param userinfo_id_token_match Require the fetched profile to belong to the
+#'   validated login identity. Defaults to `TRUE` when a UserInfo URL and ID-token
+#'   or nonce validation are enabled, including for manual [get_userinfo()] calls.
+#'   Pass the complete [OAuthToken] for this check. An explicit `FALSE` permits
+#'   profile retrieval without a validated identity; when both are available,
+#'   their actual `sub` values must still match.
+#'
+#' @param userinfo_signed_jwt_required Require a profile signed by the provider.
+#'   Default `FALSE` accepts ordinary JSON profiles. When `TRUE`, configure a
+#'   UserInfo URL and issuer, and arrange signed responses with the provider.
+#'   Signatures use `userinfo_allowed_algs`; unsigned, HMAC-signed and encrypted
+#'   profiles are not accepted by normal configuration. This requirement also
+#'   applies to manual retrieval when `userinfo_required = FALSE`.
 #'
 #' @param id_token_required Whether to require an ID token to be returned
 #' during token exchange. If no ID token is returned, the token exchange
@@ -129,8 +138,8 @@
 #' the client's scope to include `openid`).
 #'
 #' Both the S7 constructor and [oauth_provider()] enable this when an issuer
-#' is provided and `infer_oidc_from_issuer = TRUE`. Set an explicit `FALSE` only
-#' when intentionally opting out of ID token validation.
+#' is provided and `infer_oidc_from_issuer = TRUE`. An explicit `FALSE`
+#' disables automatic ID token validation.
 #'
 #' @param id_token_at_hash_required Whether to require the `at_hash` (Access Token hash)
 #' claim in the ID token. When `TRUE`, login fails if the ID token does not
@@ -172,6 +181,9 @@
 #'   before reuse. Advertised freshness also accounts for `Age` and `Expires`.
 #'   The package also attempts a rate-limited refresh when a key is missing
 #'   or no longer verifies a signature.
+#'   For async login and token operations, custom caches use synchronous fallback
+#'   unless they explicitly declare worker safety; see [custom_cache()] and its
+#'   `worker_safe` argument.
 #'
 #' @param jwks_pins Optional character vector of RFC 7638 JWK thumbprints
 #'   (base64url) to pin against. If non-empty, fetched JWKS must contain keys
@@ -186,14 +198,12 @@
 #' @param jwks_host_issuer_match When TRUE, enforce that the discovery `jwks_uri` host
 #'   matches the issuer host exactly. Defaults to FALSE at the class
 #'   level, but helper constructors for OIDC (e.g., [oauth_provider_oidc()] and
-#'   [oauth_provider_oidc_discover()]) enable this by default for safer config.
+#'   [oauth_provider_oidc_discover()]) enable this by default.
 #'   The generic helper [oauth_provider()] will also automatically set this to
 #'   TRUE when an `issuer` is provided and either `id_token_validation` or
-#'   `id_token_required` is TRUE (OIDC-like configuration). Set explicitly to
-#'   FALSE to opt out. For providers that legitimately publish JWKS on a
-#'   different host (for example Google), prefer setting
-#'   `jwks_host_allow_only` to the exact hostname rather than disabling this
-#'   check.
+#'   `id_token_required` is TRUE (OIDC-like configuration). An explicit FALSE
+#'   disables issuer-host matching. `jwks_host_allow_only` takes precedence and
+#'   can specify a different exact hostname, as used by the Google helper.
 #' @param jwks_host_allow_only Optional explicit hostname that the jwks_uri must match.
 #'   When provided, jwks_uri host must equal this value (exact match). You can
 #'   pass either just the host (e.g., "www.googleapis.com") or a full URL; only
@@ -208,25 +218,16 @@
 #'   single algorithm to enforce the client's registered UserInfo signing choice.
 #'   An empty vector rejects all signed UserInfo algorithms.
 #'   Unlabelled RSA keys follow the same binding policy as `id_token_allowed_algs`.
-#' @param id_token_allowed_algs Optional vector of allowed JWT algorithms for ID tokens.
-#'   Use to restrict acceptable `alg` values on a per-provider basis. Supported
-#'   asymmetric algorithms include `RS256`, `RS384`, `RS512`, `ES256`,
-#'   `ES384`, `ES512`, and `Ed25519` or legacy `EdDSA` with Ed25519 OKP keys (including `at_hash`
-#'   validation). Ed448 verification is unsupported and fails closed.
-#'   Symmetric HMAC algorithms `HS256`, `HS384`, `HS512` are also supported but
-#'   require that you supply a `client_secret` and explicitly enable HMAC
-#'   verification via the option `options(shinyOAuth.allow_hs = TRUE)`.
-#'   Defaults to `c("RS256","RS384","RS512","ES256","ES384","ES512","Ed25519","EdDSA")`,
-#'   which intentionally excludes HS*.
-#'   Each RSA verification key is bound to one algorithm: its JWK `alg`, if
-#'   supplied, or the sole RSA algorithm in this allowlist. When several RSA
-#'   algorithms are allowed, an unlabelled key is bound to `RS256` (and rejected
-#'   if `RS256` is excluded). To use unlabelled keys with `RS384` or `RS512`,
-#'   configure only that RSA algorithm. EC curves already select one supported
-#'   algorithm; legacy `EdDSA` with an Ed25519 key uses the Ed25519 operation.
-#'   Only include `HS*` if you are certain the `client_secret` is stored strictly
-#'   server-side and is never shipped to, or derivable by, the browser or other
-#'   untrusted environments.
+#' @param id_token_allowed_algs Signing algorithms accepted for ID tokens.
+#'   Defaults to `c("RS256", "RS384", "RS512", "ES256", "ES384", "ES512",
+#'   "Ed25519", "EdDSA")`; Ed448 and unsupported algorithms are rejected.
+#'   Use a narrower set to match your provider registration.
+#'   HMAC (`HS256`, `HS384`, `HS512`) requires a server-only client secret,
+#'   `options(shinyOAuth.allow_hs = TRUE)`, and exactly one HS algorithm.
+#'   Reused keys or secrets must not have conflicting algorithm settings.
+#'   For RSA key metadata, defaults and rotation, see
+#'   [signing-key validation](https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html#provider-key-set-validation).
+#'
 #' @param allowed_token_types Character vector of acceptable OAuth token types
 #'   returned by the token endpoint (case-insensitive). Successful token
 #'   responses must include `token_type` by default; when `allowed_token_types` is
@@ -235,15 +236,19 @@
 #'   defaults to `c("Bearer")`. When the [OAuthClient] is configured with
 #'   `dpop_private_key`, shinyOAuth also accepts `token_type = "DPoP"` and uses
 #'   DPoP proofs on supported token and downstream requests. Other non-Bearer
-#'   token types (for example `MAC`) still fail fast rather than being misused.
+#'   token types (for example `MAC`) are rejected.
 #'   Set `allowed_token_types = character()` explicitly only to disable the
 #'   value allowlist while still requiring `token_type` itself.
-#' @param allow_missing_token_type Logical, default `FALSE`. Opt in only for a
-#'   provider known to issue Bearer tokens while omitting `token_type` from its
-#'   token responses, contrary to OAuth 2.0. When `TRUE`, login and refresh assume
+#' @param token_response_scope_format Separator used for permissions in token
+#'   responses: `"space"` (default) or `"comma"`. The GitHub helper sets `"comma"`
+#'   automatically. Set it explicitly for a custom provider using that format.
+#'
+#' @param allow_missing_token_type Logical, default `FALSE`. Compatibility for
+#'   providers that issue Bearer tokens without the OAuth-required `token_type`.
+#'   When `TRUE`, login and refresh assume
 #'   `"Bearer"` only when the field is absent. Explicit null, empty, invalid, or
 #'   unsupported values still fail validation. The fallback never applies to
-#'   clients configured with DPoP; other token and binding checks remain enforced.
+#'   clients configured with DPoP.
 #'
 #' @param leeway Clock skew leeway (seconds) applied to ID token `exp`/`iat`/`nbf` checks
 #'   and state payload `issued_at` future check. Default 30. Can be globally
@@ -259,13 +264,11 @@
 #'   requires authorization requests to be sent via PAR. When `TRUE`,
 #'   `par_url` must also be configured.
 #' @param signed_request_object_required Logical. Whether the provider requires
-#'   signed Request Objects for authorization requests. When `TRUE`, clients
-#'   should use `request_object_mode = "request"` or
-#'   `request_object_mode = "request_uri"`.
-#'   This setting enforces local construction only; it does not configure the
-#'   authorization server. Register `require_signed_request_object = true` (or
-#'   the server's equivalent) and verify unsigned requests are rejected before
-#'   relying on downgrade-resistant request integrity.
+#'   signed Request Objects for authorization requests. When `TRUE`, client
+#'   construction requires `request_object_mode = "request"` or `"request_uri"`.
+#'   This represents the provider's registration policy and enforces local
+#'   construction. Provider-side rejection of unsigned requests depends on that
+#'   registration, not on this local flag.
 #' @param request_parameter_supported Logical or `NA`. Whether discovery
 #'   metadata explicitly advertises support for the authorization-request
 #'   `request` parameter. `NA` means the provider did not say. Discovery-derived
@@ -282,10 +285,9 @@
 #'   `NA` means the provider did not say. Discovery-derived providers apply the
 #'   OpenID Connect default (`FALSE`) when this metadata is omitted.
 #'   shinyOAuth can publish caller-managed `request_uri` values through
-#'   `oauth_module_server()`. When this is `TRUE`, make sure the provider has a
-#'   matching public request URI or wildcard prefix registered for the client.
-#'   shinyOAuth stores this metadata for caller awareness, but it cannot verify
-#'   provider-side registration state automatically.
+#'   `oauth_module_server()`. `TRUE` means the public URI or a matching prefix
+#'   belongs in the provider's client registration. The package stores this
+#'   requirement as metadata; provider-side registration is outside local validation.
 #' @param request_object_signing_alg_values_supported Optional vector of JWS
 #'   algorithms that the provider advertises for signed Request Objects (RFC
 #'   9101). This is mainly used for early validation when an [OAuthClient]
@@ -326,8 +328,8 @@
 #'   providers use the discovery metadata value, defaulting to `c("query",
 #'   "fragment")` when omitted per OIDC Discovery/RFC 8414. Generic providers
 #'   may leave this empty when capabilities are not known. Provider metadata may
-#'   include response modes that shinyOAuth does not implement; clients still
-#'   fail fast if they request one of those unsupported modes.
+#'   include response modes that shinyOAuth does not implement. Requesting an
+#'   unsupported mode raises an error.
 #' @param jarm_signing_alg_values_supported Optional vector of JWS
 #'   algorithms that the provider advertises for signed JWT Secured
 #'   Authorization Responses (JARM).
@@ -339,11 +341,11 @@
 #'   JARM responses.
 #' @param jarm_tolerate_duplicate_top_level_iss Logical. Whether shinyOAuth
 #'   should tolerate repeated identical top-level `iss` members in signed JARM
-#'   payloads for this provider. This is an interoperability escape hatch for
+#'   payloads for this provider. This is a compatibility setting for
 #'   providers that emit duplicate identical top-level `iss` claims. When
 #'   `TRUE`, shinyOAuth collapses repeated identical top-level `iss` members
 #'   before duplicate-member rejection. Conflicting duplicates and nested
-#'   duplicate `iss` members still fail closed. Defaults to `FALSE`.
+#'   duplicate `iss` members are rejected. Defaults to `FALSE`.
 #' @param token_endpoint_auth_signing_alg_values_supported Optional vector of
 #'   JWS algorithms that the provider advertises for JWT-based client
 #'   authentication (`client_secret_jwt` / `private_key_jwt`) at the token
@@ -381,6 +383,7 @@ OAuthProvider <- S7::new_class(
   package = "shinyOAuth",
   properties = list(
     name = S7::class_character,
+    token_target_mode = S7::new_property(S7::class_character, default = "none"),
     auth_url = S7::class_character,
     token_url = S7::class_character,
     issuer = S7::new_property(S7::class_character, default = NA_character_),
@@ -411,9 +414,17 @@ OAuthProvider <- S7::new_class(
       S7::class_any,
       default = quote(function(userinfo) userinfo[["sub"]])
     ),
+    userinfo_id_selector_policy_id = S7::new_property(
+      S7::class_character,
+      default = NA_character_
+    ),
     userinfo_id_token_match = S7::new_property(
       S7::class_logical,
-      default = FALSE
+      default = quote(
+        is_valid_string(userinfo_url) &&
+          is_ok_host(userinfo_url) &&
+          (isTRUE(id_token_validation) || isTRUE(use_nonce))
+      )
     ),
     userinfo_signed_jwt_required = S7::new_property(
       S7::class_logical,
@@ -474,7 +485,7 @@ OAuthProvider <- S7::new_class(
     ),
     allowed_algs = S7::new_property(
       S7::class_character,
-      default = c(
+      default = quote(c(
         "RS256",
         "RS384",
         "RS512",
@@ -483,11 +494,15 @@ OAuthProvider <- S7::new_class(
         "ES512",
         "Ed25519",
         "EdDSA"
-      )
+      ))
     ),
     allowed_token_types = S7::new_property(
       S7::class_character,
       default = c("Bearer")
+    ),
+    token_response_scope_format = S7::new_property(
+      S7::class_character,
+      default = "space"
     ),
     allow_missing_token_type = S7::new_property(
       S7::class_logical,
@@ -650,6 +665,11 @@ OAuthProvider <- api_preserve_constructor(
     require_request_uri_registration = "request_uri_registration_required",
     tls_client_certificate_bound_access_tokens = "mtls_client_certificate_bound_access_tokens",
     allowed_algs = "id_token_allowed_algs"
+  ),
+  append = c(
+    "token_target_mode",
+    "token_response_scope_format",
+    "userinfo_id_selector_policy_id"
   )
 )
 
@@ -779,7 +799,10 @@ oauth_provider <- function(
   endpoint_auth_metadata = list(),
   ...,
   allowed_algs = NULL,
-  allow_missing_token_type = FALSE
+  allow_missing_token_type = FALSE,
+  token_target_mode = "none",
+  token_response_scope_format = "space",
+  userinfo_id_selector_policy_id = NA_character_
 ) {
   allowed_algs <- resolve_argument_alias(
     id_token_allowed_algs,
@@ -1005,18 +1028,10 @@ oauth_provider <- function(
   }
   allowed_algs <- toupper(allowed_algs)
 
-  # Normalize jwks_host_allow_only: allow either hostname or full URL; store hostname only
-  if (is_valid_string(jwks_host_allow_only)) {
-    jh <- trimws(jwks_host_allow_only)
-    if (grepl("^https?://", tolower(jh))) {
-      jh <- parse_url_host(jh, "jwks_host_allow_only")
-    } else {
-      jh <- tolower(sub("\\.$", "", jh))
-    }
-    jwks_host_allow_only <- jh
-  } else {
-    jwks_host_allow_only <- NA_character_
-  }
+  jwks_host_allow_only <- normalize_jwks_host_pin(
+    jwks_host_allow_only,
+    err_input
+  )
 
   if (
     !(is.logical(infer_oidc_from_issuer) &&
@@ -1087,12 +1102,13 @@ oauth_provider <- function(
     userinfo_required <- isTRUE(has_ui)
   }
   if (is.null(userinfo_id_token_match)) {
-    userinfo_id_token_match <- isTRUE(userinfo_required) &&
+    userinfo_id_token_match <- isTRUE(has_ui) &&
       (isTRUE(id_token_validation) || isTRUE(use_nonce))
   }
 
   OAuthProvider(
     name = name,
+    token_target_mode = token_target_mode,
     auth_url = auth_url,
     token_url = token_url,
     issuer = issuer,
@@ -1105,6 +1121,7 @@ oauth_provider <- function(
     userinfo_url = userinfo_url,
     userinfo_required = userinfo_required,
     userinfo_id_selector = userinfo_id_selector,
+    userinfo_id_selector_policy_id = userinfo_id_selector_policy_id,
     userinfo_id_token_match = userinfo_id_token_match,
     userinfo_signed_jwt_required = isTRUE(userinfo_signed_jwt_required),
     id_token_required = id_token_required,
@@ -1124,6 +1141,7 @@ oauth_provider <- function(
     id_token_allowed_algs = allowed_algs,
     userinfo_allowed_algs = userinfo_allowed_algs,
     allowed_token_types = allowed_token_types,
+    token_response_scope_format = token_response_scope_format,
     allow_missing_token_type = allow_missing_token_type,
     leeway = leeway,
     par_url = par_url,
@@ -1173,6 +1191,14 @@ oauth_provider <- function(
 #' @keywords internal
 #' @noRd
 oauth_provider_validate <- function(self) {
+  if (
+    !is_valid_string(self@token_target_mode) ||
+      !self@token_target_mode %in% c("none", "rfc8707", "microsoft")
+  ) {
+    return(
+      "OAuthProvider: token_target_mode must be none, rfc8707, or microsoft"
+    )
+  }
   for (field in oauth_provider_boolean_fields()) {
     if (!is_scalar_logical(S7::prop(self, field))) {
       return(paste0(
@@ -1224,7 +1250,7 @@ oauth_provider_validate <- function(self) {
     parsed_issuer <- try(httr2::url_parse(self@issuer), silent = TRUE)
     if (
       !inherits(parsed_issuer, "try-error") &&
-        (length(parsed_issuer[["query"]]) > 0L ||
+        (grepl("?", self@issuer, fixed = TRUE) ||
           has_uri_fragment(self@issuer))
     ) {
       return(
@@ -1259,6 +1285,10 @@ oauth_provider_validate <- function(self) {
       return(
         "OAuthProvider: extra_token_headers must have non-empty names for all headers"
       )
+    }
+    header_problem <- http_headers_problem(eth)
+    if (!is.null(header_problem)) {
+      return(paste0("OAuthProvider: extra_token_headers: ", header_problem))
     }
 
     default_reserved_headers <- c("authorization", "cookie")
@@ -1964,6 +1994,13 @@ oauth_provider_validate <- function(self) {
     )
   }
 
+  if (
+    !is_valid_string(self@token_response_scope_format) ||
+      !self@token_response_scope_format %in% c("space", "comma")
+  ) {
+    return("OAuthProvider: token_response_scope_format must be space or comma")
+  }
+
   if (length(self@allowed_token_types) > 0) {
     att <- self@allowed_token_types
     if (!is.character(att)) {
@@ -2006,9 +2043,9 @@ oauth_provider_validate <- function(self) {
   }
 
   if (isTRUE(self@userinfo_signed_jwt_required)) {
-    if (!isTRUE(self@userinfo_required)) {
+    if (!is_valid_string(self@userinfo_url) || !is_ok_host(self@userinfo_url)) {
       return(
-        "OAuthProvider: userinfo_signed_jwt_required = TRUE requires userinfo_required = TRUE"
+        "OAuthProvider: userinfo_signed_jwt_required = TRUE requires a valid userinfo_url"
       )
     }
     if (!is_valid_string(self@issuer)) {
@@ -2018,12 +2055,15 @@ oauth_provider_validate <- function(self) {
     }
   }
 
+  selector_id <- self@userinfo_id_selector_policy_id
+  if (
+    length(selector_id) != 1L ||
+      (!is.na(selector_id) && !is_valid_string(selector_id))
+  ) {
+    return("OAuthProvider: userinfo_id_selector_policy_id must be NA or a non-empty string")
+  }
+
   if (isTRUE(self@userinfo_id_token_match)) {
-    if (!isTRUE(self@userinfo_required)) {
-      return(
-        "OAuthProvider: userinfo_id_token_match = TRUE requires userinfo_required = TRUE"
-      )
-    }
     if (!(isTRUE(self@id_token_validation) || isTRUE(self@use_nonce))) {
       return(
         "OAuthProvider: userinfo_id_token_match = TRUE requires id_token_validation = TRUE or use_nonce = TRUE"
@@ -2055,25 +2095,17 @@ oauth_provider_validate <- function(self) {
     )
   }
 
-  if (is_valid_string(self@jwks_host_allow_only)) {
-    val <- trimws(self@jwks_host_allow_only)
-    host_only <- val
-    if (grepl("^https?://", tolower(val))) {
-      host_only <- try(
-        parse_url_host(val, "jwks_host_allow_only"),
-        silent = TRUE
-      )
-      if (inherits(host_only, "try-error")) {
-        return("OAuthProvider: jwks_host_allow_only URL could not be parsed")
-      }
-    } else {
-      if (!grepl("^[A-Za-z0-9.-]+$", host_only)) {
-        return(
-          "OAuthProvider: jwks_host_allow_only must be a hostname or a URL containing a hostname"
-        )
-      }
-      host_only <- sub("\\.$", "", tolower(host_only))
-    }
+  pin_error <- tryCatch(
+    {
+      normalize_jwks_host_pin(self@jwks_host_allow_only, function(message) {
+        stop(message, call. = FALSE)
+      })
+      NULL
+    },
+    error = conditionMessage
+  )
+  if (!is.null(pin_error)) {
+    return(paste0("OAuthProvider: ", pin_error))
   }
 
   NULL
@@ -2141,7 +2173,7 @@ oauth_provider_check_host_field <- function(value, name, required = FALSE) {
 #' created and again when callback handling resumes.
 #'
 #' @param provider [OAuthProvider] instance to fingerprint.
-#' @return A length-1 character string in `sha256:<digest>` format.
+#' @return A length-1 character string in `sha256:v2:<digest>` format.
 #' @keywords internal
 #' @noRd
 provider_fingerprint <- function(provider) {
@@ -2167,6 +2199,9 @@ provider_fingerprint <- function(provider) {
     pkce_method = provider@pkce_method,
     userinfo_required = isTRUE(provider@userinfo_required),
     userinfo_id_selector = provider@userinfo_id_selector,
+    userinfo_id_selector_policy_id = provider_prop(
+      "userinfo_id_selector_policy_id", NA_character_
+    ),
     userinfo_id_token_match = isTRUE(provider@userinfo_id_token_match),
     userinfo_signed_jwt_required = isTRUE(
       provider@userinfo_signed_jwt_required
@@ -2178,6 +2213,10 @@ provider_fingerprint <- function(provider) {
       provider@jarm_tolerate_duplicate_top_level_iss
     ),
     token_auth_style = provider@token_auth_style,
+    token_response_scope_format = provider_prop(
+      "token_response_scope_format",
+      "space"
+    ),
     endpoint_auth_metadata = provider_prop("endpoint_auth_metadata", list()),
     extra_auth_params_digest = state_policy_value_digest(
       provider_prop("extra_auth_params", list())
@@ -2287,5 +2326,9 @@ provider_fingerprint <- function(provider) {
     )
   )
 
+  target_mode <- provider_prop("token_target_mode", "none")
+  if (!identical(target_mode, "none")) {
+    components[["token_target_mode"]] <- target_mode
+  }
   state_policy_digest(components)
 }

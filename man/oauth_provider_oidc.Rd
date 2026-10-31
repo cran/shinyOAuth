@@ -16,7 +16,8 @@ oauth_provider_oidc(
   jwks_host_issuer_match = TRUE,
   allowed_token_types = c("Bearer"),
   ...,
-  token_auth_style = "header"
+  token_auth_style = "header",
+  issuer = base_url
 )
 }
 \arguments{
@@ -37,12 +38,10 @@ oauth_provider_oidc(
 \item{id_token_validation}{Logical, whether to validate ID tokens automatically
 for this provider. Defaults to TRUE}
 
-\item{jwks_host_issuer_match}{When TRUE (default), enforce that the JWKS host
-discovered from the provider matches the issuer host exactly. For
-providers that serve JWKS from a different host (e.g., Google), set
-\code{jwks_host_allow_only} to the exact hostname instead of disabling this.
-Disabling (\code{FALSE}) is not recommended unless you also pin JWKS via
-\code{jwks_host_allow_only} or \code{jwks_pins}}
+\item{jwks_host_issuer_match}{When TRUE (default), require the discovered
+JWKS host to match the issuer host exactly. \code{jwks_host_allow_only} takes
+precedence and can specify a different exact hostname. \code{FALSE} disables
+issuer-host matching.}
 
 \item{allowed_token_types}{Character vector of allowed token types for
 access tokens issued by this provider. Defaults to 'Bearer'}
@@ -51,6 +50,10 @@ access tokens issued by this provider. Defaults to 'Bearer'}
 
 \item{token_auth_style}{Token endpoint client authentication style passed to
 \code{\link[=oauth_provider]{oauth_provider()}}. Defaults to \code{"header"}.}
+
+\item{issuer}{Exact OIDC issuer identifier. Defaults to \code{base_url}, retaining
+any trailing slash. Supply this explicitly when your provider identifies
+itself with a different URL from the one used to build endpoint addresses.}
 }
 \value{
 \link{OAuthProvider} object
@@ -80,12 +83,12 @@ generic_oidc_provider <- oauth_provider_oidc(
   base_url = "https://my-issuer.example.com"
 )
 
-# Configure a OIDC provider via OIDC discovery
+# Look up an OIDC provider's settings with discovery
 # (requires network access)
 if (interactive()) {
   # Using Auth0 sample issuer as an example
   oidc_discovery_provider <- oauth_provider_oidc_discover(
-    issuer = "https://samples.auth0.com"
+    issuer = "https://samples.auth0.com/"
   )
 }
 

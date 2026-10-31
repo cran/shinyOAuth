@@ -210,7 +210,7 @@ audit_callback_validation_success <- function(
 #' security policy that initiated login.
 #'
 #' @param components Named list of normalized policy components.
-#' @return A length-1 character string in `sha256:<digest>` format.
+#' @return A length-1 character string in `sha256:v2:<digest>` format.
 #' @keywords internal
 #' @noRd
 state_policy_digest <- function(components) {
@@ -231,8 +231,11 @@ state_policy_digest <- function(components) {
   )
 
   paste0(
-    "sha256:",
-    string_digest(enc2utf8(paste(canonical, collapse = "\n")), key = NULL)
+    "sha256:v2:",
+    string_digest(
+      enc2utf8(paste0("shinyOAuth/state-policy/v2\n", paste(canonical, collapse = "\n"))),
+      key = NULL
+    )
   )
 }
 
@@ -249,6 +252,7 @@ state_policy_component_string <- function(value) {
   enc2utf8(jsonlite::toJSON(
     normalized,
     auto_unbox = TRUE,
+    na = "null",
     null = "null",
     pretty = FALSE
   ))
@@ -265,103 +269,52 @@ state_policy_component_string <- function(value) {
 #' @noRd
 state_policy_normalize_value <- function(value) {
   if (is.null(value)) {
-    return(NULL)
+    return(list(type = "null"))
   }
 
   if (is.function(value)) {
-    return(list(`__function__` = paste(deparse(value), collapse = "\n")))
+    # Closure environments can contain secrets and process-local mutable state.
+    # Captured configuration is bound by the provider's explicit selector ID.
+    return(list(type = "function", source = paste(deparse(value), collapse = "\n")))
   }
 
-  if (is.raw(value)) {
-    return(paste0(sprintf("%02x", as.integer(value)), collapse = ""))
+  if (!is.list(value) && !is.atomic(value)) {
+    err_config(paste0("Unsupported policy value type: ", typeof(value)))
   }
 
-  if (is.list(value)) {
-    if (length(value) == 0L) {
-      return(list())
-    }
-
-    value_names <- names(value)
-    if (length(value_names) > 0L && !is.null(value_names)) {
-      ord <- order(value_names)
-      value <- value[ord]
-      value_names <- value_names[ord]
-      out <- lapply(value, state_policy_normalize_value)
-      names(out) <- value_names
-      return(out)
-    }
-
-    return(lapply(value, state_policy_normalize_value))
+  value_names <- names(value)
+  attrs <- attributes(value)
+  attrs[["names"]] <- NULL
+  attributes(value) <- NULL
+  # Named objects are order-independent only when their names are unique and
+  # complete. Preserve duplicate/empty names and array dimensions explicitly.
+  if (
+    !is.null(value_names) && is.null(attrs[["dim"]]) &&
+      !anyNA(value_names) && all(nzchar(value_names)) &&
+      !anyDuplicated(value_names)
+  ) {
+    ord <- order(enc2utf8(value_names), method = "radix")
+    value <- value[ord]
+    value_names <- value_names[ord]
   }
 
-  if (is.atomic(value)) {
-    value_names <- names(value)
-    if (length(value_names) > 0L && !is.null(value_names)) {
-      ord <- order(value_names)
-      value <- value[ord]
-      out <- as.list(vapply(
-        seq_along(value),
-        function(i) state_policy_scalar_string(value[[i]]),
-        ""
-      ))
-      names(out) <- value_names[ord]
-      return(out)
-    }
-
-    return(unname(vapply(
-      seq_along(value),
-      function(i) state_policy_scalar_string(value[[i]]),
-      ""
-    )))
+  data <- if (is.list(value)) {
+    lapply(value, state_policy_normalize_value)
+  } else if (is.character(value)) {
+    enc2utf8(value)
+  } else {
+    # Exact, fixed-endian IEEE/integer bytes avoid display precision, decimal
+    # locale and JSON rounding. Type tags distinguish logicals, integers, raw
+    # bytes and doubles; NA, NaN and literal strings remain distinct.
+    bytes <- if (is.raw(value)) value else writeBin(value, raw(), endian = "big")
+    paste0(sprintf("%02x", as.integer(bytes)), collapse = "")
   }
-
-  state_policy_scalar_string(value)
-}
-
-#' Convert one scalar policy value to a stable string
-#'
-#' Used by `state_policy_normalize_value()` for atomic leaves.
-#'
-#' @param value Scalar policy value.
-#' @return Length-1 UTF-8 string.
-#' @keywords internal
-#' @noRd
-state_policy_scalar_string <- function(value) {
-  if (is.null(value) || length(value) == 0L) {
-    return("")
-  }
-
-  if (is.logical(value)) {
-    return(
-      if (is.na(value[[1L]])) {
-        "<na>"
-      } else if (isTRUE(value[[1L]])) {
-        "true"
-      } else {
-        "false"
-      }
-    )
-  }
-
-  if (is.numeric(value)) {
-    if (is.na(value[[1L]])) {
-      return("<na>")
-    }
-    return(format(
-      signif(as.numeric(value[[1L]]), digits = 17),
-      scientific = FALSE,
-      trim = TRUE
-    ))
-  }
-
-  value_chr <- tryCatch(as.character(value[[1L]]), error = function(...) {
-    "<unsupported>"
-  })
-  if (!is.character(value_chr) || length(value_chr) != 1L || is.na(value_chr)) {
-    return("<na>")
-  }
-
-  enc2utf8(value_chr)
+  list(
+    type = typeof(value),
+    names = if (is.null(value_names)) NULL else enc2utf8(value_names),
+    attributes = if (length(attrs)) state_policy_normalize_value(attrs) else NULL,
+    value = data
+  )
 }
 
 #' Normalize a character-like set for policy fingerprints
@@ -409,12 +362,9 @@ state_policy_client_assertion_key_thumbprint <- function(client) {
     client@client_assertion_private_key,
     arg_name = "client_assertion_private_key"
   )
-  public_key <- as.list(key)[["pubkey"]]
-  jwk <- jsonlite::fromJSON(
-    jose::write_jwk(public_key),
-    simplifyVector = TRUE
-  )
-  compute_jwk_thumbprint(canonicalize_local_public_jwk(jwk))
+  compute_jwk_thumbprint(private_key_public_jwk(
+    key, arg_name = "client_assertion_private_key"
+  ))
 }
 
 #' Identify an explicit provider Request Object encryption key
@@ -436,7 +386,7 @@ state_policy_request_encryption_key_identity <- function(value) {
       grepl("^\\s*\\{", paste(value, collapse = "\n"))
   ) {
     tryCatch(
-      jsonlite::fromJSON(
+      jsonlite::parse_json(
         paste(value, collapse = "\n"),
         simplifyVector = FALSE
       ),
@@ -446,7 +396,7 @@ state_policy_request_encryption_key_identity <- function(value) {
     list()
   }
   public_key <- normalize_jwe_recipient_public_key(value)
-  public_jwk <- jsonlite::fromJSON(
+  public_jwk <- jsonlite::parse_json(
     jose::write_jwk(public_key),
     simplifyVector = TRUE
   )
@@ -524,7 +474,10 @@ state_policy_jarm_decryption_key_thumbprint <- function(client) {
     arg_name = "jarm_decryption_private_key"
   )
   key_pubkey <- as.list(key)[["pubkey"]]
-  jwk <- jsonlite::fromJSON(jose::write_jwk(key_pubkey), simplifyVector = TRUE)
+  jwk <- jsonlite::parse_json(
+    jose::write_jwk(key_pubkey),
+    simplifyVector = TRUE
+  )
 
   compute_jwk_thumbprint(canonicalize_local_public_jwk(jwk))
 }
@@ -536,7 +489,7 @@ state_policy_jarm_decryption_key_thumbprint <- function(client) {
 #' callback cannot resume under a looser client policy on another worker.
 #'
 #' @param client [OAuthClient] instance to fingerprint.
-#' @return A length-1 character string in `sha256:<digest>` format.
+#' @return A length-1 character string in `sha256:v2:<digest>` format.
 #' @keywords internal
 #' @noRd
 state_client_policy_fingerprint <- function(client) {
@@ -673,6 +626,10 @@ state_client_policy_fingerprint <- function(client) {
   if (client_uses_smart(client)) {
     components[["smart"]] <- client@smart
   }
+  if (token_targets_configured(client)) {
+    components[["token_targets"]] <- client@token_targets
+    components[["token_target_default"]] <- client@token_target_default
+  }
   if (length(client@resource_bases)) {
     bases <- normalize_resource_bases(client@resource_bases)
     components[["resource_bases"]] <- as.list(bases[sort(names(bases))])
@@ -808,6 +765,63 @@ payload_verify_client_binding <- function(client, payload) {
 
   expected_scopes <- as_scope_tokens(effective_client_scopes(client))
   payload_scopes <- as_scope_tokens(payload[["scopes"]] %||% NULL)
+  if (!is.null(payload[["accepted_extra_scopes"]])) {
+    tryCatch(
+      {
+        if (
+          is.null(payload[["configured_scopes"]]) && length(expected_scopes)
+        ) {
+          err_invalid_state(
+            "Extra scope evidence requires a reauthorization scope limit"
+          )
+        }
+        extra <- connection_data_decode(payload[["accepted_extra_scopes"]])
+        if (
+          !identical(
+            extra,
+            authorization_extra_scope_limit(client, extra, payload_scopes)
+          )
+        ) {
+          err_invalid_state("Invalid extra scope evidence")
+        }
+      },
+      error = function(...) err_invalid_state("Invalid extra scope evidence")
+    )
+  }
+  if (!is.null(payload[["target_limits"]])) {
+    limits <- tryCatch(
+      validate_token_target_limits(
+        client,
+        connection_data_decode(payload[["target_limits"]])
+      ),
+      error = function(...) err_invalid_state("Invalid target scope limits")
+    )
+    if (
+      !setequal(
+        payload_scopes,
+        token_target_authorization_scopes(client, limits)
+      )
+    ) {
+      err_invalid_state("Target limits do not match the authorization scopes")
+    }
+  }
+  if (!is.null(payload[["configured_scopes"]])) {
+    if (
+      !setequal(
+        expected_scopes,
+        as_scope_tokens(payload[["configured_scopes"]])
+      )
+    ) {
+      err_invalid_state("Invalid payload: configured scopes do not match")
+    }
+    tryCatch(
+      authorization_scope_limit(client, payload_scopes),
+      error = function(...) {
+        err_invalid_state("Invalid payload: authorization scope limit")
+      }
+    )
+    expected_scopes <- payload_scopes
+  }
 
   # Normalize by unique + sort so we can produce clear differences
   exp_norm <- sort(unique(expected_scopes))
@@ -1419,14 +1433,19 @@ state_store_unseal <- function(record, client, state) {
   if (!is.list(record) || !is_valid_string(record[["sealed_state_record"]])) {
     err_invalid_state("External state store entry is missing or is not sealed")
   }
+  # The context JSON is itself a string in the encrypted JSON record, so allow
+  # its escaping plus browser/PKCE/nonce fields, then both base64 envelopes.
+  max_ct <- 2L * authorization_context_max_bytes + 8192L
+  max_ct_b64 <- 4L * ceiling(max_ct / 3L)
+  max_wrapper <- max_ct_b64 + 256L
   state_decrypt_gcm(
     record[["sealed_state_record"]],
     key = state_store_sealing_key(client, state),
     size_limits = list(
-      token = 16384,
-      wrapper = 12288,
-      ct_b64 = 12288,
-      ct = 8192
+      token = 4L * ceiling(max_wrapper / 3L),
+      wrapper = max_wrapper,
+      ct_b64 = max_ct_b64,
+      ct = max_ct
     )
   )
 }

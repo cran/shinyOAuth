@@ -50,12 +50,13 @@ testthat::test_that("proactive async refresh may trigger multiple attempts but s
       # Count refresh attempts and alternate returned access tokens
       calls <- 0L
       token_after <- testthat::with_mocked_bindings(
-        refresh_token = function(
+        refresh_token_dispatch = function(
           oauth_client,
           token,
           async = TRUE,
           introspect = FALSE,
-          shiny_session = NULL
+          shiny_session = NULL,
+          ...
         ) {
           calls <<- calls + 1L
           call_num <- calls
@@ -92,7 +93,7 @@ testthat::test_that("proactive async refresh may trigger multiple attempts but s
 
       # Assertions: refresh happened at least once, token updated and valid
       testthat::expect_true(calls >= 1)
-      testthat::expect_s3_class(token_after, "S7_object")
+      testthat::expect_true(S7::S7_inherits(token_after, shinyOAuth::OAuthToken))
       testthat::expect_true(startsWith(token_after@access_token, "new-"))
       # No error should be latched in indefinite_session mode
       testthat::expect_null(values[["error"]])
@@ -161,12 +162,13 @@ testthat::test_that("expiry watcher defers clearing token while refresh is in pr
       # Track refresh calls and simulate a slow IdP (~2s response)
       calls <- 0L
       result <- testthat::with_mocked_bindings(
-        refresh_token = function(
+        refresh_token_dispatch = function(
           oauth_client,
           token,
           async = TRUE,
           introspect = FALSE,
-          shiny_session = NULL
+          shiny_session = NULL,
+          ...
         ) {
           calls <<- calls + 1L
           call_num <- calls
@@ -212,7 +214,7 @@ testthat::test_that("expiry watcher defers clearing token while refresh is in pr
       # 1. Refresh was attempted at least once
       testthat::expect_true(result[["calls"]] >= 1)
       # 2. Token was successfully refreshed (not cleared by expiry watcher)
-      testthat::expect_s3_class(result[["token"]], "S7_object")
+      testthat::expect_true(S7::S7_inherits(result[["token"]], shinyOAuth::OAuthToken))
       testthat::expect_true(startsWith(
         result[["token"]]@access_token,
         "refreshed-"
@@ -242,7 +244,7 @@ testthat::test_that("short-lived refreshed tokens do not cause a refresh storm",
     expr = {
       calls <- 0L
       testthat::with_mocked_bindings(
-        refresh_token = function(...) {
+        refresh_token_dispatch = function(...) {
           calls <<- calls + 1L
           OAuthToken(
             access_token = paste0("new-", calls),
@@ -294,7 +296,7 @@ testthat::test_that("persistent refresh failures use bounded retries", {
     expr = {
       calls <- 0L
       testthat::with_mocked_bindings(
-        refresh_token = function(...) {
+        refresh_token_dispatch = function(...) {
           calls <<- calls + 1L
           stop("persistent provider failure")
         },

@@ -48,6 +48,40 @@ make_jarm_test_client <- function(
   )
 }
 
+test_that("signed JARM rejects lossy strings before using response parameters", {
+  secret <- strrep("s", 32)
+  client <- make_jarm_test_client(
+    jarm_signed_response_alg = "HS256", client_secret = secret
+  )
+  payload <- paste0(
+    '{"iss":"https://issuer.example.com","aud":"abc","exp":',
+    floor(as.numeric(Sys.time())) + 120,
+    ',"code":"authorization-code","state":"sealed-state"}'
+  )
+  sign <- function(payload) {
+    input <- paste(
+      shinyOAuth:::base64url_encode(charToRaw('{"alg":"HS256"}')),
+      shinyOAuth:::base64url_encode(charToRaw(payload)), sep = "."
+    )
+    signature <- openssl::sha256(charToRaw(input), key = charToRaw(secret))
+    paste(input, shinyOAuth:::base64url_encode(signature), sep = ".")
+  }
+  expect_identical(
+    shinyOAuth:::validate_jarm_response(client, sign(payload))[["code"]],
+    "authorization-code"
+  )
+  for (text in c(
+    sub('"aud":"abc"', '"aud":"abc\\u0000other"', payload, fixed = TRUE),
+    sub('"iss":', '"iss\\u0000alias":', payload, fixed = TRUE),
+    sub('"code":', '"code\\u0000alias":', payload, fixed = TRUE)
+  )) {
+    expect_error(
+      shinyOAuth:::validate_jarm_response(client, sign(text)),
+      "JARM payload could not be parsed", class = "shinyOAuth_state_error"
+    )
+  }
+})
+
 make_jarm_public_jwk <- function(key, kid = "sig-1", use = "sig") {
   jwk <- jsonlite::fromJSON(
     write_test_jwk(key[["pubkey"]]),
@@ -205,6 +239,89 @@ make_compact_jwe_with_header <- function(header_json) {
     sep = "."
   )
 }
+
+test_that("JARM algorithm mismatches respect diagnostic exposure through form_post UI", {
+  local_options(shinyOAuth.telemetry_path_scrubber = NULL)
+  encrypted_client <- make_jarm_test_client(
+    response_mode = "form_post.jwt",
+    jarm_encrypted_response_alg = "RSA-OAEP",
+    jarm_encrypted_response_enc = "A256CBC-HS512",
+    jarm_decryption_private_key = openssl::rsa_keygen(2048)
+  )
+  signed_client <- make_jarm_test_client(response_mode = "form_post.jwt")
+  cases <- list(
+    list(
+      client = signed_client,
+      field = "alg",
+      message = "JARM signing alg mismatch"
+    ),
+    list(
+      client = encrypted_client,
+      field = "alg",
+      message = "Encrypted JARM alg mismatch"
+    ),
+    list(
+      client = encrypted_client,
+      field = "enc",
+      message = "Encrypted JARM enc mismatch"
+    )
+  )
+  values <- c(
+    "https://user:password@received.example.test/private?token=secret-marker#fragment",
+    paste0("private-received-{literal}", strrep("x", 900), "truncated-marker")
+  )
+  local_mocked_bindings(
+    jwe_compact_decrypt = function(...) fail("Mismatched algorithms reached decryption"),
+    fetch_jwks = function(...) fail("Mismatched algorithms reached JWKS lookup"),
+    .package = "shinyOAuth"
+  )
+  for (expose in c(FALSE, TRUE)) {
+    local_options(shinyOAuth.expose_error_body = expose)
+    for (case in cases) {
+      client <- case[["client"]]
+      ui <- oauth_form_post_ui(shiny::fluidPage(), id = "auth", client = client)
+      keys_before <- sort(client@state_store[["keys"]]())
+      for (value in values) {
+        encrypted <- identical(client, encrypted_client)
+        header <- if (encrypted) {
+          list(alg = "RSA-OAEP", enc = "A256CBC-HS512", cty = "JWT")
+        } else {
+          list(alg = "RS256")
+        }
+        header[[case[["field"]]]] <- value
+        header_json <- as.character(jsonlite::toJSON(header, auto_unbox = TRUE))
+        response <- if (encrypted) {
+          make_compact_jwe_with_header(header_json)
+        } else {
+          make_compact_jose_token(header_json, list())
+        }
+        error <- tryCatch(
+          validate_jarm_response(client, response, transport = "form_post"),
+          error = identity
+        )
+        expect_s3_class(error, "shinyOAuth_state_error")
+        expect_match(conditionMessage(error), case[["message"]], fixed = TRUE)
+        result <- ui(make_jarm_form_post_req(
+          body = httr2::url_query_build(list(response = response))
+        ))
+        expect_identical(result[["status"]], 400L)
+        expect_match(result[["content"]], case[["message"]], fixed = TRUE)
+        expect_false("Location" %in% names(result[["headers"]]))
+        expect_identical(sort(client@state_store[["keys"]]()), keys_before)
+        for (message in c(conditionMessage(error), result[["content"]])) {
+          expect_no_match(message, "password|secret-marker|fragment|truncated-marker")
+          expect_lt(nchar(message, type = "bytes"), 1500L)
+          for (marker in c("received.example.test", "private-received-{literal}")) {
+            expect_identical(
+              grepl(marker, message, fixed = TRUE),
+              expose && grepl(marker, value, fixed = TRUE)
+            )
+          }
+        }
+      }
+    }
+  }
+})
 
 test_that("JARM parser diagnostics redact JWT and JWE response data", {
   decrypt_key <- openssl::rsa_keygen(2048)
@@ -760,7 +877,7 @@ test_that("validate_jarm_response rejects non-canonical signed alg casing", {
   expect_error(
     shinyOAuth:::validate_jarm_response(client, response),
     class = "shinyOAuth_state_error",
-    regexp = "expected HS256, got hs256"
+    regexp = "JARM signing alg mismatch"
   )
 })
 
@@ -2561,11 +2678,14 @@ test_that("oauth_module_server handles query.jwt error callbacks and blocks repl
           expect_identical(values[["error_description"]], "Denied")
           expect_null(values[["error_uri"]])
           expect_length(client@state_store[["keys"]](), 0L)
+          expect_null(values[["browser_token"]])
 
           values[["error"]] <- NULL
           values[["error_description"]] <- NULL
           values[["error_uri"]] <- NULL
 
+          # Even supplying the retired binding cannot replay consumed state.
+          values[["browser_token"]] <- browser_token
           values[[".process_query"]](query)
           session[["flushReact"]]()
 
@@ -2686,12 +2806,12 @@ test_that("validate_jarm_response rejects non-canonical encrypted JARM header ca
   expect_error(
     shinyOAuth:::validate_jarm_response(client, lower_alg),
     class = "shinyOAuth_state_error",
-    regexp = "expected RSA-OAEP, got rsa-oaep"
+    regexp = "Encrypted JARM alg mismatch"
   )
   expect_error(
     shinyOAuth:::validate_jarm_response(client, lower_enc),
     class = "shinyOAuth_state_error",
-    regexp = "expected A256CBC-HS512, got a256cbc-hs512"
+    regexp = "Encrypted JARM enc mismatch"
   )
 })
 
@@ -4395,16 +4515,19 @@ test_that("deferred JARM resume ignores partial matches in pending callback payl
     ),
     expr = {
       state_browser_token <- valid_browser_token()
-      enc_state <- "state-payload"
+      enc_state <- parse_query_param(
+        prepare_call(cli, browser_token = state_browser_token),
+        "state"
+      )
 
-      values[["pending_callback"]] <- list(
+      .defer_callback(list(
         type_hint = "error",
         normalized_response = list(
           type_hint = "error",
           code = "ok",
           state = enc_state
         )
-      )
+      ))
 
       testthat::with_mocked_bindings(
         revalidate_cached_jarm_response = function(

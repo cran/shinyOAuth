@@ -44,12 +44,12 @@ access. Standalone patient scopes require \code{launch/patient}. EHR clients add
 Each resource scope spelling must be advertised through
 \code{permission-v2} or, for v1 spellings, \code{permission-v1} with \code{allow_v1_scopes = TRUE}.
 A SMART scope comparison supports at most 256 distinct scopes on each side
-and 64 KiB (65,536 bytes) of combined scope text. Larger comparisons fail
-closed, including during token acceptance and refresh.}
+and 64 KiB (65,536 bytes) of combined scope text. Larger comparisons are
+rejected, including during token acceptance and refresh.}
 
 \item{required_scopes}{Minimum permissions, defaulting to \code{scopes}. Pass a
 subset to accept reduced grants as limited connections. Identity scopes are
-always required when identity is enabled. Unsupported comparisons fail closed.}
+always required when identity is enabled. Unsupported comparisons are rejected.}
 
 \item{launch}{\code{"standalone"} or \code{"ehr"}, matching the registered app flow.}
 
@@ -107,47 +107,51 @@ modes, when present, must allow the selection.}
 \item{initial_expires_in_fallback}{Optional positive lifetime in seconds, supplied by
 the authorization server out of band for initial access tokens. Used only
 when an initial response omits \code{expires_in}; an explicit response value
-takes precedence. Default \code{NULL} requires the response to include a lifetime.
-This does not apply to refresh responses or change ordinary OAuth defaults.}
+takes precedence. Default \code{NULL} requires the response to include a lifetime.}
 
-\item{label}{Display label, default \code{"FHIR server"}; no credentials or context.}
+\item{label}{Display label, default \code{"FHIR server"}.}
 
 \item{state_store, state_key, state_payload_max_age}{See \code{\link[=oauth_client]{oauth_client()}}.}
 }
 \value{
-An \link{OAuthClient}, usable by the existing module or the separate
-connection manager. \verb{@resource_bases} contains the approved \code{fhir} base;
-\verb{@required_scopes} and \verb{@label} use the ordinary client properties. \verb{@smart}
-describes the selected profile. The client contains registration settings,
-never a user's token or launch context. Configure it outside \code{server()}.
+An \link{OAuthClient} for the module or connection manager. Its
+\code{resource_bases} contains the approved \code{fhir} API; its \code{smart} property
+records the selected profile.
 }
 \description{
 \ifelse{html}{\href{https://lifecycle.r-lib.org/articles/stages.html#experimental}{\figure{lifecycle-experimental.svg}{options: alt='[Experimental]'}}}{\strong{[Experimental]}}
 
-Combine a reviewed \code{\link[=smart_discover]{smart_discover()}} snapshot with an existing app
-registration. The result is an \link{OAuthClient} for \code{\link[=oauth_connections]{oauth_connections()}}, with
-the resource ID \code{"fhir"}. Discovery does not register the app or grant access.
+Configure your Shiny app to access a hospital's FHIR API. Start with
+\code{\link[=smart_discover]{smart_discover()}}, then supply the app registration and requested permissions.
+The result is an \link{OAuthClient} for \code{\link[=oauth_module_server]{oauth_module_server()}} or
+\code{\link[=oauth_connections]{oauth_connections()}}, with an approved API named \code{"fhir"}.
 }
 \details{
-This constructor selects SMART 2.2 scope rules, S256 PKCE and the exact FHIR
-base as the authorization request's \code{aud}. Identity is opt-in: \code{"openid"}
-requests and requires \code{openid}, signed ID-token validation and nonce binding.
-\code{"fhirUser"} additionally requests and requires the \code{fhirUser} scope and claim.
-\code{"none"} does not enable OIDC because an issuer happens to be present.
-A patient in context is independent of the authenticated user and local owner.
-
-Only direct authorization requests and query/form POST callbacks are supported.
-Claims requests (including \code{auth_time}), JAR, PAR, JARM, DPoP, mTLS and remote
-freshness requirements are not supported by this constructor.
-EHR clients require a fresh registered launch transaction.
-Configure standalone and EHR registrations as separate clients when both are
-needed. No launch handle is stored in shared provider configuration.
-Local usability policy requires a positive lifetime. An initial response may
-omit \code{expires_in} only when \code{initial_expires_in_fallback} is configured explicitly;
-refresh responses must include it. The generic assumed lifetime is not used.
-SMART back-channel and resource requests require TLS 1.2 or newer. A stronger
-configured TLS minimum is preserved; ordinary clients keep their defaults.
+\code{launch = "standalone"} describes an app opened directly; \code{"ehr"} describes
+one opened from an electronic health record. Each flow has its own app
+registration. Patient context identifies the chart being viewed; \code{identity}
+separately controls validation of the signed-in user. See
+\code{vignette("smart-on-fhir", package = "shinyOAuth")}
+(\href{https://lukakoning.github.io/shinyOAuth/articles/smart-on-fhir.html}{online guide})
+for a complete app.
 }
+\section{Advanced SMART profile}{
+
+The constructor applies SMART App Launch 2.2 permission rules, S256 PKCE and
+the exact FHIR base as the authorization request's \code{aud}. \code{identity = "openid"}
+requires signed identity-token and nonce checks; \code{"fhirUser"} also requires
+the user's FHIR reference.
+
+Supported flows use direct authorization and query or form POST callbacks.
+Claims requests, remote authentication-freshness overrides, JAR, PAR, JARM,
+DPoP and mTLS are not supported by this constructor. The manager establishes
+a fresh registered transaction for each EHR launch; launch handles are single-use.
+
+Tokens need a positive lifetime. Only an initial response may omit
+\code{expires_in}, and only with an explicit \code{initial_expires_in_fallback}.
+Refresh responses must supply a lifetime. Requests require TLS 1.2 or newer.
+}
+
 \examples{
 \dontrun{
 site <- smart_discover("https://ehr.example/fhir/R4")

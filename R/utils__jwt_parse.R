@@ -26,7 +26,7 @@ parse_jwt_payload <- function(jwt) {
   assert_json_text_is_object(payload_text, "JWT payload")
   # Normalize JSON parse failures to a consistent parse error class
   tryCatch(
-    jsonlite::fromJSON(payload_text, simplifyVector = FALSE),
+    jsonlite::parse_json(payload_text, simplifyVector = FALSE),
     error = function(e) {
       err_parse(
         "Failed to parse JWT payload JSON",
@@ -96,7 +96,7 @@ parse_jwt_header <- function(jwt) {
   assert_json_text_is_object(header_text, "JWT header")
   # Normalize JSON parse failures to a consistent parse error class
   tryCatch(
-    jsonlite::fromJSON(header_text, simplifyVector = FALSE),
+    jsonlite::parse_json(header_text, simplifyVector = FALSE),
     error = function(e) {
       err_parse(
         "Failed to parse JWT header JSON",
@@ -352,7 +352,8 @@ jwt_compact_parts_or_null <- function(jwt, allow_empty_signature = TRUE) {
 #' errors.
 #'
 #' @param jwt Compact JWT candidate string.
-#' @return Parsed payload list, or `NULL` when `jwt` is opaque or malformed.
+#' @return Parsed payload list preserving JSON arrays as lists, or `NULL` when
+#'   `jwt` is opaque or malformed.
 #' @keywords internal
 #' @noRd
 parse_jwt_payload_or_null <- function(jwt) {
@@ -388,13 +389,12 @@ parse_jwt_payload_or_null <- function(jwt) {
         "JWT payload",
         on_error = function(message) stop(message)
       )
-      jsonlite::fromJSON(payload_text, simplifyVector = TRUE)
+      # Binding checks must distinguish a string from a one-element array and
+      # a confirmation object from an array containing one object.
+      jsonlite::parse_json(payload_text, simplifyVector = FALSE)
     },
     error = function(...) NULL
   )
-  if (is.data.frame(payload)) {
-    payload <- as.list(payload)
-  }
   if (!is.list(payload)) {
     return(NULL)
   }
@@ -413,7 +413,7 @@ parse_jwt_payload_or_null <- function(jwt) {
 #' @noRd
 jwt_decode_json_string_token <- function(token) {
   tryCatch(
-    jsonlite::fromJSON(
+    jsonlite::parse_json(
       paste0('["', token, '"]'),
       simplifyVector = TRUE
     )[[1]],
@@ -603,7 +603,8 @@ jwt_validate_b64_field <- function(value, signal_error) {
 
 #' Reject duplicate JSON object members
 #'
-#' Used before JWT header and payload JSON is parsed.
+#' Used before protocol JSON is parsed. Also rejects Unicode escapes that R
+#' cannot represent losslessly, in every member name and string value.
 #'
 #' @param json_text JSON text to inspect.
 #' @param label Human-readable label used in parse errors.
@@ -622,7 +623,12 @@ reject_duplicate_json_object_members <- function(
   on_duplicate = NULL
 ) {
   json_text <- enc2utf8(json_text)
-  chars <- strsplit(json_text, "", fixed = TRUE)[[1]]
+  if (!isTRUE(validUTF8(json_text))) {
+    on_error(paste0(label, " contains invalid UTF-8"))
+  }
+  # JSON structural characters are ASCII. Byte offsets let us extract keys
+  # without repeatedly traversing UTF-8 prefixes for character-indexed substr().
+  chars <- as.integer(charToRaw(json_text))
   if (!length(chars)) {
     return(invisible(NULL))
   }
@@ -630,22 +636,67 @@ reject_duplicate_json_object_members <- function(
   index <- 1L
   container_stack <- character(0)
   seen_stack <- list()
+  duplicate_name <- NULL
+
+  read_unicode_escape <- function(start) {
+    end <- start + 5L
+    if (end > length(chars)) {
+      on_error(paste0(label, " contains an invalid Unicode escape"))
+    }
+    hex <- rawToChar(as.raw(chars[seq.int(start + 2L, end)]))
+    if (!grepl("^[0-9A-Fa-f]{4}$", hex)) {
+      on_error(paste0(label, " contains an invalid Unicode escape"))
+    }
+    strtoi(hex, base = 16L)
+  }
 
   while (index <= length(chars)) {
     ch <- chars[[index]]
 
-    if (identical(ch, '"')) {
+    if (ch == 34L) {
       index <- index + 1L
       token_start <- index
-      escaping <- FALSE
-
       while (index <= length(chars)) {
         ch_inner <- chars[[index]]
-        if (isTRUE(escaping)) {
-          escaping <- FALSE
-        } else if (identical(ch_inner, "\\")) {
-          escaping <- TRUE
-        } else if (identical(ch_inner, '"')) {
+        if (ch_inner == 92L) {
+          if (
+            index < length(chars) &&
+              chars[[index + 1L]] == 117L
+          ) {
+            code_point <- read_unicode_escape(index)
+            if (code_point == 0L) {
+              on_error(paste0(label, " contains an escaped NUL character"))
+            }
+            if (code_point >= 0xD800L && code_point <= 0xDBFFL) {
+              next_escape <- index + 6L
+              if (
+                next_escape + 5L > length(chars) ||
+                  chars[[next_escape]] != 92L ||
+                  chars[[next_escape + 1L]] != 117L
+              ) {
+                on_error(paste0(
+                  label,
+                  " contains an unpaired Unicode surrogate"
+                ))
+              }
+              low_surrogate <- read_unicode_escape(next_escape)
+              if (low_surrogate < 0xDC00L || low_surrogate > 0xDFFFL) {
+                on_error(paste0(
+                  label,
+                  " contains an unpaired Unicode surrogate"
+                ))
+              }
+              index <- next_escape + 5L
+            } else if (code_point >= 0xDC00L && code_point <= 0xDFFFL) {
+              on_error(paste0(label, " contains an unpaired Unicode surrogate"))
+            } else {
+              index <- index + 5L
+            }
+          } else {
+            # Skip a complete escape, including an escaped literal backslash.
+            index <- index + 1L
+          }
+        } else if (ch_inner == 34L) {
           break
         }
         index <- index + 1L
@@ -658,7 +709,7 @@ reject_duplicate_json_object_members <- function(
       lookahead <- index + 1L
       while (
         lookahead <= length(chars) &&
-          grepl("[[:space:]]", chars[[lookahead]])
+          chars[[lookahead]] %in% c(9L, 10L, 13L, 32L)
       ) {
         lookahead <- lookahead + 1L
       }
@@ -667,13 +718,15 @@ reject_duplicate_json_object_members <- function(
         length(container_stack) > 0L &&
           identical(container_stack[[length(container_stack)]], "object") &&
           lookahead <= length(chars) &&
-          identical(chars[[lookahead]], ":")
+          chars[[lookahead]] == 58L
       ) {
         token_end <- index - 1L
         token <- if (token_end < token_start) {
           ""
         } else {
-          substr(json_text, token_start, token_end)
+          token <- rawToChar(as.raw(chars[seq.int(token_start, token_end)]))
+          Encoding(token) <- "UTF-8"
+          token
         }
         key <- jwt_decode_json_string_token(token)
         level <- length(container_stack)
@@ -683,31 +736,27 @@ reject_duplicate_json_object_members <- function(
           base64url_encode(charToRaw(enc2utf8(key)))
         )
         if (exists(key_id, envir = seen, inherits = FALSE)) {
-          if (is.function(on_duplicate)) {
-            on_duplicate(key)
+          if (is.null(duplicate_name)) {
+            duplicate_name <- key
           }
-          on_error(protocol_diagnostic_message(
-            paste0(label, " contains duplicate member name"),
-            key
-          ))
         }
         assign(key_id, TRUE, envir = seen)
       }
-    } else if (identical(ch, "{")) {
+    } else if (ch == 123L) {
       level <- length(container_stack) + 1L
       if (level > max_depth) {
         on_error(paste0(label, " exceeds the maximum JSON nesting depth"))
       }
       container_stack[[level]] <- "object"
       seen_stack[level] <- list(new.env(hash = TRUE, parent = emptyenv()))
-    } else if (identical(ch, "[")) {
+    } else if (ch == 91L) {
       level <- length(container_stack) + 1L
       if (level > max_depth) {
         on_error(paste0(label, " exceeds the maximum JSON nesting depth"))
       }
       container_stack[[level]] <- "array"
       seen_stack[level] <- list(NULL)
-    } else if (identical(ch, "}") || identical(ch, "]")) {
+    } else if (ch == 125L || ch == 93L) {
       if (length(container_stack) > 0L) {
         last_index <- length(container_stack)
         length(container_stack) <- last_index - 1L
@@ -716,6 +765,18 @@ reject_duplicate_json_object_members <- function(
     }
 
     index <- index + 1L
+  }
+
+  # Inspect all strings before reporting a duplicate. JARM's compatibility
+  # normalizer must never remove a malformed string after a duplicate error.
+  if (!is.null(duplicate_name)) {
+    if (is.function(on_duplicate)) {
+      on_duplicate(duplicate_name)
+    }
+    on_error(protocol_diagnostic_message(
+      paste0(label, " contains duplicate member name"),
+      duplicate_name
+    ))
   }
 
   invisible(NULL)
@@ -756,7 +817,7 @@ validate_jose_header_fields <- function(header, signal_error) {
   if (!is.list(header) || is.null(names(header))) {
     signal_error("JWT header must be a JSON object")
   }
-  for (field in c("crit", "b64")) {
+  for (field in c("crit", "b64", "kid", "typ")) {
     if (
       field %in% names(header) && is.null(jwt_header_field_exact(header, field))
     ) {
@@ -979,7 +1040,7 @@ verify_hmac_jws_signature_no_time <- function(jwt, secret, alg) {
   secret_raw <- tryCatch(
     {
       if (is.character(secret)) {
-        charToRaw(enc2utf8(secret))
+        hmac_secret_bytes(secret)
       } else {
         secret
       }

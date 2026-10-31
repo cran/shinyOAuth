@@ -47,6 +47,34 @@ test_that("oauth_client_mtls_registration derives subject DN metadata", {
   )
 })
 
+test_that("explicit subject DNs preserve RFC 4514 escapes and boundary spaces", {
+  client <- make_mtls_registration_client("tls_client_auth")
+  for (subject in c(
+    "CN=client\\ ",
+    "CN=\\ client\\ ",
+    "CN=client\\20",
+    "CN=client\\ ,OU=Tests",
+    "CN=client+OU=Tests\\ "
+  )) {
+    metadata <- oauth_client_mtls_registration(
+      client,
+      tls_client_auth_type = "subject_dn",
+      tls_client_auth_value = subject
+    )
+    expect_identical(metadata[["tls_client_auth_subject_dn"]], subject)
+  }
+  named_subject <- c(subject = "CN=client\\ ")
+  metadata <- oauth_client_mtls_registration(
+    client,
+    tls_client_auth_type = "subject_dn",
+    tls_client_auth_value = named_subject
+  )
+  expect_identical(
+    metadata[["tls_client_auth_subject_dn"]],
+    unname(named_subject)
+  )
+})
+
 test_that("oauth_client_mtls_registration supports explicit SAN identifiers", {
   client <- make_mtls_registration_client("tls_client_auth")
   identifiers <- list(
@@ -294,6 +322,38 @@ test_that("oauth_client_mtls_registration builds inline self-signed jwks", {
         "k"
       )
   ))
+})
+
+test_that("self-signed Ed25519 registration exports public OKP and x5c members", {
+  client <- make_mtls_registration_client("self_signed_tls_client_auth")
+  cert_file <- mtls_pem_fixture("ed25519-client-cert.pem")
+  S7::props(client) <- list(
+    mtls_client_cert_file = cert_file,
+    mtls_client_key_file = mtls_pem_fixture("ed25519-client-key.pem"),
+    mtls_client_ca_file = NA_character_
+  )
+
+  metadata <- oauth_client_mtls_registration(client)
+  jwk <- metadata[["jwks"]][["keys"]][[1L]]
+  cert <- openssl::read_cert(cert_file)
+  public_key <- openssl::read_pubkey(cert)
+  expect_identical(
+    metadata[["token_endpoint_auth_method"]],
+    "self_signed_tls_client_auth"
+  )
+  expect_setequal(names(jwk), c("kty", "crv", "x", "x5c"))
+  expect_identical(jwk[["kty"]], "OKP")
+  expect_identical(jwk[["crv"]], "Ed25519")
+  expect_identical(
+    base64url_decode_raw(jwk[["x"]]),
+    as.list(public_key)[["data"]]
+  )
+  expect_identical(
+    as.vector(jwk[["x5c"]]),
+    as.character(openssl::base64_encode(openssl::write_der(cert)))
+  )
+  expect_match(jsonlite::toJSON(metadata, auto_unbox = TRUE), '"x5c":\\[')
+  expect_silent(validate_jwks(metadata[["jwks"]]))
 })
 
 test_that("oauth_client_mtls_registration supports self-signed jwks_uri", {

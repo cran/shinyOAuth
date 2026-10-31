@@ -13,21 +13,27 @@
 #' send in one step, use [perform_resource_req()].
 #'
 #' @details
-#' Only send a token to an API you intend to authorize. The package applies its
-#' URL policy, timeouts, and redirect defaults. It supports Bearer authentication
-#' and tokens tied to a key (DPoP) or certificate (mTLS). For DPoP or mTLS,
-#' also supply `client` so the request uses the matching key or
-#' certificate.
+#' The package applies its URL policy, timeouts and redirect defaults. It supports
+#' Bearer authentication and tokens tied to a key (DPoP) or certificate (mTLS).
+#' For DPoP or mTLS, `client` supplies the matching key or certificate.
 #'
-#' Managed Authorization credentials cannot be combined with an `access_token`
-#' query parameter or form field. Inspection covers URL/query inputs and prebuilt
-#' httr2 form, raw and string bodies labelled `application/x-www-form-urlencoded`.
-#' JSON business fields are unaffected. File, multipart and streaming bodies are
-#' not parsed; callers must ensure these contain no additional OAuth credential
-#' transport. Later request changes outside these helpers require a new check.
+#' [perform_resource_req()] sends the prepared request with the package's
+#' response-size limits. [httr2::req_perform()] uses httr2's transport settings.
+#'
+#' @section Advanced request restrictions:
+#' The helper rejects additional `access_token` credentials in ordinary URL and
+#' form inputs. File, multipart and streaming bodies, and changes made after
+#' preparation, are outside that check.
+#'
+#' [perform_resource_req()] limits both downloaded bytes and decoded gzip data.
+#' Direct httr2 execution does not provide shinyOAuth's decoded-response limit;
+#' its curl limit depends on the installed libcurl version. Prepared requests can
+#' be sent with `perform_resource_req(token, request, client = client)`.
 #'
 #' @param token Either an [OAuthToken] object or a raw access token string.
-#' @param url The absolute URL to call.
+#' @param url The absolute URL to call. Resource URLs must not exceed 8192 bytes,
+#'   including the query and fragment, both before and after applying `query`.
+#'   This limit also applies when `check_url = FALSE`.
 #' @param method Optional HTTP method (character). Defaults to "GET". When
 #'   the effective token type is `DPoP`, this must be the final request method
 #'   because the proof is signed against it. `TRACE` and the nonstandard
@@ -35,34 +41,33 @@
 #'   reflected by the server and disclose credentials.
 #' @param headers Optional named list or named character vector of extra
 #'   headers to set on the request. Header names are case-insensitive.
-#'   Any user-supplied `Authorization` or `DPoP` header is ignored to ensure
-#'   the token authentication set by this function is not overridden.
+#'   Names must be unique HTTP field-name tokens, and values must not contain
+#'   prohibited control characters. DPoP requests reject `Host` overrides.
+#'   This function manages the `Authorization` and `DPoP` headers and ignores
+#'   user-supplied replacements.
 #' @param query Optional named list of query parameters to append to the URL.
 #' @param follow_redirect Logical or `NULL`. `FALSE` (the default) disables
 #'   HTTP redirects even when `shinyOAuth.allow_redirect` is enabled.
 #'   `NULL` inherits that global option (disabled by default).
-#'   Set to `TRUE` only if you trust all possible redirect targets and
-#'   understand the security implications.
+#'   `TRUE` enables redirects. DPoP requests reject enabled redirects because
+#'   each target needs a new proof.
 #' @param check_url Logical. If `TRUE` (the default), validates `url` against
 #'   [is_ok_host()] before attaching the access token. This rejects relative
 #'   URLs, plain HTTP to non-loopback hosts, and when
 #'   `options(shinyOAuth.allowed_hosts)` is set, hosts outside the allowlist.
 #'   Without an allowlist this performs HTTPS and URL-syntax validation only
 #'   (with the configured non-HTTPS exceptions); any HTTPS host is accepted.
-#'   Set to `FALSE` only if you have already validated the URL and understand
-#'   the security implications.
+#'   `FALSE` skips this policy check; URL length and resource-host restrictions
+#'   still apply.
 #' @param resource_hosts Optional non-empty character vector of trusted resource
 #'   host patterns, using [is_ok_host()] matching rules. This call-scoped
 #'   allowlist adds to the global policy and is enforced even if `check_url`
-#'   is `FALSE`. Use exact hostnames for URLs derived from lower-trust input.
-#'   It constrains the initial URL, not redirect destinations or resolved IPs;
-#'   retain `follow_redirect = FALSE`. `NULL` adds no resource-specific policy.
-#' @param client Optional [OAuthClient]. Required when the effective
-#'   token type is `DPoP`, because the client carries the configured DPoP proof
-#'   key, and also when using sender-constrained mTLS / certificate-bound
-#'   tokens so shinyOAuth can attach the configured client certificate and
-#'   validate any `cnf` thumbprint from an [OAuthToken] and observe any `cnf`
-#'   thumbprint carried on a raw JWT access-token string.
+#'   is `FALSE`. It constrains the initial URL, not redirect destinations or
+#'   resolved IPs. `NULL` adds no resource-specific policy.
+#' @param client Optional [OAuthClient]; required for DPoP or mTLS-bound tokens
+#'   so the request can use the matching signing key or certificate and check
+#'   any token-binding information.
+#'
 #' @param token_type Optional override for the access token type when `token`
 #'   is supplied as a raw string. Supported values are `Bearer` and `DPoP`.
 #'   Invalid or multi-valued inputs are rejected. When omitted, shinyOAuth
@@ -73,17 +78,18 @@
 #'   request. This is primarily useful after a resource server challenges with
 #'   `DPoP-Nonce`.
 #'
-#' @return An [httr2] request object, ready to be performed with
-#'   [httr2::req_perform()]. Callers may still add headers or query
-#'   parameters, but when the effective token type is `DPoP` they must not
-#'   change the request method or base URL after calling
-#'   [resource_req()] because the proof is already bound to those values.
+#' @return An [httr2] request object, accepted by [perform_resource_req()] for
+#'   bounded response handling. A DPoP proof is bound to the method and base URL
+#'   at preparation time; later changes to either invalidate it.
 #'
 #' @section DPoP note:
 #' DPoP proofs bind the current HTTP method and target URI (without query or
-#' fragment). Use the `query` argument to preserve encoded resource paths;
+#' fragment). Literal `.` and `..` path segments are removed before signing
+#' and sending; percent-encoded path segments remain escaped.
+#' Use the `query` argument to preserve encoded resource paths;
 #' external URL modifiers can decode reserved path characters. Changing the
 #' method, scheme, host, or path invalidates the proof.
+#' Automatic redirects are unsupported; each target URL requires its own proof.
 #'
 #' @example inst/examples/client_bearer_req.R
 #'
@@ -193,26 +199,27 @@ client_bearer_req <- function(
 #' response with [httr2::resp_body_json()] or another httr2 response helper.
 #'
 #' @details
-#' Only send a token to an API you intend to authorize. The package applies its
-#' URL policy, timeouts, and redirect defaults. It supports Bearer authentication
-#' and tokens tied to a key (DPoP) or certificate (mTLS). For DPoP or mTLS,
-#' also supply `client` so the request uses the matching key or
-#' certificate.
+#' The package applies its URL policy, timeouts and redirect defaults. It supports
+#' Bearer authentication and tokens tied to a key (DPoP) or certificate (mTLS).
+#' For DPoP or mTLS, `client` supplies the matching key or certificate.
+#'
+#' The helper applies `shinyOAuth.max_body_bytes` to response bodies, including
+#' gzip decompression. Use it for both URL strings and prepared httr2 requests.
 #'
 #' @inheritParams resource_req
-#' @param url Either the absolute URL to call or an [httr2::request()] object
-#'   to authorize and perform. When you pass a request object, shinyOAuth uses
-#'   it as the base request, still applies token authentication and request
-#'   defaults, and then layers any explicit `method`, `headers`, `query`, and
-#'   `follow_redirect` overrides on top.
-#'   Inherited httr2 authentication, caching, and retry policies, and curl
-#'   authentication or method-changing options are rejected. Use
-#'   [httr2::req_method()] and httr2 body helpers to configure the request.
-#'   HEAD requests with bodies are rejected because httr2 can transmit them
-#'   as POST despite the explicit method.
-#'   Authenticated response caching is
-#'   unsupported. shinyOAuth owns retries; configure them with `idempotent`
-#'   and the `shinyOAuth.retry_*` options.
+#' @param url The absolute API URL, or a prepared [httr2::request()] object.
+#'   The URL must be at most 8192 bytes before and after adding `query`.
+#'   The helper adds current authentication and defaults to a prepared request,
+#'   then applies explicit `method`, `headers`, `query` and redirect overrides.
+#'   See Prepared requests for customization restrictions.
+#' @section Prepared requests:
+#' Use [httr2::req_method()] and body helpers to prepare a request, then let
+#' shinyOAuth manage authentication and retries. Existing httr2 authentication,
+#' caching and retry policies, and curl authentication, method-changing or
+#' `request_target` options are rejected. HEAD requests cannot have bodies,
+#' because httr2 may send those as POST. Authenticated response caching is
+#' unsupported. Configure retries with `idempotent` and `shinyOAuth.retry_*`.
+#'
 #' @param idempotent Whether ordinary network/HTTP failures may be
 #'   retried safely. `NULL` (default) infers this from the final HTTP method:
 #'   GET, HEAD, OPTIONS, PUT, and DELETE permit retries. Set it explicitly if
@@ -402,7 +409,9 @@ prepare_client_bearer_request <- function(
 ) {
   if (inherits(req, "httr2_request")) {
     validate_resource_request_policies(req)
+    validate_http_request_headers(req)
   }
+  headers <- normalize_client_bearer_headers(headers)
   request_method <- resolve_client_bearer_method(method = method, req = req)
   validate_client_bearer_method(method = request_method, req = req)
 
@@ -410,6 +419,16 @@ prepare_client_bearer_request <- function(
     token = token,
     token_type = token_type
   )
+  if (is_dpop_token_type(token_info[["token_type"]])) {
+    has_host <- function(values) {
+      any(
+        tolower(names(values)) == "host" & !vapply(values, is.null, logical(1))
+      )
+    }
+    if (has_host(req[["headers"]]) || has_host(headers)) {
+      err_input("DPoP resource requests must not override the Host header")
+    }
+  }
 
   validate_client_bearer_token_context(
     token_type = token_info[["token_type"]],
@@ -431,6 +450,12 @@ prepare_client_bearer_request <- function(
   )
 
   req <- apply_client_bearer_query(req %||% httr2::request(target_url), query)
+  validate_resource_url_size(req[["url"]])
+  follow_redirect <- resolve_client_bearer_redirect_policy(follow_redirect)
+  req <- httr2::req_options(
+    req,
+    followlocation = follow_redirect
+  )
 
   req <- build_client_bearer_authorized_request(
     url = target_url,
@@ -465,24 +490,22 @@ prepare_client_bearer_request <- function(
 #' @keywords internal
 #' @noRd
 resolve_client_bearer_method <- function(method = NULL, req = NULL) {
-  if (is_valid_string(method)) {
-    return(toupper(as.character(method)))
+  if (is.null(method) && inherits(req, "httr2_request")) {
+    method <- req[["method"]]
   }
-  if (!inherits(req, "httr2_request")) {
-    return("GET")
+  if (is.null(method)) {
+    method <- if (is.null(req[["body"]])) "GET" else "POST"
   }
-
-  request_method <- tryCatch(req[["method"]], error = function(...) NULL)
-  if (is_valid_string(request_method)) {
-    return(toupper(as.character(request_method)))
-  }
-
-  body <- tryCatch(req[["body"]], error = function(...) NULL)
-  if (!is.null(body)) {
-    return("POST")
+  # CURLOPT_CUSTOMREQUEST transmits this value verbatim. Validate before
+  # normalization so malformed overrides cannot silently become GET or POST.
+  if (
+    !is_valid_string(method) ||
+      !grepl("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$", method, useBytes = TRUE)
+  ) {
+    err_input("method must be a single HTTP method token")
   }
 
-  "GET"
+  toupper(method)
 }
 
 #' Reject credential-reflecting HTTP methods
@@ -699,6 +722,18 @@ validate_client_bearer_sender_constraints <- function(
 
 # 2.2 Target URL validation ----------------------------------------------------
 
+# Bound input before URL parsing, normalization, or proof construction, even
+# when the caller opts out of host validation.
+validate_resource_url_size <- function(url) {
+  if (!is_valid_string(url)) {
+    err_input("url must be a non-empty string")
+  }
+  if (nchar(url, type = "bytes") > 8192L) {
+    err_input("Resource URL must not exceed 8192 bytes")
+  }
+  invisible(TRUE)
+}
+
 #' Validate the target URL for an authorized API request
 #'
 #' Used by [resource_req()] before credentials are attached to the request.
@@ -717,6 +752,7 @@ validate_client_bearer_url <- function(
   check_url = TRUE,
   resource_hosts = NULL
 ) {
+  validate_resource_url_size(url)
   if (!is.logical(check_url) || length(check_url) != 1L || is.na(check_url)) {
     err_input("check_url must be a single non-missing logical value")
   }
@@ -841,6 +877,11 @@ build_client_bearer_authorized_request <- function(
 # Prebuilt requests may carry deferred behavior that runs after we attach the
 # user's token. Reject conflicting policies before constructing credentials.
 validate_resource_request_policies <- function(req) {
+  if ("request_target" %in% names(req[["options"]])) {
+    err_input(
+      "Prebuilt resource requests must not configure curl request_target; set the target with the request URL"
+    )
+  }
   policy_names <- names(req[["policies"]])
   if (any(grepl("^(auth|cache|retry)_", policy_names))) {
     err_input(
@@ -904,15 +945,7 @@ finalize_client_bearer_request <- function(
   query = NULL,
   follow_redirect = FALSE
 ) {
-  if (
-    !is.null(follow_redirect) &&
-      !(is.logical(follow_redirect) &&
-        length(follow_redirect) == 1L &&
-        !is.na(follow_redirect))
-  ) {
-    err_input("follow_redirect must be NULL or a single non-NA logical")
-  }
-  follow <- if (is.null(follow_redirect)) allow_redirect() else follow_redirect
+  follow <- resolve_client_bearer_redirect_policy(follow_redirect)
   req <- httr2::req_options(req, followlocation = follow)
 
   req <- apply_client_bearer_headers(req, headers)
@@ -923,6 +956,28 @@ finalize_client_bearer_request <- function(
 
   validate_resource_token_transport(req)
   req
+}
+
+#' Resolve the redirect policy before attaching resource credentials
+#'
+#' Used during request preparation and finalization so DPoP proof construction
+#' can reject enabled redirects before signing.
+#'
+#' @param follow_redirect Logical redirect override, or NULL to inherit the
+#'   package option.
+#' @return Scalar logical indicating whether redirects are enabled.
+#' @keywords internal
+#' @noRd
+resolve_client_bearer_redirect_policy <- function(follow_redirect) {
+  if (
+    !is.null(follow_redirect) &&
+      !(is.logical(follow_redirect) &&
+        length(follow_redirect) == 1L &&
+        !is.na(follow_redirect))
+  ) {
+    err_input("follow_redirect must be NULL or a single non-NA logical")
+  }
+  if (is.null(follow_redirect)) allow_redirect() else follow_redirect
 }
 
 # Modify only the query component. httr2 URL reconstruction can decode escaped
@@ -1035,10 +1090,12 @@ normalize_client_bearer_headers <- function(headers = NULL) {
   }
 
   if (is.list(headers)) {
+    validate_http_headers(headers, allow_removal = TRUE)
     return(headers)
   }
 
   if (is.character(headers) && !is.null(names(headers))) {
+    validate_http_headers(headers)
     return(as.list(headers))
   }
 

@@ -38,7 +38,6 @@
 
 ## ----smart-app, eval = FALSE--------------------------------------------------
 # base_ui <- fluidPage(
-#   use_shinyOAuth(),
 #   h2("FHIR patient example"),
 #   actionButton("connect", "Connect hospital"),
 #   selectInput("connection_id", "Saved authorization", choices = character()),

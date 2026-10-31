@@ -1,49 +1,52 @@
 #' Handle callbacks and establish the connection owner's browser session
 #'
-#' Wrap the application's UI with the same manager and module ID used by
-#' [oauth_connections_server()]. Browser retention establishes its HttpOnly
-#' owner cookie on an ordinary page request before Shiny starts. OAuth callbacks
-#' use the existing validated callback bridge and clean continuation.
+#' Handles login returns and restores the user's saved connections. The wrapper
+#' and [oauth_connections_server()] share the same manager and module ID.
+#' Browser setup from [use_shinyOAuth()] is included.
 #'
 #' @param base_ui A Shiny UI object or request-dependent UI function.
 #' @param id Module ID shared with [oauth_connections_server()].
 #' @param manager Configuration from [oauth_connections()].
 #' @param request_uri_resolver Optional trusted function mapping a Rook request to
 #'   its public absolute URI. Required when a trusted reverse proxy changes the
-#'   apparent scheme/host. Do not trust arbitrary forwarded headers. The resolved
-#'   origin must match the manager's configured origin.
+#'   apparent scheme/host. The custom resolver defines which proxy headers are
+#'   trusted; the wrapper checks the resolved origin against the manager's origin.
 #' @param app_base_path Public path at which the Shiny application is hosted,
 #'   default `"/"`. Must begin and end with `/`. The wrapper inserts a document
 #'   base before scripts so Shiny dependencies load from the app root even on
-#'   nested callback pages. Do not supply a separate HTML `base` element.
+#'   nested callback pages. The wrapper manages the page's HTML `base` element.
 #'   Managed JAR Request Object URLs are also published beneath this path.
 #' @param launch_routes List of [smart_launch_route()] configurations, empty by
 #'   default. EHR entry requires browser retention and top-level navigation.
 #' @param additional_clients Optional named list of ordinary OAuth/OIDC clients
 #'   used by separate [oauth_module_server()] modules. Names are their full module
 #'   IDs. These clients keep their existing login lifecycle and are not managed
-#'   connections. Use this single UI wrapper instead of nesting [oauth_ui()].
+#'   connections. This wrapper dispatches their callbacks alongside managed ones.
 #'   Their callback routes must be distinct from managed callbacks and SMART
 #'   launch routes, on this app's
 #'   origin and inside `app_base_path`. All clients must select an appropriate
 #'   multi-server authorization mode, even when the manager contains one client.
 #' @return A request UI function for `shinyApp(..., uiPattern = ".*")`.
 #' @details
-#' Raw GET and form POST callbacks never create or rotate an owner. A POST may
-#' lack a SameSite owner cookie. With Strict owner cookies, a validated callback
-#' first serves an inert same-origin document that navigates to the clean
-#' continuation, allowing the browser to send its existing cookie. The document
-#' does not establish an owner or exchange credentials. A managed continuation
-#' must carry a still-valid owner before credentials can be exchanged.
-#' A validated ordinary callback for
-#' `additional_clients` can establish a new empty manager owner independently.
-#' An invalid cookie on an ordinary
-#' page is cleared using an HTTP response and a same-origin redirect; the next
-#' request establishes a new empty browser owner.
+#' With `shinyApp(..., uiPattern = ".*")`, callback paths reach the wrapper.
+#' With browser retention, a cookie lets the returning browser
+#' find its saved connections.
 #'
-#' The cookie is scoped to its host. Separate applications on that host must be
-#' trusted; different ports or paths do not isolate their cookies. The wrapper
-#' adds no owner cookie for session-only or account retention.
+#' @section Advanced browser and proxy requirements:
+#' With Strict cookies, returning from another site may briefly show an intermediate
+#' page before Shiny starts. This lets the browser send its existing cookie.
+#' Proxies must preserve
+#' same-origin Fetch Metadata, `Referer` or `Origin` information for recovery.
+#' The `shinyOAuth_owner_recovery` query parameter is reserved for this flow.
+#'
+#' A managed login return must still belong to a valid local owner. An ordinary
+#' entry or an independently validated `additional_clients` callback can create
+#' an empty browser owner, but cannot recover someone else's connections.
+#' Invalid cookies are cleared before a fresh owner is created.
+#'
+#' Cookies are shared across ports and paths on the same hostname. Services on
+#' that hostname share the owner cookie's trust boundary.
+#'
 #' @seealso [oauth_browser_owner()], [oauth_ui()]
 #' @example inst/examples/oauth_connections.R
 #' @export
@@ -157,6 +160,11 @@ oauth_connections_ui <- function(
   state[["ui_bound"]] <- TRUE
   ui <- function(req) {
     connection_manager_check(manager)
+    # Bound queries before URI resolution and SMART request classification.
+    rejected <- oauth_http_query_guard(req)
+    if (!is.null(rejected)) {
+      return(rejected)
+    }
     uri <- tryCatch(resolver(req), error = function(...) NULL)
     if (!connection_manager_same_origin(uri, manager[["app_origin"]])) {
       return(oauth_get_setup_error(
@@ -173,10 +181,6 @@ oauth_connections_ui <- function(
     )
     if (!is.null(launch_response)) {
       return(launch_response)
-    }
-    rejected <- oauth_http_query_guard(req)
-    if (!is.null(rejected)) {
-      return(rejected)
     }
     query <- req[["QUERY_STRING"]] %||% ""
     raw_callback <- oauth_get_query_is_callback(query)
@@ -245,6 +249,14 @@ oauth_connections_ui <- function(
             )
           ))
         }
+        if (identical(manager[["owner"]][["same_site"]], "Strict")) {
+          recovery <- connection_manager_owner_recovery(
+            req, uri, owner, cookie, manager[["app_origin"]]
+          )
+          if (!is.null(recovery)) {
+            return(recovery)
+          }
+        }
         response <- handler(req)
         if (
           is.null(owner) &&
@@ -279,6 +291,71 @@ oauth_connections_ui <- function(
     exact = TRUE
   )
   ui
+}
+
+# A missing Strict cookie on an external entry is ambiguous: the browser may
+# already hold one. Commit an inert document and recheck it on a same-origin
+# navigation. The query flag only bounds recovery; it never proves ownership.
+connection_owner_recovery_param <- "shinyOAuth_owner_recovery"
+
+connection_manager_owner_recovery <- function(req, uri, owner, cookie, origin) {
+  query <- sub("^\\?", "", req[["QUERY_STRING"]] %||% "")
+  fields <- decode_form_pairs(query, "Owner recovery")
+  marked <- names(fields) == connection_owner_recovery_param
+  site <- req[["HTTP_SEC_FETCH_SITE"]]
+  same_origin <- if (!is.null(site)) {
+    identical(site, "same-origin")
+  } else {
+    connection_manager_same_origin(req[["HTTP_REFERER"]], origin) ||
+      identical(req[["HTTP_ORIGIN"]], origin)
+  }
+  if (any(marked)) {
+    if (
+      sum(marked) != 1L || !identical(unname(fields[marked]), list("1")) ||
+        !same_origin
+    ) {
+      return(oauth_get_setup_error("The browser owner recovery request is invalid."))
+    }
+    # Preserve every application query byte, including repeated parameters.
+    parts <- utils::head(
+      strsplit(paste0(query, "&sentinel"), "&", fixed = TRUE)[[1L]], -1L
+    )
+    marked_parts <- rep(FALSE, length(parts))
+    marked_parts[nzchar(parts)] <- marked
+    clean <- paste(parts[!marked_parts], collapse = "&")
+    location <- paste0(
+      sub("[?#].*$", "", uri), if (nzchar(clean)) paste0("?", clean) else ""
+    )
+    return(shiny::httpResponse(
+      303L, "text/plain", "",
+      headers = list(
+        Location = location, "Cache-Control" = "no-store",
+        "Referrer-Policy" = "origin"
+      )
+    ))
+  }
+  if (!is.null(owner) || !is.null(cookie) || same_origin) {
+    return(NULL)
+  }
+  location <- paste0(
+    sub("[?#].*$", "", uri), "?", query, if (nzchar(query)) "&",
+    connection_owner_recovery_param, "=1"
+  )
+  location <- htmltools::htmlEscape(location, attribute = TRUE)
+  shiny::httpResponse(
+    200L, "text/html; charset=UTF-8",
+    paste0(
+      '<!doctype html><html><head><meta name="referrer" content="origin">',
+      '<meta http-equiv="refresh" content="0;url=', location, '">',
+      '<title>Continue to application</title></head><body>',
+      '<a href="', location, '">Continue</a></body></html>'
+    ),
+    headers = list(
+      "Cache-Control" = "no-store", "Pragma" = "no-cache",
+      "Referrer-Policy" = "origin",
+      "Content-Security-Policy" = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    )
+  )
 }
 
 # A cross-site HTTP redirect chain withholds Strict cookies even on its final

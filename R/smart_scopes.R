@@ -61,14 +61,104 @@ smart_scope_coverage <- function(requested, granted, allow_v1_scopes = FALSE) {
   ) {
     err_token("SMART scope comparison exceeds the supported size limit")
   }
+  if (!length(requested)) {
+    return(list(
+      status = "covered",
+      missing = character(),
+      indeterminate = character()
+    ))
+  }
+  # Index permissions once per comparison. Scanning every grant for every need
+  # made granular scope sets quadratic in connection polling and validation.
+  # This index is local: changed grants and policies are always re-evaluated.
+  action_bits <- c(c = 1L, r = 2L, u = 4L, d = 8L, s = 16L)
   grants <- lapply(
     granted,
     smart_scope_parse,
     allow_v1_scopes = allow_v1_scopes
   )
+  unknown_grant <- any(vapply(
+    grants,
+    function(grant) identical(grant[["kind"]], "unknown"),
+    logical(1L)
+  ))
+  resources <- Filter(
+    function(grant) identical(grant[["kind"]], "resource"),
+    grants
+  )
+  resource_key <- function(permission, wildcard = FALSE) {
+    if (!identical(permission[["kind"]], "resource")) {
+      return("")
+    }
+    paste0(
+      permission[["context"]],
+      "/",
+      if (wildcard) "*" else permission[["resource"]]
+    )
+  }
+  grant_keys <- vapply(resources, resource_key, character(1L))
+  constraints <- vapply(
+    resources,
+    function(grant) grant[["constraint"]],
+    character(1L)
+  )
+  masks <- vapply(
+    resources,
+    function(grant) {
+      as.integer(sum(action_bits[grant[["interactions"]]]))
+    },
+    integer(1L)
+  )
+  # '/' and '?' cannot occur in parsed context/resource names. A key without
+  # '?' aggregates all constraints for possible overlap; '?' keys prove only
+  # exact constraints (including the empty, unrestricted constraint).
+  keys <- c(grant_keys, paste0(grant_keys, "?", constraints, recycle0 = TRUE))
+  masks <- rep(masks, 2L)
+  distinct_keys <- unique(keys)
+  positions <- match(keys, distinct_keys)
+  permissions <- integer(length(distinct_keys))
+  for (i in seq_along(positions)) {
+    position <- positions[[i]]
+    permissions[[position]] <- bitwOr(permissions[[position]], masks[[i]])
+  }
+  # Vectorized match hashes the keys without interning untrusted scope strings
+  # as environment names, which also have a 10,000-byte limit in R.
+  lookup <- function(queries) {
+    c(0L, permissions)[match(queries, distinct_keys, nomatch = 0L) + 1L]
+  }
+  needs <- lapply(
+    requested,
+    smart_scope_parse,
+    allow_v1_scopes = allow_v1_scopes
+  )
+  need_keys <- vapply(needs, resource_key, character(1L))
+  wildcard_keys <- vapply(needs, resource_key, character(1L), wildcard = TRUE)
+  constraints <- vapply(
+    needs,
+    function(need) need[["constraint"]] %||% "",
+    character(1L)
+  )
+  covered <- bitwOr(
+    lookup(paste0(need_keys, "?")),
+    lookup(paste0(wildcard_keys, "?"))
+  )
+  covered <- bitwOr(
+    covered,
+    bitwOr(
+      lookup(paste0(need_keys, "?", constraints)),
+      lookup(paste0(wildcard_keys, "?", constraints))
+    )
+  )
+  possible <- bitwOr(lookup(need_keys), lookup(wildcard_keys))
+  possible[!nzchar(constraints)] <- 0L
+  # Unknown syntax cannot establish coverage, even if spelled identically.
+  if (unknown_grant) {
+    possible[] <- 31L
+  }
   missing <- indeterminate <- character()
-  for (scope in requested) {
-    need <- smart_scope_parse(scope, allow_v1_scopes)
+  for (i in seq_along(requested)) {
+    scope <- requested[[i]]
+    need <- needs[[i]]
     if (identical(need[["kind"]], "literal")) {
       if (!scope %in% granted) {
         missing <- c(missing, scope)
@@ -79,34 +169,11 @@ smart_scope_coverage <- function(requested, granted, allow_v1_scopes = FALSE) {
       indeterminate <- c(indeterminate, scope)
       next
     }
-    covered <- possible <- character()
-    for (grant in grants) {
-      if (identical(grant[["kind"]], "unknown")) {
-        # Unknown syntax cannot establish coverage, even if spelled identically.
-        possible <- union(possible, need[["interactions"]])
-        next
-      }
-      if (
-        !identical(grant[["kind"]], "resource") ||
-          !identical(need[["context"]], grant[["context"]]) ||
-          !(identical(grant[["resource"]], "*") ||
-            identical(need[["resource"]], grant[["resource"]]))
-      ) {
-        next
-      }
-      if (
-        !nzchar(grant[["constraint"]]) ||
-          identical(need[["constraint"]], grant[["constraint"]])
-      ) {
-        covered <- union(covered, grant[["interactions"]])
-      } else if (nzchar(need[["constraint"]])) {
-        possible <- union(possible, grant[["interactions"]])
-      }
-    }
-    if (all(need[["interactions"]] %in% covered)) {
+    mask <- as.integer(sum(action_bits[need[["interactions"]]]))
+    if (bitwAnd(mask, covered[[i]]) == mask) {
       next
     }
-    if (all(need[["interactions"]] %in% union(covered, possible))) {
+    if (bitwAnd(mask, bitwOr(covered[[i]], possible[[i]])) == mask) {
       indeterminate <- c(indeterminate, scope)
     } else {
       missing <- c(missing, scope)
@@ -125,11 +192,91 @@ smart_scope_coverage <- function(requested, granted, allow_v1_scopes = FALSE) {
   )
 }
 
+#' Retain SMART permissions within both the request ceiling and actual grant
+#'
+#' Broader wildcard grants remain token evidence. Replacement requests retain
+#' only their intersection with the previous request and client configuration.
+#' Compare individual interactions to preserve partial resource permissions.
+#' @param client OAuthClient with the SMART scope policy.
+#' @param granted Actual accepted scope evidence.
+#' @param requested Previous configured or narrowed request ceiling.
+#' @return A character vector of retained request scopes.
+#' @keywords internal
+#' @noRd
+smart_authorization_retained_scopes <- function(client, granted, requested) {
+  requested <- normalize_scope_tokens(requested)
+  configured <- effective_client_scopes(client)
+  covered <- function(scope, limit) {
+    connection_scope_covered(client, scope, limit)
+  }
+  if (covered(requested, configured) && covered(requested, granted)) {
+    return(requested)
+  }
+  if (covered(granted, requested) && covered(granted, configured)) {
+    return(granted)
+  }
+  retained <- character()
+  for (scope in union(requested, granted)) {
+    if (covered(scope, retained)) {
+      next
+    }
+    if (
+      covered(scope, requested) &&
+        covered(scope, configured) &&
+        covered(scope, granted)
+    ) {
+      retained <- union(retained, scope)
+      next
+    }
+    parsed <- smart_scope_parse(scope, client@scope_policy[["allow_v1_scopes"]])
+    if (!identical(parsed[["kind"]], "resource")) {
+      next
+    }
+    prefix <- paste0(parsed[["context"]], "/", parsed[["resource"]], ".")
+    suffix <- if (nzchar(parsed[["constraint"]])) {
+      paste0("?", parsed[["constraint"]])
+    } else {
+      ""
+    }
+    interactions <- Filter(
+      function(interaction) {
+        atom <- paste0(prefix, interaction, suffix)
+        covered(atom, requested) &&
+          covered(atom, configured) &&
+          covered(atom, granted)
+      },
+      parsed[["interactions"]]
+    )
+    if (length(interactions)) {
+      retained <- union(
+        retained,
+        paste0(prefix, paste0(interactions, collapse = ""), suffix)
+      )
+    }
+  }
+  retained
+}
+
 client_uses_smart_scopes <- function(client) {
   identical(client@scope_policy[["profile"]], "smart")
 }
 
 client_scope_coverage <- function(client, requested, granted) {
+  if (
+    token_targets_configured(client) &&
+      identical(client@provider@token_target_mode, "microsoft")
+  ) {
+    requested <- normalize_scope_tokens(requested)
+    missing <- requested[
+      !token_target_scope_keys(client, requested) %in%
+        token_target_scope_keys(client, granted)
+    ]
+    return(list(
+      status = if (length(missing)) "insufficient" else "covered",
+      missing = missing,
+      indeterminate = character()
+    ))
+  }
   policy <- client@scope_policy
   if (!length(policy)) {
     return(evaluate_scope_coverage(requested, granted))

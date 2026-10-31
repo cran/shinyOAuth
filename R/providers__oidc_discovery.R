@@ -27,12 +27,17 @@
 #' does not itself require token introspection; set `introspect = TRUE` on
 #' [oauth_client()] when login and refresh must perform that check.
 #'
-#' Discovery describes what a service supports. Your app's registration may
-#' require a particular `token_auth_style`, secret, or key; configure those to
-#' match the registration. Automatic selection prefers `"header"`, then `"body"`,
-#' then `"public"` when `none` is advertised and PKCE is enabled. For a public
-#' client registration, set `token_auth_style = "public"` explicitly. JWT and
-#' mTLS methods must also be selected explicitly.
+#' Discovery describes the service, not your app registration. Use the client ID
+#' and secret or key issued for your app. If the registration is public (no
+#' secret), explicitly select `token_auth_style = "public"`. Other authentication
+#' choices and metadata restrictions are described below.
+#'
+#' @section Advanced authentication selection:
+#' Automatic selection prefers `"header"`, then `"body"`, then `"public"` when
+#' `none` is advertised and PKCE is enabled. JWT and mTLS methods require an
+#' explicit choice. Selected methods must match the advertised metadata.
+#' If `token_endpoint_auth_methods_supported` is absent, only the OIDC default
+#' `client_secret_basic` (`"header"`) is assumed.
 #'
 #' @section Discovery validation:
 #' The discovered issuer must match the requested identifier by default.
@@ -96,27 +101,20 @@
 #'  discovery fails with a configuration error (no fallback).
 #' @param allowed_token_types Character vector of allowed token types for
 #'  access tokens issued by this provider. Defaults to 'Bearer'
-#' @param jwks_host_issuer_match When TRUE (default), enforce that the JWKS host
-#'  discovered from the provider matches the issuer host exactly. For
-#'  providers that serve JWKS from a different host, set
-#'  `jwks_host_allow_only` to the exact hostname instead of disabling this.
-#'  Disabling (`FALSE`) is not recommended unless you also pin JWKS via
-#'  `jwks_host_allow_only` or `jwks_pins`.
+#' @param jwks_host_issuer_match When TRUE (default), require the discovered
+#'  JWKS host to match the issuer host exactly. `jwks_host_allow_only` takes
+#'  precedence and can specify a different exact hostname. `FALSE` disables
+#'  issuer-host matching.
 #' @param issuer_match Character scalar controlling how strictly to validate the
 #'  discovery document's `issuer` against the input `issuer`.
 #'
 #'  - `"url"` (default): require the issuer used for discovery to match
-#'    exactly, including any trailing slash (recommended). For a full discovery
-#'    URL input, require the discovered issuer's standard metadata location to
-#'    match that URL instead.
-#'  - `"host"`: compare only scheme + host (explicit opt-out; not recommended).
-#'  - `"none"`: do not validate issuer consistency.
-#'
-#'  Prefer `"url"` and tighten hosts via `options(shinyOAuth.allowed_hosts)`
-#'  when feasible.
-#' @param ... Additional fields passed to [oauth_provider()] (for example,
-#'   `pkce_method = "plain"` when a provider explicitly advertises only plain
-#'   PKCE support and you intentionally want to allow that downgrade).
+#'    exactly, including any trailing slash. For a full discovery URL input,
+#'    require the discovered issuer's standard metadata location to match that URL.
+#'  - `"host"`: compare only scheme + host.
+#'  - `"none"`: skip issuer-consistency validation.
+#' @param ... Additional fields passed to [oauth_provider()], including
+#'   `pkce_method = "plain"` for compatibility with plain-only PKCE metadata.
 #'
 #' @return [OAuthProvider] object configured from discovery
 #'
@@ -218,8 +216,9 @@ oauth_provider_oidc_discover <- function(
 
   # 6a) Read caller overrides before JWKS host-policy checks.
   dots <- list(...)
-  jwks_host_allow_only <- dots[["jwks_host_allow_only"]] %||%
-    NULL
+  jwks_host_allow_only <- normalize_jwks_host_pin(dots[[
+    "jwks_host_allow_only"
+  ]])
 
   .discover_validate_jwks_uri(
     disc = disc,
@@ -515,7 +514,7 @@ oauth_provider_oidc_discover <- function(
   }
 
   if (
-    length(parsed[["query"]]) > 0L ||
+    grepl("?", issuer, fixed = TRUE) ||
       has_uri_fragment(issuer)
   ) {
     err_input(
@@ -632,7 +631,7 @@ oauth_provider_oidc_discover <- function(
 
   body <- httr2::resp_body_string(resp)
   reject_duplicate_json_object_members(body, "Discovery JSON")
-  disc <- try(jsonlite::fromJSON(body, simplifyVector = FALSE), silent = TRUE)
+  disc <- try(jsonlite::parse_json(body, simplifyVector = FALSE), silent = TRUE)
 
   if (inherits(disc, "try-error")) {
     err_parse(c("x" = "Failed to parse discovery JSON"))
@@ -702,6 +701,15 @@ oauth_provider_oidc_discover <- function(
     )
   }
 
+  # OIDC Discovery 4.2 requires zero-element claims to be omitted. In
+  # particular, an empty auth-method list must not become an unrestricted set.
+  if ("token_endpoint_auth_methods_supported" %in% names(disc)) {
+    .discover_require_string_array(
+      disc,
+      "token_endpoint_auth_methods_supported"
+    )
+  }
+
   optional_string_arrays <- c(
     "scopes_supported",
     "response_modes_supported",
@@ -715,7 +723,6 @@ oauth_provider_oidc_discover <- function(
     "request_object_signing_alg_values_supported",
     "request_object_encryption_alg_values_supported",
     "request_object_encryption_enc_values_supported",
-    "token_endpoint_auth_methods_supported",
     "token_endpoint_auth_signing_alg_values_supported",
     "display_values_supported",
     "claim_types_supported",
@@ -1139,7 +1146,10 @@ oauth_provider_oidc_discover <- function(
   iss,
   token_url
 ) {
-  methods <- disc[["token_endpoint_auth_methods_supported"]] %||% character(0)
+  # OIDC Discovery 3 defines Basic as the default when this field is omitted.
+  # Apply it before validating an explicit choice as well as before inference.
+  methods <- disc[["token_endpoint_auth_methods_supported"]] %||%
+    "client_secret_basic"
   methods <- tolower(as.character(methods))
 
   if (!is.null(token_auth_style)) {
@@ -1221,8 +1231,16 @@ oauth_provider_oidc_discover <- function(
     )
   }
 
-  # When methods are not advertised, fall back to historic default: header.
-  "header"
+  err_config(
+    c(
+      "x" = "OIDC discovery advertises no supported token endpoint authentication method",
+      "i" = paste(
+        "Supported methods are client_secret_basic, client_secret_post, none",
+        "(with PKCE), and explicitly configured JWT or mutual TLS methods"
+      )
+    ),
+    context = list(issuer = iss, token_endpoint = token_url, methods = methods)
+  )
 }
 
 #' Validate an explicitly requested token auth style
@@ -1249,10 +1267,6 @@ oauth_provider_oidc_discover <- function(
   token_url
 ) {
   token_auth_style <- normalize_token_auth_style(token_auth_style)
-
-  if (length(methods) == 0L) {
-    return(token_auth_style)
-  }
 
   is_supported <- switch(
     token_auth_style,

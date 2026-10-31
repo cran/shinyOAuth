@@ -1,7 +1,7 @@
 Package: shinyOAuth
 Title: OIDC Authentication and OAuth Authorization for 'shiny'
         Applications
-Version: 0.6.1
+Version: 0.7.0
 Authors@R: 
     person("Luka", "Koning", email = "koningluka@gmail.com", role = c("aut", "cre", "cph"))
 Description: Provides a simple, configurable framework for 'OpenID Connect'
@@ -16,24 +16,24 @@ Description: Provides a simple, configurable framework for 'OpenID Connect'
 License: MIT + file LICENSE
 Encoding: UTF-8
 Imports: S7 (>= 0.2.0), R6 (>= 2.0), rlang (>= 1.0.0), shiny (>=
-        1.7.0), jsonlite (>= 1.0), openssl (>= 2.0.0), httr2 (>=
-        1.1.0), curl, urltools (>= 1.7.3), cachem (>= 1.1.0), jose (>=
-        1.2.0), lifecycle (>= 1.0.0), cli (>= 3.0.0), htmltools (>=
-        0.5.0), otel (>= 0.2.0)
+        1.7.0), jsonlite (>= 1.6), openssl (>= 2.1.2), httr2 (>=
+        1.1.0), curl, urltools (>= 1.7.3), cachem (>= 1.1.0), callr (>=
+        3.7.6), jose (>= 1.2.0), lifecycle (>= 1.0.0), cli (>= 3.0.0),
+        htmltools (>= 0.5.0), otel (>= 0.2.0)
 Suggests: bslib, ggplot2, purrr, dplyr, testthat (>= 3.2.2), DT, knitr,
-        rmarkdown, webfakes, promises, mirai (>= 2.5.1), future, withr,
-        later, callr, processx, pkgload, chromote, sodium, shinytest2,
-        xml2, otelsdk
+        rmarkdown, webfakes, promises (>= 1.3.3), mirai (>= 2.5.1),
+        future, withr, later, processx, pkgload, chromote, httpuv,
+        sodium, shinytest2, xml2, otelsdk
 Depends: R (>= 4.1.0)
 Config/testthat/edition: 3
 VignetteBuilder: knitr
 URL: https://github.com/lukakoning/shinyOAuth,
         https://lukakoning.github.io/shinyOAuth/
 BugReports: https://github.com/lukakoning/shinyOAuth/issues
-Config/roxygen2/version: 8.0.0
+Config/roxygen2/version: 8.1.0
 NeedsCompilation: no
-Packaged: 2026-09-17 22:30:41 UTC; dhrko
+Packaged: 2026-10-31 12:08:44 UTC; dhrko
 Author: Luka Koning [aut, cre, cph]
 Maintainer: Luka Koning <koningluka@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-09-18 06:40:17 UTC
+Date/Publication: 2026-10-31 12:30:02 UTC

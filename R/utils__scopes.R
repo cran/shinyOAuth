@@ -47,13 +47,27 @@ validate_response_scope <- function(
       length(scope) != 1L ||
       is.na(scope) ||
       (!isTRUE(allow_empty) && !nzchar(scope)) ||
-      !grepl("^(?:[!#-\\[\\]-~]+(?: [!#-\\[\\]-~]+)*)?$", scope, perl = TRUE)
+      !grepl("\\A(?:[!#-\\[\\]-~]+(?: [!#-\\[\\]-~]+)*)?\\z", scope, perl = TRUE)
   ) {
     signal_error(
       "Response scope must be a scalar string of SP-delimited OAuth scope tokens"
     )
   }
   invisible(TRUE)
+}
+
+# Provider deviations are explicit policy: commas remain valid characters in
+# ordinary OAuth scope tokens. GitHub returns comma-separated granted scopes.
+normalize_provider_response_scope <- function(provider, scope) {
+  if (
+    is.null(scope) || identical(provider@token_response_scope_format, "space")
+  ) {
+    return(scope)
+  }
+  validate_response_scope(scope, signal_error = err_token, allow_empty = TRUE)
+  scope <- gsub(",", " ", scope, fixed = TRUE)
+  validate_response_scope(scope, signal_error = err_token, allow_empty = TRUE)
+  scope
 }
 
 #' Validate OAuth 2.0 scope strings
@@ -76,6 +90,16 @@ validate_scopes <- function(scopes) {
 
   # Allow empty character vector (no scopes requested)
   if (length(scopes) == 0) {
+    return(invisible(TRUE))
+  }
+
+  # Stored grants and target declarations normally contain individual tokens.
+  # Validate that common case in one vectorized pass, retaining the indexed
+  # diagnostics and whitespace-list handling below for all other inputs.
+  if (
+    !anyNA(scopes) &&
+      all(grepl("\\A[!#-\\[\\]-~]+\\z", scopes, perl = TRUE, useBytes = TRUE))
+  ) {
     return(invisible(TRUE))
   }
 
@@ -145,6 +169,12 @@ as_scope_tokens <- function(scopes) {
   scopes <- scopes[!is.na(scopes)]
   if (length(scopes) == 0L) {
     return(character())
+  }
+
+  # Already separated ASCII tokens need no splitting. Other inputs still use
+  # the existing whitespace rules; this normalizer does not validate grammar.
+  if (all(grepl("\\A[!-~]+\\z", scopes, perl = TRUE, useBytes = TRUE))) {
+    return(unname(scopes))
   }
 
   tokens <- unlist(strsplit(scopes, "\\s+"), use.names = FALSE)

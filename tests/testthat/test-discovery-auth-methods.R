@@ -454,7 +454,7 @@ test_that("request mode remains available when PAR carries the request object", 
     )
   )
 
-  testthat::expect_s3_class(cli, "shinyOAuth::OAuthClient")
+  testthat::expect_true(S7::S7_inherits(cli, shinyOAuth::OAuthClient))
 })
 
 test_that("discovery blocks request mode when request transport is unsupported and PAR is absent", {
@@ -694,7 +694,7 @@ testthat::test_that("mixed none + client_secret_post prefers confidential auth",
 })
 
 
-testthat::test_that("when methods are not advertised, fall back to header (historic default)", {
+testthat::test_that("omitted auth methods use the OIDC client_secret_basic default", {
   testthat::skip_if_not_installed("webfakes")
   testthat::skip_on_cran() # webfakes subprocess can timeout on slow CRAN machines
   app <- webfakes::new_app()

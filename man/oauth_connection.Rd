@@ -2,7 +2,7 @@
 % Please edit documentation in R/methods__connection.R
 \name{oauth_connection}
 \alias{oauth_connection}
-\title{Make API requests with a Shiny session's current OAuth credentials}
+\title{Wrap an existing reactive token as a connection}
 \usage{
 oauth_connection(
   client,
@@ -16,8 +16,8 @@ oauth_connection(
 
 \item{token_reactive}{A Shiny reactive expression returning the current \link{OAuthToken}
 or \code{NULL}, usually \code{shiny::reactive(auth[["token"]])}. It must come from the
-module using \code{client}. Supplying that association is trusted server
-application wiring; a resource policy cannot prove an opaque token's audience.}
+module using \code{client}. This association is supplied by the caller;
+API address restrictions cannot verify an opaque token's audience.}
 
 \item{session}{The owning Shiny session; defaults to the current session.}
 }
@@ -29,14 +29,19 @@ responses. \code{configure} can add a body and application headers; see
 }
 \description{
 Combine one module's reactive token with its client and approved API addresses
-configured on \code{\link[=oauth_client]{oauth_client()}}. Call \verb{[["request"]]()} on the returned connection instead of
-assembling a token, client and URL for each request. It reads the reactive token
-again after refresh or logout and restricts requests to the configured APIs.
+configured on \code{\link[=oauth_client]{oauth_client()}}. Call \verb{[["request"]]()} on the connection to send
+a request with the current token. It reads the reactive token again after
+refresh or logout and restricts requests to the configured APIs.
 This optional wrapper expires with its Shiny session; it does not implement
 refresh itself or retain credentials across redirects.
+Clients with \code{token_targets} must use the module's \code{connection()} factory,
+which retains the authorization's permission limits alongside its tokens.
 }
 \details{
-Create the reference once inside \code{server()}. Access it only in that session's
+The module's \code{auth$connection()} factory also supports token acquisition and
+refresh for external packages. This wrapper adapts an existing reactive token.
+
+The reference is bound to its creating Shiny session and checks that session's
 reactive context. \verb{[["summary"]]()} excludes tokens, identity claims and extension
 context. \verb{[["is_usable"]]()} checks local presence, known expiry and required scopes;
 it cannot guarantee remote authorization. Unknown token expiry is unusable.
@@ -49,9 +54,8 @@ Bearer, DPoP and mTLS use the existing transport and the configured client.
 Use request-level \code{required_scopes} for optional operations. They must be
 included in the client's requested scopes and covered by the current grant.
 The package cannot infer arbitrary API permissions from an HTTP method/path.
-The legacy module continues to own refresh and logout. Retained connection
-storage and its independent lifecycle are available through
-\code{\link[=oauth_connections]{oauth_connections()}} and \code{\link[=oauth_connections_server]{oauth_connections_server()}}.
+\code{\link[=oauth_module_server]{oauth_module_server()}} still manages refresh and logout. To retain credentials
+across Shiny sessions, use \code{\link[=oauth_connections]{oauth_connections()}} and \code{\link[=oauth_connections_server]{oauth_connections_server()}}.
 }
 \examples{
 \dontrun{

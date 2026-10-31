@@ -15,8 +15,8 @@
 #' it for custom integrations. Pass it to [perform_resource_req()] to call an
 #' API, or to the token helpers for refresh, introspection, and revocation.
 #'
-#' Read properties with `@`, for example `auth[["token"]]@userinfo`. Profile fields
-#' depend on the provider. Keep access and refresh tokens out of the UI and logs.
+#' Properties use `@`, for example `auth[["token"]]@userinfo`. Profile fields
+#' depend on the provider.
 #'
 #' @param access_token Access token
 #' @param token_type OAuth access token type (for example `Bearer` or `DPoP`)
@@ -25,28 +25,31 @@
 #' @param original_id_token Initial login ID token retained as the refresh
 #'   continuity baseline. Refresh never replaces it with a newer ID token.
 #'   For manually constructed tokens, the first refresh initializes this from
-#'   `id_token` if omitted. Treat this property as credential material.
+#'   `id_token` if omitted.
 #' @param expires_at Numeric timestamp (seconds since epoch) when the access
 #'  token expires, `NA_real_` when the expiry is unknown, or `Inf` for a
 #'  non-expiring token
 #' @param userinfo List containing user information fetched from the provider's
 #'  userinfo endpoint (if fetched)
-#' @param cnf Optional confirmation claim set returned alongside a
-#'   sender-constrained access token or observed on another token surface. For
-#'   RFC 8705 certificate-bound tokens, this may contain `x5t#S256` with the
+#' @param cnf Optional binding metadata for an access token tied to a key or
+#'   certificate. It can come from a token response, the access token's JWT
+#'   payload, or an introspection response. For RFC 8705 certificate-bound tokens,
+#'   this may contain `x5t#S256` with the
 #'   SHA-256 thumbprint of the client certificate that must accompany later
 #'   requests. For DPoP-bound tokens, this may contain `jkt` with the RFC 7638
 #'   thumbprint of the public JWK bound to the token. When `cnf` is learned by
 #'   locally parsing a raw JWT access token, shinyOAuth is observing the token
-#'   payload and is not independently verifying the access-token signature;
-#'   introspection or another provider proof surface is stronger assurance.
+#'   payload and is not independently verifying the access-token signature.
+#'   A token or introspection response received directly from the provider gives
+#'   stronger confirmation.
 #' @param granted_scopes Normalized scope tokens currently associated with the
 #'   access token. When a provider omits `scope` in a token response,
 #'   shinyOAuth carries forward the best-known scope set instead of dropping it.
 #' @param granted_scopes_verified Logical flag indicating whether the current
 #'   token response explicitly proved `granted_scopes`. `FALSE` means the scope
 #'   set was assumed or carried forward because the provider omitted `scope`.
-#'   For stronger proof, configure `introspection_checks = "scope"`.
+#'   With `introspection_checks = "scope"`, provider introspection can verify
+#'   the granted scope set.
 #' @param id_token_validated Logical flag indicating whether the ID token was
 #'  cryptographically validated (signature verified and standard claims checked)
 #'  during the OAuth flow. Defaults to `FALSE`.
@@ -67,17 +70,13 @@
 #'   Empty for ordinary OAuth tokens. Set by SMART token processing.
 #'
 #' @details
-#' The `id_token_claims` property is a read-only computed property that returns
-#' the decoded JWT payload of the ID token as a named list. This surfaces all
-#' standard and optional OIDC claims (e.g., `sub`, `iss`, `aud`, `acr`, `amr`,
-#' `auth_time`, `nonce`, `at_hash`, etc.) without requiring manual JWT
-#' decoding. Returns an empty list when no ID token is present or if the token
-#' cannot be decoded.
+#' Read `token@id_token_claims` for the decoded ID-token payload as a named list,
+#' including standard and optional OIDC claims such as `sub`, `iss`, `aud`, `acr`,
+#' `amr`, `auth_time`, `nonce` and `at_hash`. This property is read-only and returns
+#' an empty list when the token is absent or cannot be decoded.
 #'
-#' Note: `id_token_claims` always decodes the JWT payload regardless
-#' of whether the ID token's signature was verified.
-#' Check the `id_token_validated` property to determine whether the claims
-#' were cryptographically validated.
+#' Decoding does not verify the signature. Check `id_token_validated` before
+#' using these claims as a validated identity.
 #' For validated Apple ID tokens, exact `"true"`/`"false"` strings in
 #' `email_verified` are returned as logical values, as during validation.
 #' The original signed `id_token` is retained unchanged.
@@ -89,7 +88,7 @@
 #' token claims and are not covered by `id_token_validated`. The initial
 #' snapshot records the initial response data, not current access permissions.
 #' No automatic merging, resource fetching, or interpretation is performed.
-#' Both lists can contain sensitive data; keep them out of the UI and logs.
+#' `print()` and `format()` redact both lists.
 #'
 #' @return Calling the constructor creates an `OAuthToken` object.
 #' @examples

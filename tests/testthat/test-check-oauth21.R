@@ -26,6 +26,121 @@ oauth21_finding <- function(report, id) {
   report[["checks"]][report[["checks"]][["id"]] == id, , drop = FALSE]
 }
 
+test_that("EdDSA and Ed25519 token and PAR assessments agree with actual signing", {
+  withr::local_options(shinyOAuth.tls_min_version = "1.2")
+  key <- openssl::ed25519_keygen()
+  for (alg in c("EdDSA", "Ed25519")) {
+    # Runtime defaults to EdDSA; Ed25519-only metadata requires an explicit
+    # algorithm and the constructor rejects an incompatible inferred default.
+    for (explicit in if (alg == "EdDSA") c(FALSE, TRUE) else TRUE) {
+      client <- oauth21_test_client(
+        list(
+          token_auth_style = "private_key_jwt",
+          issuer = "https://issuer.example",
+          infer_oidc_from_issuer = FALSE,
+          par_url = "https://issuer.example/par",
+          token_endpoint_auth_signing_alg_values_supported = alg
+        ),
+        client_assertion_private_key = key,
+        client_assertion_alg = if (explicit) alg else NULL,
+        client_assertion_audience = "https://issuer.example",
+        client_assertion_typ = "client-authentication+jwt"
+      )
+      report <- check_oauth21(client)
+      expect_true(report[["configuration_compliant"]])
+      for (endpoint in c("token", "par")) {
+        expect_identical(
+          oauth21_finding(report, paste0("client_auth.", endpoint))[["status"]],
+          "pass"
+        )
+        request <- httr2::request(resolve_provider_endpoint_url(
+          client@provider,
+          paste0(endpoint, "_endpoint")
+        ))
+        assertion <- apply_direct_client_auth(
+          request,
+          list(),
+          client,
+          endpoint
+        )[["params"]][["client_assertion"]]
+        expect_identical(parse_jwt_header(assertion)[["alg"]], alg)
+        parts <- strsplit(assertion, ".", fixed = TRUE)[[1L]]
+        expect_true(openssl::ed25519_verify(
+          charToRaw(paste(parts[1:2], collapse = ".")),
+          base64url_decode_raw(parts[[3L]]),
+          key[["pubkey"]]
+        ))
+      }
+    }
+  }
+})
+
+test_that("endpoint assertion metadata uses runtime algorithm normalization", {
+  withr::local_options(shinyOAuth.tls_min_version = "1.2")
+  key <- openssl::ed25519_keygen()
+  for (advertised in c("EdDSA", "EDDSA", "Ed25519", "ED25519")) {
+    alg <- canonicalize_jws_alg(advertised)
+    for (explicit in c(FALSE, TRUE)) {
+      override <- list(
+        token_auth_style = "private_key_jwt",
+        client_assertion_private_key = key,
+        client_assertion_audience = "https://issuer.example",
+        client_assertion_typ = "client-authentication+jwt"
+      )
+      if (explicit) {
+        override[["client_assertion_alg"]] <- alg
+      }
+      client <- oauth21_test_client(
+        list(
+          issuer = "https://issuer.example",
+          infer_oidc_from_issuer = FALSE,
+          introspection_url = "https://issuer.example/introspect",
+          revocation_url = "https://issuer.example/revoke",
+          endpoint_auth_metadata = list(
+            introspection = list(
+              methods = "private_key_jwt",
+              signing_algs = advertised
+            ),
+            revocation = list(
+              methods = "private_key_jwt",
+              signing_algs = advertised
+            )
+          )
+        ),
+        endpoint_auth = list(introspection = override, revocation = override)
+      )
+      report <- check_oauth21(
+        client,
+        context = list(operations = c("introspection", "revocation"))
+      )
+      expect_true(report[["configuration_compliant"]])
+      for (endpoint in c("introspection", "revocation")) {
+        expect_identical(
+          oauth21_finding(report, paste0("client_auth.", endpoint))[["status"]],
+          "pass"
+        )
+        effective <- endpoint_auth_client(client, endpoint)
+        assertion <- apply_direct_client_auth(
+          httr2::request(resolve_provider_endpoint_url(
+            client@provider,
+            paste0(endpoint, "_endpoint")
+          )),
+          list(),
+          effective,
+          endpoint
+        )[["params"]][["client_assertion"]]
+        expect_identical(parse_jwt_header(assertion)[["alg"]], alg)
+        parts <- strsplit(assertion, ".", fixed = TRUE)[[1L]]
+        expect_true(openssl::ed25519_verify(
+          charToRaw(paste(parts[1:2], collapse = ".")),
+          base64url_decode_raw(parts[[3L]]),
+          key[["pubkey"]]
+        ))
+      }
+    }
+  }
+})
+
 test_that("a supported public client passes a bounded, deterministic assessment", {
   withr::local_options(list(shinyOAuth.tls_min_version = "1.2"))
   client <- oauth21_test_client()
@@ -52,10 +167,10 @@ test_that("a supported public client passes a bounded, deterministic assessment"
     c("authorization", "code", "refresh")
   )
   expect_identical(report[["draft"]], "draft-ietf-oauth-v2-1-16")
-  expect_identical(report[["ruleset_version"]], "1.1.0")
+  expect_identical(report[["ruleset_version"]], "1.1.1")
   expect_true(all(
     report[["checks"]][["status"]] %in%
-      c("pass", "fail", "unknown", "not_applicable")
+      c("pass", "fail", "warn", "unknown", "not_applicable")
   ))
   expect_false(anyDuplicated(report[["checks"]][["id"]]) > 0L)
   expect_identical(check_oauth21(client)[["checks"]], report[["checks"]])
@@ -280,7 +395,73 @@ test_that("mTLS endpoint selection is shared with request construction", {
   )
 })
 
-test_that("runtime TLS defaults are unknown unless the linked curl default is known", {
+test_that("UserInfo assessment follows resource binding rather than token authentication", {
+  local_options(shinyOAuth.tls_min_version = "1.2")
+  for (canonical_https in c(FALSE, TRUE)) {
+    canonical <- if (canonical_https) {
+      "https://issuer.example/userinfo"
+    } else {
+      "http://localhost:9876/userinfo"
+    }
+    alias <- if (canonical_https) {
+      "http://localhost:9877/userinfo"
+    } else {
+      "https://mtls.issuer.example/userinfo"
+    }
+    client <- oauth21_test_client(
+      list(
+        token_auth_style = "tls_client_auth",
+        use_nonce = FALSE,
+        userinfo_url = canonical,
+        mtls_endpoint_aliases = list(userinfo_endpoint = alias)
+      ),
+      mtls_client_cert_file = mtls_pem_fixture("client-cert.pem"),
+      mtls_client_key_file = mtls_pem_fixture("client-key.pem")
+    )
+    seen <- NULL
+    local_mocked_bindings(req_with_retry = function(req, ...) {
+      seen <<- req
+      httr2::response(
+        status = 200L,
+        headers = list("content-type" = "application/json"),
+        body = charToRaw('{"sub":"user"}')
+      )
+    })
+    get_userinfo(
+      client,
+      OAuthToken(access_token = "opaque", token_type = "Bearer")
+    )
+    settings <- oauth21_endpoint_settings(client, client@provider, "userinfo")
+    expect_identical(settings[["url"]], seen[["url"]])
+    expect_false(settings[["mtls"]])
+    expect_null(seen[["options"]][["sslcert"]])
+    report <- check_oauth21(client, context = list(operations = "userinfo"))
+    expect_identical(
+      oauth21_finding(report, "https.userinfo")[["status"]],
+      if (canonical_https) "unknown" else "fail"
+    )
+    expect_identical(
+      report[["configuration_compliant"]],
+      if (canonical_https) NA else FALSE
+    )
+    report <- check_oauth21(
+      client@provider,
+      context = list(operations = "userinfo")
+    )
+    expect_identical(
+      oauth21_finding(report, "https.userinfo")[["status"]],
+      "unknown"
+    )
+    client@provider@mtls_client_certificate_bound_access_tokens <- TRUE
+    client@mtls_certificate_bound_access_tokens <- TRUE
+    settings <- oauth21_endpoint_settings(client, client@provider, "userinfo")
+    expect_identical(settings[["url"]], alias)
+    expect_true(settings[["mtls"]])
+    expect_identical(settings[["https"]], !canonical_https)
+  }
+})
+
+test_that("the package TLS floor applies even with older linked curl defaults", {
   client <- oauth21_test_client()
   withr::local_options(list(shinyOAuth.tls_min_version = NULL))
   local_mocked_bindings(
@@ -289,7 +470,7 @@ test_that("runtime TLS defaults are unknown unless the linked curl default is kn
     },
     .package = "curl"
   )
-  expect_identical(check_oauth21(client)[["configuration_compliant"]], NA)
+  expect_true(check_oauth21(client)[["configuration_compliant"]])
   withr::local_options(list(shinyOAuth.tls_min_version = "1.2"))
   expect_true(check_oauth21(client)[["configuration_compliant"]])
   withr::local_options(list(shinyOAuth.tls_min_version = "invalid"))
@@ -931,10 +1112,10 @@ test_that("assessment and PEM mTLS construction agree on the active backend", {
     )
     supported <- startsWith(backend, "OpenSSL")
     report <- check_oauth21(client)
-    expect_identical(report[["configuration_compliant"]], supported)
+    expect_identical(report[["configuration_compliant"]], if (supported) NA else FALSE)
     expect_identical(
       oauth21_finding(report, "client_auth.token")[["status"]],
-      if (supported) "pass" else "fail"
+      if (supported) "unknown" else "fail"
     )
     expect_identical(
       oauth21_finding(report, "mtls.backend.token")[["status"]],
@@ -958,6 +1139,109 @@ test_that("assessment and PEM mTLS construction agree on the active backend", {
       )
     }
   }
+})
+
+test_that("mTLS assessment does not attest to uninspected file-backed credentials", {
+  local_options(shinyOAuth.tls_min_version = "1.2")
+  for (style in c("tls_client_auth", "self_signed_tls_client_auth")) {
+    key_file <- tempfile(fileext = ".pem")
+    withr::defer(unlink(key_file))
+    file.copy(mtls_pem_fixture("client-key.pem"), key_file)
+    client <- oauth21_test_client(
+      list(token_auth_style = style),
+      mtls_client_cert_file = mtls_pem_fixture("client-cert.pem"),
+      mtls_client_key_file = key_file
+    )
+    edited <- client
+    edited@mtls_client_key_file <- mtls_pem_fixture("ed25519-client-key.pem")
+    direct <- do.call(OAuthClient, S7::props(edited))
+    # An existing client also becomes invalid when the file is rotated in place.
+    file.copy(mtls_pem_fixture("ed25519-client-key.pem"), key_file, overwrite = TRUE)
+    for (invalid in list(edited, direct, client)) {
+      expect_silent(S7::validate(invalid))
+      report <- check_oauth21(invalid)
+      expect_identical(report[["configuration_compliant"]], NA)
+      for (id in c("client_auth.token", "mtls.credentials.token")) {
+        finding <- oauth21_finding(report, id)
+        expect_identical(finding[["status"]], "unknown")
+        expect_true(finding[["affects_verdict"]])
+      }
+      expect_error(
+        req_apply_mtls_client_certificate(
+          httr2::request(invalid@provider@token_url),
+          invalid
+        ),
+        "certificate matching"
+      )
+    }
+  }
+})
+
+test_that("mTLS credential assessment includes overrides and bound UserInfo without IO", {
+  local_options(shinyOAuth.tls_min_version = "1.2")
+  credentials <- list(
+    token_auth_style = "tls_client_auth",
+    mtls_client_cert_file = mtls_pem_fixture("client-cert.pem"),
+    mtls_client_key_file = mtls_pem_fixture("client-key.pem")
+  )
+  client <- oauth21_test_client(
+    list(
+      par_url = "https://issuer.example/par",
+      introspection_url = "https://issuer.example/introspect",
+      revocation_url = "https://issuer.example/revoke"
+    ),
+    endpoint_auth = list(
+      par = credentials,
+      introspection = credentials,
+      revocation = credentials
+    )
+  )
+  bound <- oauth21_test_client(
+    list(
+      userinfo_url = "https://issuer.example/userinfo",
+      mtls_client_certificate_bound_access_tokens = TRUE
+    ),
+    mtls_client_cert_file = credentials[["mtls_client_cert_file"]],
+    mtls_client_key_file = credentials[["mtls_client_key_file"]],
+    mtls_certificate_bound_access_tokens = TRUE
+  )
+  local_mocked_bindings(
+    read_keyed_client_certificate = function(...) stop("must not load credentials"),
+    tls_client_cert_thumbprint_s256 = function(...) stop("must not use the cache")
+  )
+  report <- expect_silent(check_oauth21(
+    client,
+    context = list(operations = c("introspection", "revocation"))
+  ))
+  expect_identical(report[["configuration_compliant"]], NA)
+  expect_identical(oauth21_finding(report, "client_auth.token")[["status"]], "pass")
+  for (endpoint in c("par", "introspection", "revocation")) {
+    for (prefix in c("client_auth.", "mtls.credentials.")) {
+      expect_identical(
+        oauth21_finding(report, paste0(prefix, endpoint))[["status"]],
+        "unknown"
+      )
+    }
+  }
+  report <- expect_silent(check_oauth21(
+    bound,
+    context = list(operations = "userinfo")
+  ))
+  expect_identical(report[["configuration_compliant"]], NA)
+  expect_identical(
+    oauth21_finding(report, "mtls.credentials.userinfo")[["status"]],
+    "unknown"
+  )
+  report <- check_oauth21(oauth_provider(
+    name = "Provider-only mTLS",
+    auth_url = "https://issuer.example/auth",
+    token_url = "https://issuer.example/token",
+    token_auth_style = "tls_client_auth"
+  ))
+  expect_identical(
+    oauth21_finding(report, "mtls.credentials.token")[["status"]],
+    "unknown"
+  )
 })
 
 test_that("development bypass assessment follows legacy numeric flag semantics", {
@@ -1007,10 +1291,15 @@ test_that("malformed API arguments are programming errors with redacted diagnost
   )
 })
 test_that("assessment reports compatibility with missing token types", {
+  withr::local_options(list(shinyOAuth.tls_min_version = "1.2"))
   client <- oauth21_test_client()
+  verdict <- check_oauth21(client)[["configuration_compliant"]]
   client@provider@allow_missing_token_type <- TRUE
-  finding <- oauth21_finding(check_oauth21(client), "tokens.validation")
+  report <- check_oauth21(client)
+  finding <- oauth21_finding(report, "tokens.validation")
   expect_identical(finding[["status"]], "warn")
+  expect_false(finding[["affects_verdict"]])
+  expect_identical(report[["configuration_compliant"]], verdict)
   expect_match(finding[["remediation"]], "allow_missing_token_type")
   expect_identical(
     oauth21_finding(check_oauth21(client@provider), "tokens.validation")[[

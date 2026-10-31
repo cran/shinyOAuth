@@ -3,7 +3,7 @@
 \name{oauth_connections}
 \alias{oauth_connections}
 \alias{print.OAuthConnections}
-\title{Configure several independently managed OAuth connections}
+\title{Manage several OAuth connections in one Shiny app}
 \usage{
 oauth_connections(
   clients,
@@ -20,7 +20,8 @@ oauth_connections(
 }
 \arguments{
 \item{clients}{Non-empty named list of \link{OAuthClient} objects, at most 64.
-Each client must configure non-empty \code{resource_bases}. Names select local
+\code{resource_bases} is required only for connection \verb{$request()} calls; clients
+used solely to supply tokens to an SDK can omit it. Names select local
 configurations (for example \code{hospital_a}), independently of OAuth \code{client_id}:
 a letter followed by letters, digits, \verb{_} or \code{-}, at most 64 characters.}
 
@@ -30,8 +31,7 @@ HTTP loopback exception. Session-only development also permits loopback HTTP.}
 
 \item{retention}{\code{"shiny"} (default) discards connections at Shiny session end.
 \code{"browser"} restores the browser owner's connections after navigation;
-\code{"account"} uses a trusted local application login. Retention does not request
-refresh tokens or extend provider authorization.}
+\code{"account"} uses a trusted local application login.}
 
 \item{retention_seconds}{Maximum lifetime of each stored grant, in seconds.
 Positive and finite, no larger than the store's \code{max_age}. Refresh never
@@ -46,7 +46,8 @@ the supplied memory store in one R process is supported.}
 
 \item{keys}{Named list with \code{credentials} and \code{owner}, each a deployment-held
 raw vector of 32 bytes. Required for retained modes. Session-only mode creates
-ephemeral keys if omitted. Keep these keys outside credential storage.}
+ephemeral keys if omitted. Keys are held by the manager, separately from
+the ciphertext-only connection store.}
 
 \item{callback_policy}{\code{"distinct_routes"} (default) gives each client its own
 registered callback route. With several clients, configure every client with
@@ -67,43 +68,46 @@ distinct routes. Routing never substitutes for callback authentication.}
 }
 \value{
 An \code{OAuthConnections} server-side configuration object. Printing shows
-only the retention mode and client count. It contains client configuration
-and deployment keys and must never be sent to the browser.
+only the retention mode and client count. It holds client configuration
+and deployment keys for the UI and server modules.
 }
 \description{
-Create one manager outside \code{server()} for a named set of client/API
-configurations from \code{\link[=oauth_client]{oauth_client()}} or \code{\link[=smart_client]{smart_client()}}. Use \code{\link[=oauth_connections_ui]{oauth_connections_ui()}} to handle
-callbacks and \code{\link[=oauth_connections_server]{oauth_connections_server()}} for each Shiny session. Each
-successful authorization creates a separate connection, including repeated
-authorizations at the same client.
-Connections are independent local records. Providers may reuse an upstream
-grant, so revoking one can invalidate tokens held by other connections.
-Within a manager, refreshes sharing one credential are serialized. Rotation
-or an uncertain refresh invalidates other records holding the same credential;
-authorize those records again. Their identity and permissions are never
-replaced by another connection's response. Successful revocation also
-invalidates known copies of that credential. Distinct tokens may still share
-an upstream grant whose revocation effects the manager cannot predict.
-Retired credential digests survive connection replacement and expiry for at
-least the store's maximum age and the longest client state lifetime. A separate
-registry holds at most 10,000 digests or pending reservations. A full registry
-rejects refresh or skips remote revocation before sending credentials; it does
-not evict retirement evidence. Existing unrelated access remains usable.
+Let users connect several services or accounts in one Shiny app. Create the
+manager outside \code{server()} with named clients from \code{\link[=oauth_client]{oauth_client()}} or
+\code{\link[=smart_client]{smart_client()}}, then use \code{\link[=oauth_connections_ui]{oauth_connections_ui()}} and
+\code{\link[=oauth_connections_server]{oauth_connections_server()}} to display and use their saved connections.
 }
 \details{
-A manager is bound to one UI/server module ID and one public origin. Create
-another manager for another namespace. The memory store and owner registries
-survive Shiny sessions, not R restarts; copies in another R process fail closed.
+By default, connections last for one Shiny session. Optional browser or local
+account retention can restore them after navigation. See
+\code{vignette("multiple-authorizations", package = "shinyOAuth")}
+(\href{https://lukakoning.github.io/shinyOAuth/articles/multiple-authorizations.html}{online guide})
+for a complete example.
+
+The manager's named clients select the configuration for each login.
+Connections are separate local records, but the provider may reuse one grant;
+revoking a connection can therefore affect other tokens from that grant.
+}
+\section{Advanced deployment and shared credentials}{
+
+Refreshes using one shared credential are coordinated. Rotation or an
+uncertain refresh can require other connections sharing that credential to
+reconnect; one connection's response never replaces another's identity or
+permissions. Revocation can also affect related provider grants.
+
+A manager is bound to one UI/server module ID and one public origin.
+The memory store and owner registries
+survive Shiny sessions, not R restarts. Copies in another R process are rejected.
 
 In session-only mode, a pending authorization survives navigation through the
 existing single-use OAuth state and browser binding, while existing grants are
 discarded with the old Shiny session. Browser/account mode additionally binds
 authorization to the initiating local owner and its session generation.
 
-These are optional package interfaces, not SMART protocol objects. This manager
-supports generic OAuth clients and the SMART discovery, scope and launch
-policies configured by \code{\link[=smart_client]{smart_client()}}.
+The manager supports generic OAuth clients and the SMART discovery, scope and
+launch policies configured by \code{\link[=smart_client]{smart_client()}}.
 }
+
 \examples{
 # Replace this example provider and client ID with your registered application.
 provider <- oauth_provider(

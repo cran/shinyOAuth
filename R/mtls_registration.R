@@ -14,9 +14,8 @@
 #' public keys, or certificate-bound token settings. It derives those settings
 #' from an [oauth_client()] already configured for mTLS.
 #'
-#' The result is a metadata list, ready to include in a registration request.
-#' Submit it through your provider's registration process; this function does
-#' not register the client or upload the certificate.
+#' The result is a metadata list for the provider's registration process.
+#' This function does not register the client or upload the certificate.
 #'
 #' @details
 #' For `tls_client_auth`, the result identifies the client certificate using
@@ -41,6 +40,8 @@
 #'   explicit value because the current certificate extractor does not preserve
 #'   ASN.1 SAN types. Select the type and exact value from the certificate;
 #'   a numeric-looking DNS name is still a DNS SAN, not an IP SAN.
+#'   Explicit `subject_dn` values use RFC 4514 syntax and are preserved verbatim,
+#'   including escaped spaces.
 #' @param jwks_uri Optional absolute URL of a JWKS document to publish for
 #'   `self_signed_tls_client_auth`. When omitted, the helper returns an inline
 #'   `jwks` object with the configured client certificate chain in `x5c`.
@@ -455,6 +456,12 @@ normalize_mtls_registration_alt_name_value <- function(type, value) {
     err_input("Certificate SAN values must be non-empty strings")
   }
 
+  # RFC 4514 permits meaningful escaped spaces at the end of a DN. Trimming
+  # them would change the subject and can leave a dangling backslash.
+  if (identical(type, "subject_dn")) {
+    return(as.character(value))
+  }
+
   if (!identical(type, "san_ip")) {
     return(normalized)
   }
@@ -858,23 +865,17 @@ build_self_signed_mtls_registration_jwks <- function(oauth_client) {
     )
   }
 
-  jwk_json <- try(jose::jwk_write(pubkey), silent = TRUE)
-  if (inherits(jwk_json, "try-error")) {
+  jwk <- try(
+    private_key_public_jwk(pubkey, arg_name = "mTLS client certificate"),
+    silent = TRUE
+  )
+  if (inherits(jwk, "try-error")) {
     err_config(
       paste(
         "Failed to serialize the self-signed TLS client certificate as a JWK"
       )
     )
   }
-  jwk <- try(
-    jsonlite::fromJSON(jwk_json, simplifyVector = FALSE),
-    silent = TRUE
-  )
-  if (inherits(jwk, "try-error") || !is.list(jwk)) {
-    err_parse("Failed to parse serialized self-signed mTLS JWK")
-  }
-  jwk <- canonicalize_local_public_jwk(jwk)
-
   private_members <- intersect(
     names(jwk),
     c("d", "p", "q", "dp", "dq", "qi", "oth", "k")

@@ -21,8 +21,8 @@ get_userinfo(
 \item{token_type}{Optional override for the access token type when \code{token}
 is provided as a raw string. Supported values are \code{Bearer} and \code{DPoP}.}
 
-\item{shiny_session}{Optional captured Shiny session details for audit events.
-Normally supplied by the module; leave \code{NULL} when calling directly.}
+\item{shiny_session}{Optional captured Shiny session details for audit events,
+normally supplied by the module.}
 
 \item{oauth_client}{Compatibility alias for \code{client}. Supply only one spelling.}
 }
@@ -39,26 +39,32 @@ The Shiny module fetches and stores this information during login when
 \code{userinfo_required = TRUE}; that result is available as \code{auth[["token"]]@userinfo}.
 }
 \details{
-The provider must have a \code{userinfo_url}: the OpenID Connect (OIDC) UserInfo
-endpoint, or an OAuth provider's profile API. With OIDC, this function checks that
-userinfo belongs to the same user as a validated ID token when available.
-If provider policy requires that comparison, an absent validated ID token
-causes an error. Prefer passing the complete \link{OAuthToken}, which carries
-the ID token needed for this check.
+Pass the client and complete \link{OAuthToken} from login, for example
+\code{get_userinfo(client, auth[["token"]])}. The provider needs a \code{userinfo_url}.
+For OIDC, shinyOAuth checks that the returned profile belongs to the validated
+login. A raw access-token string cannot provide that identity check.
 
-Ordinary JSON profiles and signed JWT UserInfo responses are supported.
-Signed responses are verified using the provider's signing keys and
-\code{userinfo_allowed_algs}; encrypted UserInfo is not supported. Set
-\code{userinfo_signed_jwt_required} on the provider to require a signed response,
-and \code{userinfo_jwt_required_time_claims} on the client to require time claims
-such as \code{exp}. Present time claims are checked even when not required.
-
-For certificate-bound tokens (mTLS) and key-bound tokens (DPoP), the helper
-uses the client's certificate or signing key and checks the token binding.
-It handles one DPoP nonce challenge with a fresh-proof retry. See the
-\href{https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html}{advanced security vignette}
-for configuration.
+\code{userinfo_required = FALSE} disables automatic profile retrieval.
 }
+\section{Advanced response validation}{
+
+Normal JSON profiles and signed JWT profiles are supported; encrypted UserInfo
+is not. \code{userinfo_signed_jwt_required} requires a signed response using
+\code{userinfo_allowed_algs}. \code{userinfo_jwt_required_time_claims} can require expiry
+and other time claims; present time claims are always checked.
+
+By default, OIDC providers with a UserInfo endpoint require a validated identity
+token, including for manual retrieval. Explicit \code{userinfo_id_token_match = FALSE}
+allows retrieval without one, but when both are available their \code{sub} values
+must always match. Standard profile fields are checked for the expected JSON
+types; extension fields retain their provider-defined values.
+
+For DPoP or mTLS-bound tokens, the client supplies the matching signing key or
+certificate. See the
+\href{https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html}{advanced security vignette}
+for those configurations.
+}
+
 \examples{
 # get_userinfo(), introspect_token(), and refresh_token() are typically
 # called by oauth_module_server() according to your provider/client and
@@ -78,7 +84,7 @@ if (interactive()) {
   result <- introspect_token(client, token)
   isTRUE(result[["active"]])
 
-  # Requires a refresh token. Keep the returned replacement.
+  # Returns replacement credentials using the refresh token.
   token <- refresh_token(client, token)
 
   # Requires a revocation endpoint to invalidate the token at the provider.

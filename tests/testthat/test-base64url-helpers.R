@@ -55,18 +55,13 @@ test_that("unicode text roundtrips via base64url text decode", {
   expect_identical(Encoding(out), "UTF-8")
 })
 
-test_that("invalid input yields empty decode without error", {
-  r1 <- shinyOAuth:::base64url_decode_raw("!@#")
-  expect_true(is.raw(r1))
-  expect_length(r1, 0)
-
-  t1 <- shinyOAuth:::base64url_decode("!@#")
-  expect_identical(t1, "")
-
-  r2 <- shinyOAuth:::base64url_decode_raw("!@#")
-  expect_true(is.raw(r2))
-  expect_length(r2, 0)
+test_that("empty input decodes to empty raw and text values", {
+  expect_identical(shinyOAuth:::base64url_decode_raw(""), raw())
+  expect_identical(shinyOAuth:::base64url_decode(""), "")
 })
+
+# Invalid-input behavior belongs to openssl. JWT, JWK and encrypted-state tests
+# check that shinyOAuth rejects malformed input regardless of decoder behavior.
 
 test_that("base64url_decode rejects embedded NUL bytes", {
   # Encode a raw vector containing a NUL byte

@@ -124,12 +124,31 @@ oauth21_endpoint_settings <- function(client, provider, endpoint) {
     isTRUE(client@mtls_certificate_bound_access_tokens) &&
     isTRUE(provider@mtls_client_certificate_bound_access_tokens) &&
     cert
-  mtls <- style %in% MTLS_TOKEN_AUTH_STYLES || bound
+  # UserInfo is a resource request. Token-endpoint client authentication does
+  # not imply certificate-bound access tokens (RFC 8705 Section 3).
+  mtls <- if (endpoint == "userinfo") {
+    !is.null(client) && token_requires_mtls_sender_constraint(NULL, client)
+  } else {
+    style %in% MTLS_TOKEN_AUTH_STYLES || bound
+  }
   url <- resolve_provider_endpoint_url(
     provider,
     paste0(endpoint, "_endpoint"),
     mtls
   )
+  https <- oauth21_https(url)
+  if (endpoint == "userinfo" && !mtls) {
+    alias <- resolve_provider_endpoint_url(provider, "userinfo_endpoint", TRUE)
+    if (
+      !identical(https, oauth21_https(alias)) &&
+        (is.null(client) || (cert && https))
+    ) {
+      # Provider-only binding policy is unknown. Even without configured binding
+      # intent, observed token cnf can select an alias when credentials exist.
+      # An insecure canonical endpoint still fails: ordinary Bearer uses it.
+      https <- NA
+    }
+  }
   secret <- effective("client_secret")
   has_secret <- is_valid_string(secret)
   credentials <- switch(
@@ -137,7 +156,7 @@ oauth21_endpoint_settings <- function(client, provider, endpoint) {
     header = has_secret,
     body = has_secret || isTRUE(provider@use_pkce),
     public = TRUE,
-    client_secret_jwt = has_secret && nchar(secret, type = "bytes") >= 32,
+    client_secret_jwt = has_secret && length(hmac_secret_bytes(secret)) >= 32,
     private_key_jwt = !is.null(effective("client_assertion_private_key")),
     tls_client_auth = cert,
     self_signed_tls_client_auth = cert,
@@ -152,6 +171,12 @@ oauth21_endpoint_settings <- function(client, provider, endpoint) {
     } else {
       provider@endpoint_auth_metadata[[endpoint]][["signing_algs"]]
     }
+    advertised <- vapply(
+      advertised,
+      canonicalize_jws_alg,
+      character(1),
+      USE.NAMES = FALSE
+    )
     candidates <- if (nzchar(alg)) {
       alg
     } else if (
@@ -170,7 +195,7 @@ oauth21_endpoint_settings <- function(client, provider, endpoint) {
         if (style == "client_secret_jwt") {
           has_secret &&
             candidate %in% c("HS256", "HS384", "HS512") &&
-            nchar(secret, type = "bytes") >= min_hmac_key_bytes(candidate)
+            length(hmac_secret_bytes(secret)) >= min_hmac_key_bytes(candidate)
         } else {
           private_key_jws_alg_compatibility(
             effective("client_assertion_private_key"),
@@ -186,7 +211,17 @@ oauth21_endpoint_settings <- function(client, provider, endpoint) {
     credentials <- credentials && any(compatible)
   }
   mtls_backend <- !mtls || mtls_pem_backend_supported()
-  credentials <- credentials && mtls_backend
+  # Paths establish presence, not readable, matching certificate/key material.
+  # Keep assessment free of key loading and cache access, including after file
+  # rotation. Runtime validates the current files before each mTLS request.
+  mtls_credentials <- if (!mtls) {
+    TRUE
+  } else if (is.null(client) || cert) {
+    NA
+  } else {
+    FALSE
+  }
+  credentials <- credentials && mtls_backend && mtls_credentials
   headers <- if (endpoint == "token") {
     provider@extra_token_headers
   } else {
@@ -218,9 +253,11 @@ oauth21_endpoint_settings <- function(client, provider, endpoint) {
   list(
     style = style,
     url = url,
+    https = https,
     credentials = credentials,
     mtls = mtls,
     mtls_backend = mtls_backend,
+    mtls_credentials = mtls_credentials,
     problem = method[["problem"]],
     confidential = !style %in% c("public") &&
       !(style == "body" && !has_secret) &&

@@ -39,15 +39,24 @@ A server-side list with:
 EHR-only clients report \code{fresh_ehr_launch_required} and return \code{FALSE};
 use their registered \code{\link[=smart_launch_route]{smart_launch_route()}} to start authorization.
 \item \code{connections()}: reactive list of redacted connection summaries.
-\item \code{connection(connection_id)}: an \link{OAuthConnection} for requests and refresh.
-\item \code{touch()}: record explicit user activity after checking the current owner.
-Call from an input event handler; returns \code{TRUE} invisibly.
+\item \code{connection(connection_id = NULL)}: an \link{OAuthConnection} for requests, refresh,
+scope checks and server-side \verb{$access_token()} retrieval for external SDKs.
+\item \code{reauthorize(connection_id)}: end this local authorization and start its
+replacement with the retained scope limit, without upstream revocation.
+Local state preparation is checked first; rejection preserves current access.
+The replacement summary includes \code{replaces_connection_id}. Failed/cancelled
+replacement leaves the old reference invalid. EHR-only clients require a
+fresh EHR launch instead.
+\item \code{touch()}: record explicit user activity after checking the current owner;
+returns \code{TRUE} invisibly.
 \item \code{disconnect(connection_id, revoke = TRUE)}: remove local usability first,
 then return separate \code{local} and \code{remote} revocation results.
+For token targets, \code{remote$access} summarizes all acquired API tokens;
+incomplete or failed cleanup takes priority over successful cleanup.
 \item \code{disconnect_all(revoke = TRUE)}: cancel pending authorizations and disconnect
 this owner's stored connections; return a list of results.
-\item \code{logout(revoke = TRUE, reload = TRUE)}: invalidate the local owner/session
-generation first, disconnect its connections, and normally reload the UI.
+\item \code{logout(revoke = TRUE, reload = TRUE)}: end the local owner session,
+disconnect its connections, and normally reload the UI.
 This does not log the user out of the external OAuth provider or the app's
 own account authentication system.
 \item \code{errors()}: reactive list of per-client module error codes, with no raw
@@ -55,26 +64,49 @@ provider text. An ended owner is reported as \code{owner_unavailable}.
 }
 }
 \description{
-Call once inside \code{server()} with the manager and ID used by
-\code{\link[=oauth_connections_ui]{oauth_connections_ui()}}. The returned methods select stored connections by
-opaque IDs and recheck the local owner for every operation. Tokens are kept
-on the server and are not returned by summaries.
+Let users connect several accounts or services, choose a saved connection,
+and call its API from your Shiny server. Call this once inside \code{server()} with
+the manager and ID used by \code{\link[=oauth_connections_ui]{oauth_connections_ui()}}. Connection summaries show
+status without exposing tokens; server code can obtain a current token from
+the selected connection when another R package needs it.
 }
 \details{
-References expire with this Shiny session even when their stored grants survive.
-A new session obtains new references after owner verification. The manager
-coordinates refresh across its connections. Refresh preserves the original
-authentication time and retention expiry.
+Use \code{auth$connections()} to populate a selection control, then
+\code{connection <- auth$connection(selected_id)} for the chosen account.
+\code{connection$request()} calls a configured API; \code{connection$access_token()}
+supplies a current token for another R package. See
+\code{vignette("multiple-authorizations", package = "shinyOAuth")}
+(\href{https://lukakoning.github.io/shinyOAuth/articles/multiple-authorizations.html}{online guide})
+for a complete app and \code{vignette("external-integrations", package = "shinyOAuth")}
+(\href{https://lukakoning.github.io/shinyOAuth/articles/external-integrations.html}{online guide})
+for API client and database examples.
+}
+\section{Advanced lifetime and refresh behavior}{
+
+Each Shiny session needs its own connection references, even when the manager
+retains the saved authorizations. A new session obtains these after owner
+verification. The manager coordinates refresh across its connections without
+changing the original authentication time or retention expiry.
 Reactive connection reads also recheck expiry at \code{refresh_check_interval_ms},
 including references used without \code{connections()} or \code{errors()}. These checks
-notify dependent expressions when lifecycle state changes; unchanged polling
+notify reactive expressions when connection status changes; unchanged polling
 does not rerun application requests or extend owner inactivity limits.
 Notifications to application code reflect only this owner's record changes.
-Resource requests and status reads never reset owner inactivity, including when
-reactive expressions rerun after automatic refresh. Call \code{touch()} from a user
-input event handler to count an application action as activity. Do not call it
-from polling observers or ordinary reactive readers. Connecting, explicitly
-refreshing and disconnecting also count as activity.
+Without an ID, \code{connection()} returns NULL when no authorization remains,
+selects the sole retained authorization, or raises \code{shinyOAuth_access_error}
+with reason \code{selection_required} when several remain. Expired, limited and
+uncertain authorizations count toward ambiguity; disconnected rows do not.
+
+Reactive expressions that read \code{connection()}, \verb{$access_token()} or
+\verb{$has_scopes()} do not rerun on token refresh alone if the login and permissions
+stay the same. Token acquisition never extends owner idle limits or replays
+application requests. See
+\code{vignette("external-integrations", package = "shinyOAuth")}
+(\href{https://lukakoning.github.io/shinyOAuth/articles/external-integrations.html}{online guide}).
+Resource requests and status reads do not reset owner inactivity, including
+reactive reads after automatic refresh. \code{touch()} explicitly records activity,
+for example from an input event handler. Connecting, explicitly refreshing and
+disconnecting also count as activity.
 
 Remote revocation is best effort: at most ten seconds per disconnect/logout
 batch, at most two seconds and one HTTP attempt per credential. Results are
@@ -85,17 +117,17 @@ A provider may revoke an entire authorization grant or related credentials
 (RFC 7009 section 2.1). Separate connection IDs do not establish independent
 provider grants, even after repeated consent or account selection. Consequently,
 default \code{revoke = TRUE} may also end access for sibling connections or other
-applications covered by the provider's revocation policy. Use \code{revoke = FALSE}
-when preserving those authorizations is required. This also applies to
-credentials returned by work already in flight. Removed credentials remain
-valid remotely until the provider expires
-or revokes them. Local summaries and \code{is_usable()} do not detect such remote
-changes: handle API authorization failures and obtain a new authorization.
+applications covered by the provider's revocation policy. With \code{revoke = FALSE},
+disconnect removes local access without requesting remote revocation. This also
+applies to credentials returned by work already in flight. Removed credentials
+remain valid remotely until the provider expires or revokes them. Local summaries
+and \code{is_usable()} reflect local state, independently of remote provider changes.
 
-Use this API inside its owning session's reactive context. Session setup
-requires a matching HTTP Origin on the Shiny request. Raw HTTP routes cannot
+The API checks its owning session's reactive context. Session setup requires
+a matching HTTP Origin on the Shiny request. Raw HTTP routes cannot
 import credentials or select an owner. The manager supports one R process.
 }
+
 \examples{
 # Replace this example provider and client ID with your registered application.
 provider <- oauth_provider(

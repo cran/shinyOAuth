@@ -1,55 +1,45 @@
 #' Set up a Shiny UI for shinyOAuth
 #'
 #' @description
-#' Wrap your complete UI in `oauth_ui()` when using [oauth_module_server()].
-#' It adds the browser code needed for login and protects callback responses
-#' from caching and referrer disclosure. Supply `id` and `client` to accept
-#' query callbacks before rendering any application UI or scripts.
+#' Adds browser setup for [oauth_module_server()] and handles the provider's
+#' return before showing the app. The UI wrapper and server module share the
+#' same `id` and `client`.
 #'
 #' @details
-#' Build the page as usual, for example with `fluidPage()`, then use
-#' `ui <- oauth_ui(ui, id = "auth", client = client)`, using the same module
-#' ID and client as the server. Pass the result to [shiny::shinyApp()]. UI functions
-#' are supported too, including functions accepting the Shiny request.
-#' This wrapper includes [use_shinyOAuth()] setup.
-#' With `client`, it also serves client-hosted Request Objects at the app root
-#' using independent, single-use handles. Shared-worker apps need a shared
-#' `client@state_store` with atomic `take()`; a memory store supports one process.
+#' The wrapper accepts a complete UI object or a UI function, including one
+#' accepting the Shiny request. It includes [use_shinyOAuth()] and returns a UI
+#' function for [shiny::shinyApp()]. [oauth_form_post_ui()] provides the equivalent
+#' handling for POST returns (`response_mode = "form_post"` or `"form_post.jwt"`).
+#' Callback paths below the app root require `uiPattern = ".*"` in
+#' [shiny::shinyApp()] so Shiny routes those requests to the wrapper.
 #'
-#' For `response_mode = "form_post"` or `"form_post.jwt"`, use
-#' [oauth_form_post_ui()] instead; it includes this setup and accepts POST
-#' callbacks.
+#' @section Several login modules:
+#' A registry such as `clients = list(auth_a = client_a, auth_b = client_b)`
+#' replaces the single `id` and `client` pair. Names match the server module IDs;
+#' one wrapper handles all configured query and POST routes.
 #'
-#' GET callbacks are validated and sealed into short-lived, single-use bridge
-#' handles in the client's state store, then redirected to a clean URL before
-#' application HTML is rendered. Logical state is consumed only after the
-#' Shiny module verifies browser binding. The storage requirements and quotas
-#' are the same as [oauth_form_post_ui()]. Register any fixed application query
-#' parameters in `client@redirect_uri`; other inbound parameters are discarded.
-#' For non-root callback paths use `uiPattern = ".*"` in [shiny::shinyApp()].
+#' @section Advanced routing and storage:
+#' Each client in a registry must select a multi-server defense. Shared routes
+#' require `authorization_server_mode = "multi_issuer"` and distinct trusted
+#' issuers. An RFC 9207 `iss` or signed JARM issuer selects the configured client;
+#' the callback is then fully verified. Encrypted JARM on a shared route needs an
+#' outer `iss` identifying one configured issuer, which the inner signed response
+#' must match.
 #'
-#' For multiple providers, supply `clients = list(auth_a = client_a,
-#' auth_b = client_b)` instead of `id` and `client`. Names are the server module
-#' IDs. The registry accepts query and form-post callbacks on configured routes.
-#' Each client must select a multi-server defense. Shared routes require
-#' `authorization_server_mode = "multi_issuer"` and distinct trusted issuers.
-#' An RFC 9207 `iss` or signed JARM issuer selects the configured client; the
-#' complete callback is then verified before a bridge handle is stored.
-#' Encrypted JARM on a shared route requires an outer `iss` identifying one
-#' distinct configured issuer. The decrypted, signed response must match it.
-#' Do not nest wrappers to route multiple providers.
+#' Callbacks use short-lived, single-use state-store records and a clean
+#' continuation URL before application HTML or scripts load. Shared workers need
+#' a shared state store with atomic consumption; see [oauth_form_post_ui()] and
+#' [custom_cache()]. Continuation URLs retain only application query parameters
+#' registered in `redirect_uri`. Client-hosted Request Objects also
+#' use this store and are served at the app root.
 #'
-#' Without `id` and `client`, ordinary pages still render, but raw OAuth GET
-#' callbacks fail closed with a setup error. Earlier `oauth_ui(ui)` query-flow
-#' applications must add those arguments. When integrating [use_shinyOAuth()]
-#' directly, provide an equivalent dedicated callback endpoint: third-party or
-#' application scripts must not execute on an unsanitized callback page.
+#' Without `id` and `client`, ordinary pages render but raw login callbacks are
+#' rejected. Callback handling in a custom [use_shinyOAuth()] integration belongs
+#' to its HTTP layer; the dependency alone does not process callbacks.
 #'
-#' HTML responses include `Cache-Control: no-store`, `Pragma: no-cache`, and
-#' `Referrer-Policy: no-referrer`. The browser reads these headers
-#' before loading page resources. The meta tag from [use_shinyOAuth()] takes
-#' effect only once the browser reads that tag, so it may miss early resource
-#' requests. You can also set the same HTTP header at your web server.
+#' The wrapper sets no-store cache headers and `Referrer-Policy: no-referrer`
+#' before page resources load. A meta tag alone may be read too late to protect
+#' early requests. A web server may set the same headers.
 #'
 #' @param base_ui Your app's complete UI, such as a `fluidPage()` or `tagList()`.
 #'   Can also be a UI function, optionally accepting the Shiny request.
@@ -63,15 +53,13 @@
 #' @seealso [oauth_module_server()], [oauth_form_post_ui()], [use_shinyOAuth()]
 #' @export
 #' @examples
-#' ui <- oauth_ui(
-#'   shiny::fluidPage(
-#'     shiny::h2("My app"),
-#'     shiny::uiOutput("login")
-#'   )
+#' base_ui <- shiny::fluidPage(
+#'   shiny::h2("My app"),
+#'   shiny::uiOutput("login")
 #' )
 #'
-#' # After creating your OAuth client, enable the callback bridge:
-#' # ui <- oauth_ui(ui, id = "auth", client = client)
+#' # After creating your OAuth client, wrap the UI once with callback handling:
+#' # ui <- oauth_ui(base_ui, id = "auth", client = client)
 #' # Use this UI with your app's server function:
 #' # shiny::shinyApp(ui = ui, server = server)
 oauth_ui <- function(

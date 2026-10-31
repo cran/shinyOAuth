@@ -1,26 +1,19 @@
-#' Configure several independently managed OAuth connections
+#' Manage several OAuth connections in one Shiny app
 #'
-#' Create one manager outside `server()` for a named set of client/API
-#' configurations from [oauth_client()] or [smart_client()]. Use [oauth_connections_ui()] to handle
-#' callbacks and [oauth_connections_server()] for each Shiny session. Each
-#' successful authorization creates a separate connection, including repeated
-#' authorizations at the same client.
-#' Connections are independent local records. Providers may reuse an upstream
-#' grant, so revoking one can invalidate tokens held by other connections.
-#' Within a manager, refreshes sharing one credential are serialized. Rotation
-#' or an uncertain refresh invalidates other records holding the same credential;
-#' authorize those records again. Their identity and permissions are never
-#' replaced by another connection's response. Successful revocation also
-#' invalidates known copies of that credential. Distinct tokens may still share
-#' an upstream grant whose revocation effects the manager cannot predict.
-#' Retired credential digests survive connection replacement and expiry for at
-#' least the store's maximum age and the longest client state lifetime. A separate
-#' registry holds at most 10,000 digests or pending reservations. A full registry
-#' rejects refresh or skips remote revocation before sending credentials; it does
-#' not evict retirement evidence. Existing unrelated access remains usable.
+#' Let users connect several services or accounts in one Shiny app. Create the
+#' manager outside `server()` with named clients from [oauth_client()] or
+#' [smart_client()], then use [oauth_connections_ui()] and
+#' [oauth_connections_server()] to display and use their saved connections.
+#'
+#' By default, connections last for one Shiny session. Optional browser or local
+#' account retention can restore them after navigation. See
+#' `vignette("multiple-authorizations", package = "shinyOAuth")`
+#' ([online guide](https://lukakoning.github.io/shinyOAuth/articles/multiple-authorizations.html))
+#' for a complete example.
 #'
 #' @param clients Non-empty named list of [OAuthClient] objects, at most 64.
-#'   Each client must configure non-empty `resource_bases`. Names select local
+#'   `resource_bases` is required only for connection `$request()` calls; clients
+#'   used solely to supply tokens to an SDK can omit it. Names select local
 #'   configurations (for example `hospital_a`), independently of OAuth `client_id`:
 #'   a letter followed by letters, digits, `_` or `-`, at most 64 characters.
 #' @param app_origin Public application origin, including a non-default port.
@@ -40,8 +33,7 @@
 #'   distinct routes. Routing never substitutes for callback authentication.
 #' @param retention `"shiny"` (default) discards connections at Shiny session end.
 #'   `"browser"` restores the browser owner's connections after navigation;
-#'   `"account"` uses a trusted local application login. Retention does not request
-#'   refresh tokens or extend provider authorization.
+#'   `"account"` uses a trusted local application login.
 #' @param store A store from [oauth_connection_store_memory()]. Required for
 #'   retained modes; session-only mode creates a memory store by default. Only
 #'   the supplied memory store in one R process is supported.
@@ -49,26 +41,36 @@
 #'   retained mode. Must be `NULL` for session-only retention.
 #' @param keys Named list with `credentials` and `owner`, each a deployment-held
 #'   raw vector of 32 bytes. Required for retained modes. Session-only mode creates
-#'   ephemeral keys if omitted. Keep these keys outside credential storage.
+#'   ephemeral keys if omitted. Keys are held by the manager, separately from
+#'   the ciphertext-only connection store.
 #' @param retention_seconds Maximum lifetime of each stored grant, in seconds.
 #'   Positive and finite, no larger than the store's `max_age`. Refresh never
 #'   resets it. Browser retention is also capped by the owner's absolute expiry.
 #' @return An `OAuthConnections` server-side configuration object. Printing shows
-#'   only the retention mode and client count. It contains client configuration
-#'   and deployment keys and must never be sent to the browser.
+#'   only the retention mode and client count. It holds client configuration
+#'   and deployment keys for the UI and server modules.
 #' @details
-#' A manager is bound to one UI/server module ID and one public origin. Create
-#' another manager for another namespace. The memory store and owner registries
-#' survive Shiny sessions, not R restarts; copies in another R process fail closed.
+#' The manager's named clients select the configuration for each login.
+#' Connections are separate local records, but the provider may reuse one grant;
+#' revoking a connection can therefore affect other tokens from that grant.
+#'
+#' @section Advanced deployment and shared credentials:
+#' Refreshes using one shared credential are coordinated. Rotation or an
+#' uncertain refresh can require other connections sharing that credential to
+#' reconnect; one connection's response never replaces another's identity or
+#' permissions. Revocation can also affect related provider grants.
+#'
+#' A manager is bound to one UI/server module ID and one public origin.
+#' The memory store and owner registries
+#' survive Shiny sessions, not R restarts. Copies in another R process are rejected.
 #'
 #' In session-only mode, a pending authorization survives navigation through the
 #' existing single-use OAuth state and browser binding, while existing grants are
 #' discarded with the old Shiny session. Browser/account mode additionally binds
 #' authorization to the initiating local owner and its session generation.
 #'
-#' These are optional package interfaces, not SMART protocol objects. This manager
-#' supports generic OAuth clients and the SMART discovery, scope and launch
-#' policies configured by [smart_client()].
+#' The manager supports generic OAuth clients and the SMART discovery, scope and
+#' launch policies configured by [smart_client()].
 #' @seealso [oauth_connections_ui()], [oauth_connections_server()]
 #' @example inst/examples/oauth_connections.R
 #' @export
@@ -222,6 +224,8 @@ oauth_connections <- function(
   state[["credential_records"]] <- new.env(parent = emptyenv())
   state[["credential_retirements"]] <- new.env(parent = emptyenv())
   state[["credential_flights"]] <- new.env(parent = emptyenv())
+  state[["authorization_metadata"]] <- new.env(parent = emptyenv())
+  state[["lifecycle_metadata"]] <- new.env(parent = emptyenv())
   manager <- new.env(parent = emptyenv())
   for (name in c(
     "clients",
@@ -355,7 +359,13 @@ connection_manager_signal <- function(manager, owner) {
 # At most ten seconds for a batch, with a single attempt per credential. Report
 # remote acceptance separately: a successful revocation response does not prove
 # that the provider previously recognized the token (RFC 7009 section 2.2).
-connection_manager_revoke <- function(manager, client, token, deadline) {
+connection_manager_revoke <- function(
+  manager,
+  client,
+  token,
+  deadline,
+  kinds = c("refresh", "access")
+) {
   if (is.null(token)) {
     return(list(refresh = "not_attempted", access = "not_attempted"))
   }
@@ -384,6 +394,9 @@ connection_manager_revoke <- function(manager, client, token, deadline) {
     return(list(refresh = "not_attempted", access = "not_attempted"))
   }
   result <- lapply(c("refresh", "access"), function(which) {
+    if (!which %in% kinds) {
+      return("not_attempted")
+    }
     remaining <- deadline - as.numeric(Sys.time())
     if (remaining <= 0) {
       return("not_attempted")
@@ -423,7 +436,18 @@ connection_manager_revoke <- function(manager, client, token, deadline) {
   stats::setNames(result, c("refresh", "access"))
 }
 
-connection_manager_controller <- function(manager, session) {
+# Missing credentials need no remote cleanup. All other incomplete outcomes
+# take precedence over acceptance, including an exhausted batch deadline.
+connection_revocation_outcome <- function(outcomes) {
+  severity <- c("failed", "not_attempted", "unsupported", "accepted", "missing")
+  severity[severity %in% outcomes][[1L]]
+}
+
+connection_manager_controller <- function(
+  manager,
+  session,
+  refresh_lead_seconds = 60
+) {
   connection_manager_check(manager)
   root <- connection_session_root(session)
   if (
@@ -535,6 +559,7 @@ connection_manager_controller <- function(manager, session) {
     }
   }
   launch_queue <- new.env(parent = emptyenv())
+  reauthorization_queue <- new.env(parent = emptyenv())
   resume_launch <- function(id) {
     verified <- guard(touch = TRUE)
     if (!is_valid_string(id) || !grepl("^[A-Za-z0-9_-]{32}$", id)) {
@@ -555,13 +580,8 @@ connection_manager_controller <- function(manager, session) {
     launch_queue[[launch[["client"]]]] <- entry
     launch[["client"]]
   }
-  prepare <- function(client_name) {
-    verified <- guard(touch = TRUE)
+  make_context <- function(client_name, verified, replacement = NULL) {
     client <- client_for(client_name)
-    prune_pending()
-    if (length(state[["pending"]]) >= 1000L) {
-      err_token("Pending connection capacity reached")
-    }
     context <- list(
       version = 1L,
       manager = state[["id"]],
@@ -584,6 +604,27 @@ connection_manager_controller <- function(manager, session) {
         as.numeric(Sys.time()) + client@state_payload_max_age
       )
     )
+    if (!is.null(replacement)) {
+      context[["requested_scopes"]] <- replacement[["scopes"]]
+      context[["accepted_extra_scopes"]] <- replacement[["extra_scopes"]]
+      context[["target_limits"]] <- replacement[["target_limits"]]
+      context[["replaces_connection_id"]] <- replacement[["id"]]
+    }
+    authorization_context_json(context)
+    context
+  }
+  prepare <- function(client_name) {
+    verified <- guard(touch = TRUE)
+    client <- client_for(client_name)
+    prune_pending()
+    if (length(state[["pending"]]) >= 1000L) {
+      err_token("Pending connection capacity reached")
+    }
+    replacement <- reauthorization_queue[[client_name]]
+    context <- make_context(client_name, verified, replacement)
+    if (!is.null(replacement)) {
+      rm(list = client_name, envir = reauthorization_queue)
+    }
     launch_entry <- NULL
     if (identical(client@smart[["launch"]], "ehr")) {
       launch_entry <- launch_queue[[client_name]]
@@ -657,7 +698,25 @@ connection_manager_controller <- function(manager, session) {
     if (!validate(context)) {
       err_token("Managed authorization owner is unavailable")
     }
+    # Callback JSON preserves values but turns scope vectors into lists. The
+    # exact context was verified above; recover its original server-side types.
+    context <- state[["pending"]][[context[["transaction"]]]][["context"]]
     client <- client_for(context[["client"]])
+    if (
+      !token_targets_configured(client) &&
+        (!is.null(context[["requested_scopes"]]) ||
+          !is.null(context[["accepted_extra_scopes"]]))
+    ) {
+      validate_refresh_scope_grant(
+        client,
+        token@granted_scopes,
+        list(
+          scopes = context[["requested_scopes"]],
+          required_scopes = client@required_scopes,
+          accepted_extra_scopes = context[["accepted_extra_scopes"]]
+        )
+      )
+    }
     connection_credential_prune(manager)
     if (
       connection_credential_unusable(
@@ -670,13 +729,27 @@ connection_manager_controller <- function(manager, session) {
       )
     }
     id <- random_urlsafe(32L)
+    targets <- token_target_bundle(client, token, context[["target_limits"]])
+    authorization_scopes <- if (is.null(targets)) {
+      authorization_retained_scopes(
+        client,
+        token,
+        context[["requested_scopes"]] %||% effective_client_scopes(client)
+      )
+    } else {
+      NULL
+    }
     sealed <- connection_credentials_seal(
       token,
       owner[["id"]],
       id,
       client,
       manager[["keys"]][["credentials"]],
-      authenticated_at
+      authenticated_at,
+      refresh_scope_narrowed = !is.null(context[["requested_scopes"]]) ||
+        !is.null(context[["accepted_extra_scopes"]]),
+      targets = targets,
+      authorization_scopes = authorization_scopes
     )
     if (!validate(context)) {
       err_token("Managed authorization owner is unavailable")
@@ -703,11 +776,20 @@ connection_manager_controller <- function(manager, session) {
     if (is.null(record)) {
       err_token("Connection credentials could not be committed")
     }
-    connection_credential_track(manager, record, token)
+    connection_credential_track(manager, record, token, targets)
+    state[["authorization_metadata"]][[id]] <- list(
+      scopes = authorization_scopes %||% token@granted_scopes,
+      extra_scopes = authorization_extra_scopes(client, token),
+      scope_narrowed = !is.null(context[["requested_scopes"]]) ||
+        !is.null(context[["accepted_extra_scopes"]]),
+      target_limits = targets[["limits"]],
+      expires_at = record[["expires_at"]],
+      replaces_connection_id = context[["replaces_connection_id"]]
+    )
     signal()
     invisible(TRUE)
   }
-  decode <- function(record) {
+  decode <- function(record, checked_fingerprint = NULL) {
     client <- client_for(record[["client"]], check = FALSE)
     result <- list(
       client = client,
@@ -715,6 +797,9 @@ connection_manager_controller <- function(manager, session) {
       status = record[["status"]],
       stored = record
     )
+    result[["replaces_connection_id"]] <- state[[
+      "authorization_metadata"
+    ]][[record[["id"]]]][["replaces_connection_id"]]
     if (!identical(record[["status"]], "active")) {
       return(result)
     }
@@ -726,7 +811,11 @@ connection_manager_controller <- function(manager, session) {
           record[["id"]],
           client,
           manager[["keys"]][["credentials"]],
-          expected_fingerprint = manager[["fingerprints"]][[record[["client"]]]]
+          expected_fingerprint = manager[["fingerprints"]][[record[[
+            "client"
+          ]]]],
+          checked_fingerprint = checked_fingerprint %||%
+            connection_client_fingerprint(client)
         )
       },
       error = function(...) NULL
@@ -744,16 +833,59 @@ connection_manager_controller <- function(manager, session) {
         result[["stored"]] <- store[["read"]](owner[["id"]], record[["id"]])
         return(result)
       }
-      connection_credential_track(manager, record, value[["token"]])
+      if (!is.null(value[["targets"]])) {
+        value[["targets"]][["tokens"]] <- Filter(
+          function(entry) {
+            !connection_credential_unusable(
+              manager,
+              connection_credential_keys(manager, client, entry)
+            )
+          },
+          value[["targets"]][["tokens"]]
+        )
+      }
+      connection_credential_track(
+        manager,
+        record,
+        value[["token"]],
+        value[["targets"]]
+      )
       result[["token"]] <- value[["token"]]
+      result[["targets"]] <- value[["targets"]]
+      result[["authorization_scopes"]] <- value[["authorization_scopes"]]
       result[["authenticated_at"]] <- value[["authenticated_at"]]
       result[["refresh_scope_narrowed"]] <- value[["refresh_scope_narrowed"]]
+      # Reconstruct replacement policy from authenticated storage before a
+      # refresh can make the credential unavailable (including after restart).
+      metadata <- state[["authorization_metadata"]][[record[["id"]]]] %||%
+        list()
+      metadata[["scopes"]] <- value[["authorization_scopes"]]
+      metadata[["scope_narrowed"]] <- value[["refresh_scope_narrowed"]]
+      metadata[["extra_scopes"]] <- authorization_extra_scopes(
+        client,
+        value[["token"]]
+      )
+      metadata[["target_limits"]] <- value[["targets"]][["limits"]]
+      metadata[["expires_at"]] <- record[["expires_at"]]
+      state[["authorization_metadata"]][[record[["id"]]]] <- metadata
     }
     result
   }
+  prune_records <- function() {
+    now <- as.numeric(Sys.time())
+    for (name in c("authorization_metadata", "lifecycle_metadata")) {
+      entries <- state[[name]]
+      for (key in ls(entries, all.names = TRUE)) {
+        if (entries[[key]][["expires_at"]] <= now) {
+          rm(list = key, envir = entries)
+        }
+      }
+    }
+    connection_credential_prune(manager)
+  }
   read <- function(id, touch = FALSE) {
     guard(touch)
-    connection_credential_prune(manager)
+    prune_records()
     record <- store[["read"]](owner[["id"]], id)
     if (is.null(record)) {
       err_token("Connection is unavailable")
@@ -762,7 +894,124 @@ connection_manager_controller <- function(manager, session) {
   }
   records <- function() {
     guard()
-    lapply(store[["list"]](owner[["id"]]), function(row) read(row[["id"]]))
+    prune_records()
+    rows <- store[["list"]](owner[["id"]])
+    fingerprints <- batch_fingerprints(rows)
+    lapply(rows, function(row) {
+      record <- store[["read"]](owner[["id"]], row[["id"]])
+      if (is.null(record)) {
+        err_token("Connection is unavailable")
+      }
+      decode(record, fingerprints[[row[["client"]]]])
+    })
+  }
+  # A batch is synchronous and cannot yield. Recheck current client policy once
+  # per client here; individual credential/request/refresh reads still recheck it.
+  batch_fingerprints <- function(rows) {
+    clients <- unique(vapply(rows, function(row) row[["client"]], character(1)))
+    stats::setNames(
+      lapply(clients, function(name) {
+        tryCatch(
+          connection_client_fingerprint(client_for(name, check = FALSE)),
+          error = function(...) NA_character_
+        )
+      }),
+      clients
+    )
+  }
+  poll <- function() {
+    guard()
+    prune_records()
+    rows <- store[["list"]](owner[["id"]])
+    fingerprints <- batch_fingerprints(rows)
+    key_id <- raw_to_hex_lower(openssl::sha256(connection_credential_key(
+      manager[["keys"]][["credentials"]]
+    )))
+    cache <- state[["lifecycle_metadata"]]
+    retained <- vapply(rows, function(row) row[["id"]], character(1))
+    cached_ids <- ls(cache, all.names = TRUE)
+    owned <- vapply(
+      cached_ids,
+      function(id) {
+        identical(cache[[id]][["owner"]], owner[["id"]])
+      },
+      logical(1)
+    )
+    removed <- setdiff(cached_ids[owned], retained)
+    if (length(removed)) {
+      rm(list = removed, envir = cache)
+    }
+    Filter(
+      Negate(is.null),
+      lapply(rows, function(row) {
+        id <- row[["id"]]
+        fingerprint <- fingerprints[[row[["client"]]]]
+        cached <- cache[[id]]
+        now <- as.numeric(Sys.time())
+        if (
+          !is.null(cached) &&
+            identical(cached[["owner"]], owner[["id"]]) &&
+            identical(cached[["row"]], row) &&
+            identical(cached[["fingerprint"]], fingerprint) &&
+            identical(cached[["key_id"]], key_id) &&
+            now < cached[["deadline"]] &&
+            !connection_credential_unusable(manager, cached[["keys"]]) &&
+            !any(vapply(
+              cached[["secondary"]],
+              function(key) {
+                connection_credential_unusable(manager, list(access = key))
+              },
+              logical(1)
+            ))
+        ) {
+          return(cached[["summary"]])
+        }
+        stored <- store[["read"]](owner[["id"]], id)
+        if (is.null(stored)) {
+          return(NULL)
+        }
+        record <- decode(stored, fingerprint)
+        token <- record[["token"]]
+        expiry <- if (is.null(token)) NA_real_ else token@expires_at
+        deadlines <- c(
+          expiry,
+          vapply(
+            record[["targets"]][["tokens"]],
+            function(token) {
+              token@expires_at
+            },
+            numeric(1)
+          )
+        )
+        deadlines <- deadlines[!is.na(deadlines) & deadlines > now]
+        summary <- list(
+          stored = row,
+          status = record[["status"]],
+          lifecycle_status = connection_record_status(record),
+          refresh_at = expiry,
+          refreshable = !is.null(token) && is_valid_string(token@refresh_token)
+        )
+        tracked <- state[["credential_records"]][[id]]
+        # Shared across sessions, but retain only lifecycle data and keyed credential
+        # digests. Tokens and decrypted envelopes are never cached here.
+        cache[[id]] <- list(
+          owner = owner[["id"]],
+          expires_at = row[["expires_at"]],
+          row = row,
+          fingerprint = fingerprint,
+          key_id = key_id,
+          deadline = min(c(Inf, deadlines)),
+          summary = summary,
+          keys = if (is.null(token)) NULL else tracked[["keys"]],
+          secondary = if (is.null(token)) {
+            character()
+          } else {
+            tracked[["secondary_access"]]
+          }
+        )
+        summary
+      })
+    )
   }
   discard <- function(client_name, token) {
     connection_manager_revoke(
@@ -815,13 +1064,29 @@ connection_manager_controller <- function(manager, session) {
     }
     invisible(NULL)
   }
-  refresh <- function(id, async = FALSE, touch = TRUE, scopes = NULL) {
+  refresh <- function(
+    id,
+    async = FALSE,
+    touch = TRUE,
+    scopes = NULL,
+    target = NULL
+  ) {
     for (key in ls(next_refresh, all.names = TRUE)) {
       if (next_refresh[[key]] <= as.numeric(Sys.time())) {
         rm(list = key, envir = next_refresh)
       }
     }
     record <- read(id, touch)
+    target <- token_target_name(record[["client"]], target)
+    if (!is.null(target) && identical(record[["status"]], "refreshing")) {
+      return(acquire(
+        id,
+        async = async,
+        target = target,
+        scopes = scopes,
+        touch = touch
+      ))
+    }
     if (
       !identical(record[["status"]], "active") || is.null(record[["token"]])
     ) {
@@ -846,28 +1111,77 @@ connection_manager_controller <- function(manager, session) {
       # Re-read after completion. A queued call must never capture and later
       # dispatch the old token snapshot, even if the earlier call failed.
       resume <- function(...) {
-        refresh(id, async = TRUE, touch = touch, scopes = scopes)
+        refresh(
+          id,
+          async = TRUE,
+          touch = touch,
+          scopes = scopes,
+          target = target
+        )
       }
       return(promises::then(outstanding[["promise"]], resume, resume))
+    }
+    pacing_key <- paste0(credential, if (!is.null(target)) paste0(":", target))
+    retry_after_key <- paste0("retry-after:", credential)
+    if (as.numeric(Sys.time()) < (next_refresh[[retry_after_key]] %||% 0)) {
+      connection_access_error("refresh_unavailable")
     }
     # Automatic retries share the physical credential's cooldown across owners,
     # records and sessions, including calls resumed after an in-flight failure.
     if (
-      !touch && as.numeric(Sys.time()) < (next_refresh[[credential]] %||% 0)
+      !touch && as.numeric(Sys.time()) < (next_refresh[[pacing_key]] %||% 0)
     ) {
       return(invisible(FALSE))
     }
     # Validate before taking the refresh claim or sending any credentials.
     # After explicit narrowing, automatic calls retain the accepted grant.
-    if (is.null(scopes) && isTRUE(record[["refresh_scope_narrowed"]])) {
-      scopes <- record[["token"]]@granted_scopes
+    explicit_scopes <- scopes
+    accepted_extra_scopes <- NULL
+    if (
+      is.null(target) &&
+        is.null(scopes) &&
+        isTRUE(record[["refresh_scope_narrowed"]])
+    ) {
+      accepted_extra_scopes <- authorization_extra_scopes(
+        record[["client"]],
+        record[["token"]]
+      )
+      scopes <- if (client_uses_smart_scopes(record[["client"]])) {
+        authorization_retained_scopes(
+          record[["client"]],
+          record[["token"]],
+          record[["authorization_scopes"]]
+        )
+      } else {
+        setdiff(record[["token"]]@granted_scopes, accepted_extra_scopes)
+      }
     }
-    scope_request <- if (!is.null(scopes)) {
+    target_request <- if (!is.null(target)) {
+      token_target_refresh_request(
+        record[["client"]],
+        target,
+        record[["targets"]][["limits"]],
+        scopes
+      )
+    } else {
+      NULL
+    }
+    source <- if (is.null(target_request)) {
+      record[["token"]]
+    } else {
+      token_target_refresh_source(record, target_request)
+    }
+    scope_request <- if (is.null(target) && !is.null(scopes)) {
       refresh_scope_request(
         record[["client"]],
         record[["token"]],
         scopes,
-        record[["client"]]@required_scopes
+        record[["client"]]@required_scopes,
+        accepted_extra_scopes,
+        refresh_consent = authorization_refresh_consent(
+          record[["client"]],
+          record[["authorization_scopes"]]
+        )
       )
     } else {
       NULL
@@ -889,6 +1203,9 @@ connection_manager_controller <- function(manager, session) {
       err_token("Connection refresh is already in progress or unavailable")
     }
     flight <- new.env(parent = emptyenv())
+    flight[["connection_id"]] <- id
+    flight[["target"]] <- target
+    flight[["scopes"]] <- scopes
     flight[["expires_at"]] <- claim[["operation_expires_at"]]
     flights[[credential]] <- flight
     release <- function() {
@@ -899,10 +1216,19 @@ connection_manager_controller <- function(manager, session) {
       cleanup[["finish"]]()
     }
     on.exit(if (!deferred) release(), add = TRUE)
-    next_refresh[[credential]] <- as.numeric(Sys.time()) + 30
+    next_refresh[[pacing_key]] <- as.numeric(Sys.time()) + 30
     signal()
     fail <- function(error) {
-      next_refresh[[credential]] <- as.numeric(Sys.time()) + 30
+      next_refresh[[pacing_key]] <- as.numeric(Sys.time()) + 30
+      retry_after <- refresh_condition_retry_after(error)
+      if (is.finite(retry_after)) {
+        # Share provider backpressure across target names, retained records and
+        # owners using this credential. Explicit refresh cannot bypass it.
+        next_refresh[[retry_after_key]] <- max(
+          next_refresh[[retry_after_key]] %||% 0,
+          as.numeric(Sys.time()) + retry_after
+        )
+      }
       outcome <- error[["refresh_credential_outcome"]] %||% "possibly_consumed"
       if (!outcome %in% c("not_consumed", "possibly_consumed", "consumed")) {
         outcome <- "possibly_consumed"
@@ -924,8 +1250,28 @@ connection_manager_controller <- function(manager, session) {
       err_token("Connection refresh failed; inspect its status before retrying")
     }
     succeed <- function(token) {
+      if (inherits(token, "shinyOAuth_rejected_refresh")) {
+        rejection <- token[["error"]]
+        rejected <- token[["token"]]
+        on.exit(
+          {
+            # An unrotated rejected response can leave the original grant
+            # usable. Do not revoke it unless ownership or local access ended.
+            retained <- tryCatch(read(id), error = function(...) NULL)
+            if (
+              !refresh_credential_retryable(rejection) ||
+                !identical(retained[["status"]], "active")
+            ) {
+              cleanup[["discard"]](rejected)
+            }
+          },
+          add = TRUE
+        )
+        fail(rejection)
+      }
       committed <- FALSE
-      on.exit(if (!committed) cleanup[["discard"]](token), add = TRUE)
+      fresh <- token
+      on.exit(if (!committed) cleanup[["discard"]](fresh), add = TRUE)
       tryCatch(
         {
           validate_token_acceptance_deadline(token)
@@ -944,6 +1290,36 @@ connection_manager_controller <- function(manager, session) {
           ) {
             err_token("Shared refresh credential is no longer usable")
           }
+          targets <- record[["targets"]]
+          if (
+            !is.null(target_request) &&
+              connection_credential_unusable(
+                manager,
+                connection_credential_keys(manager, record[["client"]], token)
+              )
+          ) {
+            err_token("Returned target credentials are retired")
+          }
+          if (!is.null(target_request)) {
+            updated <- token_target_commit(
+              record[["client"]],
+              record[["token"]],
+              targets,
+              token,
+              target_request
+            )
+            token <- updated[["token"]]
+            targets <- updated[["targets"]]
+          }
+          authorization_scopes <- if (is.null(targets)) {
+            authorization_retained_scopes(
+              record[["client"]],
+              token,
+              explicit_scopes %||% record[["authorization_scopes"]]
+            )
+          } else {
+            NULL
+          }
           sealed <- connection_credentials_seal(
             token,
             owner[["id"]],
@@ -951,7 +1327,9 @@ connection_manager_controller <- function(manager, session) {
             record[["client"]],
             manager[["keys"]][["credentials"]],
             record[["authenticated_at"]],
-            refresh_scope_narrowed = !is.null(scope_request)
+            refresh_scope_narrowed = !is.null(scope_request),
+            targets = targets,
+            authorization_scopes = authorization_scopes
           )
           if (is.null(verify_owner(require_session = FALSE))) {
             err_token("Connection owner is unavailable")
@@ -980,7 +1358,47 @@ connection_manager_controller <- function(manager, session) {
           if (is.null(installed)) {
             err_token("Connection refresh could not be committed")
           }
-          connection_credential_track(manager, installed, token)
+          connection_credential_track(manager, installed, token, targets)
+          metadata <- state[["authorization_metadata"]][[id]] %||% list()
+          metadata[["scopes"]] <- authorization_scopes %||% token@granted_scopes
+          metadata[["scope_narrowed"]] <- !is.null(scope_request)
+          metadata[["extra_scopes"]] <- authorization_extra_scopes(
+            record[["client"]],
+            token
+          )
+          metadata[["target_limits"]] <- targets[["limits"]]
+          metadata[["expires_at"]] <- installed[["expires_at"]]
+          state[["authorization_metadata"]][[id]] <- metadata
+          # Pace every successful refresh by the acquired token's lifetime.
+          # Keep ordinary and target bounds when the shared credential rotates.
+          now <- as.numeric(Sys.time())
+          next_attempt <- now +
+            proactive_refresh_success_delay(fresh, now, refresh_lead_seconds)
+          next_refresh[[pacing_key]] <- next_attempt
+          current_credential <- connection_credential_keys(
+            manager,
+            record[["client"]],
+            token
+          )[["refresh"]]
+          if (
+            !is.null(current_credential) &&
+              !identical(current_credential, credential)
+          ) {
+            keys <- ls(next_refresh, all.names = TRUE)
+            keys <- keys[
+              keys == credential | startsWith(keys, paste0(credential, ":"))
+            ]
+            for (key in keys) {
+              current_key <- paste0(
+                current_credential,
+                substring(key, nchar(credential) + 1L)
+              )
+              next_refresh[[current_key]] <- max(
+                next_refresh[[current_key]] %||% 0,
+                next_refresh[[key]]
+              )
+            }
+          }
           committed <- TRUE
           signal()
           TRUE
@@ -989,14 +1407,28 @@ connection_manager_controller <- function(manager, session) {
       )
     }
     result <- tryCatch(
-      if (is.null(scope_request)) {
-        refresh_token(record[["client"]], record[["token"]], async = async)
+      if (!is.null(target_request)) {
+        refresh_token_dispatch(
+          record[["client"]],
+          source,
+          async = async,
+          target_request = target_request,
+          .capture_rejected = TRUE
+        )
+      } else if (is.null(scope_request)) {
+        refresh_token_dispatch(
+          record[["client"]],
+          record[["token"]],
+          async = async,
+          .capture_rejected = TRUE
+        )
       } else {
         refresh_token_dispatch(
           record[["client"]],
           record[["token"]],
           async = async,
-          scope_request = scope_request
+          scope_request = scope_request,
+          .capture_rejected = TRUE
         )
       },
       error = fail
@@ -1012,6 +1444,55 @@ connection_manager_controller <- function(manager, session) {
     } else {
       succeed(result)
     }
+  }
+  acquire <- function(
+    id,
+    async = FALSE,
+    target = NULL,
+    scopes = NULL,
+    touch = FALSE,
+    wait_only = FALSE,
+    reuse_cached = NULL
+  ) {
+    record <- read(id)
+    target <- token_target_name(record[["client"]], target)
+    if (identical(record[["status"]], "refreshing")) {
+      for (key in ls(state[["credential_flights"]], all.names = TRUE)) {
+        flight <- state[["credential_flights"]][[key]]
+        if (
+          identical(flight[["connection_id"]], id) &&
+            isTRUE(async) &&
+            inherits(flight[["promise"]], "promise")
+        ) {
+          if (
+            wait_only ||
+              (identical(target, flight[["target"]]) &&
+                (is.null(scopes) || identical(scopes, flight[["scopes"]])))
+          ) {
+            return(flight[["promise"]])
+          }
+          resume <- function(...) {
+            if (is.function(reuse_cached) && isTRUE(reuse_cached())) {
+              return(TRUE)
+            }
+            acquire(
+              id,
+              async = TRUE,
+              touch = touch,
+              scopes = scopes,
+              target = target,
+              reuse_cached = reuse_cached
+            )
+          }
+          return(promises::then(flight[["promise"]], resume, resume))
+        }
+      }
+      connection_access_error("refresh_pending")
+    }
+    if (wait_only) {
+      return(promises::promise_resolve(TRUE))
+    }
+    refresh(id, async = async, touch = touch, scopes = scopes, target = target)
   }
   cleanup_records <- function(
     previous,
@@ -1041,9 +1522,56 @@ connection_manager_controller <- function(manager, session) {
       )
     }
     deadline <- as.numeric(Sys.time()) + 10
+    attempted <- new.env(parent = emptyenv())
+    revoke_once <- function(
+      client_name,
+      token,
+      kinds = c("refresh", "access")
+    ) {
+      client <- client_for(client_name, check = FALSE)
+      result <- list(refresh = "not_attempted", access = "not_attempted")
+      if (is.null(token)) {
+        return(result)
+      }
+      keys <- connection_credential_keys(manager, client, token)
+      keys <- lapply(kinds, function(kind) {
+        paste0(client_name, ":", kind, ":", keys[[kind]] %||% "missing")
+      })
+      names(keys) <- kinds
+      pending <- kinds[
+        !vapply(keys, exists, logical(1), envir = attempted, inherits = FALSE)
+      ]
+      if (length(pending)) {
+        response <- connection_manager_revoke(
+          manager,
+          client,
+          token,
+          deadline,
+          kinds = pending
+        )
+        for (kind in pending) {
+          attempted[[keys[[kind]]]] <- response[[kind]]
+        }
+      }
+      # Reuse the outcome even after the deadline, so aliases do not turn an
+      # accepted revocation into an incomplete result. Client contexts stay separate.
+      for (kind in kinds) {
+        result[[kind]] <- attempted[[keys[[kind]]]]
+      }
+      result
+    }
     lapply(previous, function(record) {
       remote <- "not_requested"
       if (!is.null(record)) {
+        if (
+          exists(
+            record[["id"]],
+            state[["authorization_metadata"]],
+            inherits = FALSE
+          )
+        ) {
+          rm(list = record[["id"]], envir = state[["authorization_metadata"]])
+        }
         on.exit(
           audit_event(
             "connection_disconnected",
@@ -1082,12 +1610,21 @@ connection_manager_controller <- function(manager, session) {
           ),
           error = function(...) NULL
         )
-        remote <- connection_manager_revoke(
-          manager,
-          client_for(record[["client"]], check = FALSE),
-          opened[["token"]],
-          deadline
+        remote <- revoke_once(
+          record[["client"]],
+          opened[["token"]]
         )
+        for (entry in opened[["targets"]][["tokens"]]) {
+          target_remote <- revoke_once(
+            record[["client"]],
+            entry,
+            kinds = "access"
+          )
+          remote[["access"]] <- connection_revocation_outcome(c(
+            remote[["access"]],
+            target_remote[["access"]]
+          ))
+        }
       }
       list(local = "disconnected", remote = remote)
     })
@@ -1110,12 +1647,70 @@ connection_manager_controller <- function(manager, session) {
       }
     }
     rm(list = ls(launch_queue, all.names = TRUE), envir = launch_queue)
+    rm(
+      list = ls(reauthorization_queue, all.names = TRUE),
+      envir = reauthorization_queue
+    )
     for (id in ls(state[["pending"]], all.names = TRUE)) {
       pending <- state[["pending"]][[id]]
       if (identical(pending[["initiating_owner"]], owner[["id"]])) {
         connection_router_cancel(manager, id)
       }
     }
+  }
+  reauthorize <- function(id) {
+    record <- read(id, touch = TRUE)
+    client_name <- record[["stored"]][["client"]]
+    if (identical(record[["client"]]@smart[["launch"]], "ehr")) {
+      err_config("Start a fresh EHR launch to reconnect this authorization")
+    }
+    limits <- record[["targets"]][["limits"]] %||%
+      state[["authorization_metadata"]][[id]][["target_limits"]]
+    limits <- token_target_reauthorization_limits(record[["client"]], limits)
+    scopes <- if (token_targets_configured(record[["client"]])) {
+      token_target_authorization_scopes(record[["client"]], limits)
+    } else if (!is.null(record[["token"]])) {
+      record[["authorization_scopes"]]
+    } else {
+      state[["authorization_metadata"]][[id]][["scopes"]]
+    }
+    scopes <- authorization_replacement_scopes(record[["client"]], scopes)
+    extra_scopes <- authorization_extra_scope_limit(
+      record[["client"]],
+      if (!is.null(record[["token"]])) {
+        authorization_extra_scopes(record[["client"]], record[["token"]])
+      } else {
+        state[["authorization_metadata"]][[id]][["extra_scopes"]]
+      },
+      scopes
+    )
+    # Preserve an empty bound after narrowing, including an uncertain refresh.
+    # A client that has never retained scope evidence keeps ordinary login.
+    if (
+      !length(extra_scopes) &&
+        !isTRUE(state[["authorization_metadata"]][[id]][["scope_narrowed"]])
+    ) {
+      extra_scopes <- NULL
+    }
+    replacement <- list(
+      id = id,
+      scopes = scopes,
+      extra_scopes = extra_scopes,
+      target_limits = limits
+    )
+    # Serialization must succeed before ending the current authorization.
+    # prepare() uses this same constructor when the module starts the login.
+    context <- make_context(client_name, guard(), replacement)
+    preflight_reauthorization(
+      record[["client"]],
+      scopes = scopes,
+      target_limits = limits,
+      extra_scopes = extra_scopes,
+      context = context
+    )
+    disconnect(id, revoke = FALSE)
+    reauthorization_queue[[client_name]] <- replacement
+    client_name
   }
   disconnect_all <- function(revoke = TRUE) {
     connection_manager_flag(revoke, "revoke")
@@ -1147,6 +1742,10 @@ connection_manager_controller <- function(manager, session) {
     active <<- FALSE
     on.exit(subscription[["release"]](), add = TRUE)
     rm(list = ls(launch_queue, all.names = TRUE), envir = launch_queue)
+    rm(
+      list = ls(reauthorization_queue, all.names = TRUE),
+      envir = reauthorization_queue
+    )
     if (manager[["retention"]] == "shiny") {
       mark_cleanup(FALSE)
       previous <- store[["disconnect_owner"]](owner[["id"]])
@@ -1172,8 +1771,17 @@ connection_manager_controller <- function(manager, session) {
         NULL
       },
       parameters = function(context) {
+        parameters <- if (length(context[["requested_scopes"]])) {
+          list(requested_scopes = context[["requested_scopes"]])
+        } else {
+          list()
+        }
+        parameters[["target_limits"]] <- context[["target_limits"]]
+        parameters[["accepted_extra_scopes"]] <- context[[
+          "accepted_extra_scopes"
+        ]]
         if (!identical(client_for(client_name)@smart[["launch"]], "ehr")) {
-          return(list())
+          return(parameters)
         }
         if (!validate(context)) {
           err_token("SMART launch owner is unavailable")
@@ -1190,7 +1798,7 @@ connection_manager_controller <- function(manager, session) {
         )
         pending[["launch_entry"]] <- NULL
         state[["pending"]][[context[["transaction"]]]] <- pending
-        list(launch = launch[["launch"]])
+        c(parameters, list(launch = launch[["launch"]]))
       },
       validate = function(context) {
         is.list(context) &&
@@ -1216,9 +1824,12 @@ connection_manager_controller <- function(manager, session) {
     guard = guard,
     read = read,
     records = records,
+    poll = poll,
     hooks = hooks,
     resume_launch = resume_launch,
     refresh = refresh,
+    acquire = acquire,
+    reauthorize = reauthorize,
     disconnect = disconnect,
     disconnect_all = disconnect_all,
     logout = logout,

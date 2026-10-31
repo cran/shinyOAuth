@@ -1,9 +1,9 @@
 #' Create a process-local store for retained OAuth connections
 #'
-#' Stores encrypted credential envelopes and coordinates their lifecycle across
-#' Shiny sessions in one R process. Create one store outside `server()`. This
-#' adapter does not survive process restarts and rejects use from a copied worker
-#' process. It is a connection-manager building block, not an authentication API.
+#' Stores encrypted credentials for [oauth_connections()] across Shiny sessions
+#' with browser or account retention. The store belongs to the manager rather than
+#' an individual Shiny session. Records last for the R process's lifetime;
+#' the store rejects use from a copied worker process.
 #'
 #' @param max_age Maximum record and transaction-deduplication lifetime in seconds.
 #'   Each record must also supply an earlier or equal absolute expiry.
@@ -14,12 +14,11 @@
 #'   A full store rejects creation instead of evicting another connection.
 #' @return An `OAuthConnectionStore` adapter with the methods described below.
 #' @details
-#' Methods are trusted server-side operations. The manager must validate the
-#' current owner session and generation before calling them. The opaque owner
-#' identifier scopes records and can survive session rotation; knowledge of an
-#' owner or connection ID does not authenticate a user.
-#' Records contain ciphertext only. Encryption keys stay with the manager, outside
-#' this adapter. Never expose these methods or credential imports as HTTP routes.
+#' These are low-level storage operations, called after the manager validates the
+#' current owner session and generation. The adapter scopes records by owner ID;
+#' it does not authenticate a caller from an owner or connection ID.
+#' Records contain ciphertext only. Encryption keys stay with the manager,
+#' outside this adapter.
 #'
 #' * `[["create"]](owner, id, transaction, client, fingerprint, sealed, expires_at)`
 #'   returns a record with a new revision, or `NULL` for a duplicate connection/transaction.
@@ -37,7 +36,7 @@
 #'   then returns `list(record, previous)` for bounded remote cleanup. Conflicts
 #'   return `NULL`; the caller must reload before retrying.
 #' * `[["disconnect_owner"]](owner)` tombstones all of that owner's records and returns
-#'   the previous records for bounded cleanup. Other owners are unaffected.
+#'   the previous records for bounded cleanup.
 #'
 #' Reads expire abandoned refresh claims before returning data. Tombstones and
 #' transaction IDs remain at least until the original absolute expiry so late completions

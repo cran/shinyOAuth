@@ -159,6 +159,8 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
         }
       )
     }
+    # Finalize with the propagated gates and exporter environment still active,
+    # before restoring this worker's settings from any preceding task.
     on.exit(
       .ns[["otel_end_async_parent"]](
         list(span = .otel_worker_span),
@@ -170,7 +172,8 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
           NULL
         }
       ),
-      add = TRUE
+      add = TRUE,
+      after = FALSE
     )
     .async_warnings <- list()
     .async_messages <- list()
@@ -198,6 +201,9 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
         stop(e)
       }
     )
+    if (inherits(.async_value, "shinyOAuth_rejected_refresh")) {
+      .async_error <- .async_value[["error"]]
+    }
     list(
       .shinyOAuth_async_wrapped = TRUE,
       value = .async_value,
@@ -219,7 +225,7 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
   }
 
   # Fall back to future_promise if available
-  future_available <- rlang::is_installed("promises") &&
+  future_available <- rlang::is_installed("promises", version = "1.3.3") &&
     rlang::is_installed("future") &&
     tryCatch(
       {
@@ -246,6 +252,7 @@ async_dispatch <- function(expr, args, .timeout = NULL, otel_context = NULL) {
     "No async backend available",
     c(
       "i" = "Configure mirai daemons: `mirai::daemons(2)`",
+      "i" = "The future backend requires promises >= 1.3.3",
       "i" = "Or configure a future plan: `future::plan(future::multisession)`"
     ),
     class = "shinyOAuth_no_async_backend"
@@ -305,7 +312,10 @@ async_backend_available <- function() {
   }
 
   # Check future
-  if (rlang::is_installed("promises") && rlang::is_installed("future")) {
+  if (
+    rlang::is_installed("promises", version = "1.3.3") &&
+      rlang::is_installed("future")
+  ) {
     future_ok <- tryCatch(
       {
         future::nbrOfWorkers() > 0
@@ -323,8 +333,9 @@ async_backend_available <- function() {
 #' Prepare a serialization-safe OAuthClient for async workers
 #'
 #' Replaces worker-unneeded state-store internals with a lightweight
-#' serializable cache and tests the result with [serialize()]. Used before
-#' OAuth client objects are shipped to worker processes.
+#' serializable cache, checks the JWKS cache's worker-safety contract, and tests
+#' serialization. Successful serialization alone does not make live connections
+#' usable in another process. Used before shipping clients to workers.
 #'
 #' @param client [OAuthClient] object.
 #' @return Serialization-safe OAuthClient copy, or `NULL` when cleanup is still
@@ -337,9 +348,19 @@ prepare_client_for_worker <- function(client) {
       # S7 value semantics: assignment copies the object
       worker_client <- client
       # Replace state_store with a lightweight serializable dummy.
-      # The state was already consumed on the main thread, so this cache
-      # will never be accessed in the worker.
+      # Pending state stays in the main process; callback workers receive
+      # pre-consumed values and never access this store.
       worker_client@state_store <- cachem::cache_mem(max_age = 1)
+      cache <- worker_client@provider@jwks_cache
+      declared_safe <- cache[["worker_safe"]]
+      cache_safe <- if (is.null(declared_safe)) {
+        inherits(cache, "cache_mem") || inherits(cache, "cache_disk")
+      } else {
+        isTRUE(declared_safe)
+      }
+      if (!cache_safe) {
+        return(NULL)
+      }
       # Verify the cleaned-up client can actually be serialized
       serialize(worker_client, connection = NULL)
       worker_client
@@ -347,6 +368,22 @@ prepare_client_for_worker <- function(client) {
     error = function(e) {
       NULL
     }
+  )
+}
+
+# Keep the promise API when work must remain with process-bound resources.
+dispatch_in_current_process <- function(expr, args, ...) {
+  promises::promise_resolve(eval(expr, list2env(args, parent = baseenv())))
+}
+
+warn_async_worker_fallback <- function() {
+  warn_pkg(
+    "Async operation fell back to synchronous execution",
+    c("!" = "Client components are not worker-safe or could not be serialized.",
+      "i" = "Custom JWKS caches must explicitly declare worker_safe = TRUE and reconnect resources inside each operation"),
+    class = "shinyOAuth_async_serialization_fallback",
+    .frequency = "once",
+    .frequency_id = "shinyOAuth-async-serialization-fallback"
   )
 }
 

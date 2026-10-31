@@ -32,7 +32,7 @@ OAuthClient(
   dpop_require_access_token = !is.null(dpop_private_key),
   redirect_uri = character(0),
   enforce_callback_issuer = FALSE,
-  scopes = character(0),
+  scopes = token_target_default_scopes(token_targets, provider),
   resource = character(0),
   claims = NULL,
   state_store = cachem::cache_mem(max_age = 300),
@@ -82,7 +82,10 @@ OAuthClient(
   authorization_request_encryption_enc = NULL,
   authorization_request_encryption_kid = NULL,
   authorization_request_ttl = NULL,
-  authorization_request_nbf_skew = NULL
+  authorization_request_nbf_skew = NULL,
+  token_targets = list(),
+  token_target_default = if (length(token_targets) == 1L) names(token_targets) else
+    character()
 )
 }
 \arguments{
@@ -124,7 +127,10 @@ inferred defaults must be included in that set.
 Supported values are \code{HS256}, \code{HS384}, \code{HS512} for client_secret_jwt and asymmetric algorithms
 supported for outbound signing (\code{RS256}, \code{RS384}, \code{ES256}, \code{ES384}, \code{ES512}, and
 \code{Ed25519} or legacy \code{EdDSA} with Ed25519 keys) for private keys. \code{RS512}, \code{PS256}, \code{PS384}, and \code{PS512}
-are not currently supported for outbound client assertions.}
+are not currently supported for outbound client assertions.
+Reusing an RSA key or HMAC secret requires the same signing algorithm across
+enabled profiles and endpoint overrides. Use separate keys or secrets when
+algorithms differ; see the advanced security vignette.}
 
 \item{client_assertion_audience}{Optional override for the \code{aud} claim used when building
 JWT client assertions (\code{client_secret_jwt} / \code{private_key_jwt}). By default, shinyOAuth
@@ -158,11 +164,9 @@ certificates.}
 client intends to request RFC 8705 certificate-bound access tokens when
 the provider advertises that capability. Default is \code{FALSE}.
 
-Set this to \code{TRUE} for clients that should prefer discovered
-\code{mtls_endpoint_aliases} on authorization-server requests even when
-\code{token_auth_style} itself is not an mTLS auth style, and present the
-certificate on token and protected-resource requests. Certificate/key
-configuration alone does not enable this mode.
+When \code{TRUE}, authorization-server requests prefer discovered
+\code{mtls_endpoint_aliases}, even when \code{token_auth_style} is not an mTLS auth
+style. Token and protected-resource requests present the certificate.
 
 Requires \code{mtls_client_cert_file} and \code{mtls_client_key_file}, and the
 provider must be configured with
@@ -206,10 +210,9 @@ caller-managed \code{request_uri} publication still depends on the provider
 having that URI or a matching wildcard prefix registered for the client;
 shinyOAuth cannot verify that server-side registration automatically.}
 
-\item{response_mode}{How the provider returns the login result. Leave \code{NULL}
-(default) for a normal callback with parameters in the URL; no
-\code{response_mode} parameter is then sent. Use \code{"query"} to request that
-format explicitly, or \code{"form_post"} when your provider needs an HTTP POST.
+\item{response_mode}{How the provider returns the login result. \code{NULL}
+(default) omits the parameter, using the provider's normal query callback.
+\code{"query"} explicitly requests URL parameters; \code{"form_post"} requests an HTTP POST.
 POST callbacks require \code{\link[=oauth_form_post_ui]{oauth_form_post_ui()}}.
 
 Signed responses (JWT Secured Authorization Response Mode, JARM)
@@ -233,19 +236,18 @@ signed authorization requests.}
 used in signed authorization requests. By default, shinyOAuth uses the
 provider issuer when available. When
 \code{request_object_mode = "request"} or \code{"request_uri"}, the provider
-must have a configured issuer or you must supply an explicit override so
-the signed Request Object remains audience-bound to the intended
-authorization server.}
+needs either a configured issuer or this override to identify the
+authorization server in the signed Request Object.}
 
 \item{request_object_encryption_alg}{Optional JWE key-management
 algorithm override for encrypted Request Objects. Current outbound support
-is limited to \code{RSA-OAEP}. When set, you must also set
+is limited to \code{RSA-OAEP}. Encryption requires both this value and
 \code{request_object_encryption_enc}.}
 
 \item{request_object_encryption_enc}{Optional JWE content-encryption
 algorithm override for encrypted Request Objects. Current outbound support
 is limited to the AES-CBC-HMAC family (\code{A128CBC-HS256},
-\code{A192CBC-HS384}, \code{A256CBC-HS512}). When set, you must also set
+\code{A192CBC-HS384}, \code{A256CBC-HS512}). Encryption also requires
 \code{request_object_encryption_alg}.}
 
 \item{request_object_encryption_kid}{Optional key identifier (\code{kid})
@@ -263,7 +265,7 @@ URI. Default is \code{45}.}
 seconds. When provided, shinyOAuth adds an \code{nbf} claim set to
 \code{iat - request_object_nbf_skew} so deployments can tolerate small
 clock skew while still emitting bounded request-object validity windows.
-Leave \code{NULL} (the default) to omit \code{nbf}. Request-object \code{nbf} is reserved
+\code{NULL} (the default) omits \code{nbf}. Request-object \code{nbf} is reserved
 by shinyOAuth and cannot be supplied through extra authorization
 parameters.}
 
@@ -292,14 +294,13 @@ defaults must be included in that set.}
 
 \item{dpop_require_access_token}{Logical or \code{NULL}. When \code{TRUE} and
 \code{dpop_private_key} is configured, shinyOAuth requires the authorization
-server to return \code{token_type = "DPoP"} for access tokens and fails fast
-otherwise, independently of the access token's representation. Observed
+server to return \code{token_type = "DPoP"} for access tokens and rejects other
+token types, independently of the access token's representation. Observed
 binding data must match the configured key; requiring its presence is a
 separate policy (\code{dpop_require_observed_cnf}). In \code{\link[=oauth_client]{oauth_client()}}, the default
 \code{NULL} resolves to \code{TRUE} when \code{dpop_private_key} is configured and to
-\code{FALSE} otherwise. Set \code{FALSE} explicitly only when you intentionally want
-to allow Bearer access tokens, such as deployments where DPoP is used only
-to bind refresh tokens.}
+\code{FALSE} otherwise. Explicit \code{FALSE} also permits Bearer access tokens,
+including deployments where DPoP binds only the refresh token.}
 
 \item{redirect_uri}{The URL where users return after login. It must match the
 callback URL registered with your provider, including scheme, host, port,
@@ -321,7 +322,12 @@ support. Set \code{FALSE} to opt out explicitly.}
 \item{scopes}{Character vector of permissions to request. The provider defines
 the available names. For OIDC (\code{issuer} set and \code{infer_oidc_from_issuer = TRUE}),
 shinyOAuth adds \code{"openid"} automatically if absent. The resulting set is
-used in the request and subsequent scope checks.}
+used in the request and subsequent scope checks.
+When omitted with \code{token_targets}, API scopes are inferred from those
+declarations. Explicit \code{scopes} must include every target's API scopes;
+they are never expanded from declarations. With no targets, the default
+requests no API scopes. OIDC adds \code{"openid"}; request further identity and
+refresh-consent scopes explicitly.}
 
 \item{resource}{Optional RFC 8707 resource indicator(s). Supply a character
 vector of absolute URIs to request audience-restricted tokens for one or
@@ -335,11 +341,10 @@ Default \code{NULL} sends no request. Supply a list with \code{userinfo} and/or
 \code{list(userinfo = list(email = list(essential = TRUE)))}.
 Use \code{claims_validation = "strict"} if an unmet request must stop login.
 
-Lists are JSON-encoded with \code{auto_unbox = TRUE}. Use \code{NULL} for an
-unconstrained claim, \code{value} for one required value, or \code{values} for a set.
-Wrap a single-element \code{values} vector in \code{\link[=I]{I()}} to keep it a JSON array,
-for example \code{list(values = I("example-acr"))}. A pre-encoded JSON string
-is also accepted. Your provider must support the OIDC claims parameter.}
+Use \code{NULL} to request a claim without a constraint, \code{value} for one acceptable
+value, or \code{values} for several. Lists are converted to JSON for the provider;
+a pre-encoded JSON object is also accepted. The provider must support claims
+requests. See Claims requests below for validation and numeric limits.}
 
 \item{state_store}{Storage for pending logins. The default
 \code{cachem::cache_mem(max_age = 300)} is suitable for one R process.
@@ -354,16 +359,15 @@ seconds. Default 300. This is checked separately from the state store's
 entry lifetime; both must allow the returning login.}
 
 \item{state_entropy}{Length in characters of the random state identifier, from
-22 to 128. Default 64. Most apps should keep the default.}
+22 to 128. Default 64.}
 
 \item{state_key}{Secret used to encrypt and protect pending login details.
 A random key is generated when omitted. This is separate from
 \code{client_secret} and is also used for public clients.
 
-For multiple R processes, supply the same key and shared \code{state_store}
-on every process. Accepts a character string or raw vector of at least
-32 bytes. Generate it from cryptographically random bytes; do not use
-a memorable password. State uses AES-GCM authenticated encryption.}
+Deployments with multiple R processes use the same key and \code{state_store} across
+processes. The key is a character string or raw vector containing at least
+32 cryptographically random bytes. State uses AES-GCM authenticated encryption.}
 
 \item{scope_validation}{Controls how scope discrepancies are handled when
 the authorization server grants fewer scopes than requested. RFC 6749
@@ -384,18 +388,19 @@ unexpected values: \code{"warn"} continues with a warning, \code{"strict"} stops
 login, and \code{"none"} skips the check. When omitted, \code{\link[=oauth_client]{oauth_client()}} uses
 \code{"warn"} if \code{claims} includes \code{essential = TRUE}, \code{value}, or \code{values}
 requirements, and \code{"none"} otherwise. Checks on \code{claims[["id_token"]]} require
-ID token validation (\code{id_token_validation = TRUE} or \code{use_nonce = TRUE}).}
+ID token validation (\code{id_token_validation = TRUE} or \code{use_nonce = TRUE}).
+Checks on \code{claims[["userinfo"]]} require \code{userinfo_required = TRUE} and
+a configured UserInfo endpoint on the provider.}
 
 \item{userinfo_jwt_required_time_claims}{Optional character vector of
 temporal JWT claims that must be present when the UserInfo response is a
 signed JWT (\code{application/jwt}). Allowed values are \code{"exp"}, \code{"iat"}, and
 \code{"nbf"}.
 
-Default is \code{character(0)}, which means these claims are validated only when
-present. Set, for example, \code{userinfo_jwt_required_time_claims = "exp"}
-to require an expiry on signed UserInfo JWTs, or pass multiple values to
-require additional temporal claims. For security-sensitive deployments that
-accept signed UserInfo JWTs, prefer requiring at least \code{"exp"}.}
+The default, \code{character(0)}, checks these claims only when present.
+Set, for example, \code{userinfo_jwt_required_time_claims = "exp"}
+to require an expiry on signed UserInfo JWTs; multiple values require
+the corresponding time claims.}
 
 \item{required_acr_values}{Optional character vector of acceptable login
 requirements, such as a provider's multi-factor authentication (MFA) policy.
@@ -425,8 +430,7 @@ client id.
 useful for sender-constrained deployments such as DPoP, where
 introspection can authoritatively report \code{token_type = "DPoP"}.
 Default is \code{character(0)}.
-(Note that not all providers may return each of these fields in
-introspection responses.)
+Providers may omit these fields from introspection responses.
 }}
 
 \item{endpoint_auth}{Named list of authentication overrides for \code{par},
@@ -474,8 +478,8 @@ locally, from the token response, introspection, or optional JWT access-token
 inspection. Set \code{options(shinyOAuth.access_token_cnf = "opaque")} to disable
 access-token decoding for both DPoP and mTLS; the compatibility default
 \code{"jwt"} inspects JWT \code{cnf} without treating it as signature validation.
-Use this when high-assurance DPoP deployments must
-fail closed on opaque access tokens that provide no observable binding.
+Opaque tokens then need binding metadata in the token response or
+introspection result.
 Default is \code{FALSE}.}
 
 \item{jarm_signed_response_alg}{Optional expected JWS algorithm for
@@ -523,19 +527,16 @@ remaining \code{exp} window at validation time. Applies only when
 \item{mtls_require_observed_cnf}{Logical, default \code{TRUE}. When
 \code{mtls_certificate_bound_access_tokens = TRUE}, require \code{cnf[["x5t#S256"]]}
 in the token response, JWT access token, or introspection and verify that
-it matches the configured certificate. The default preserves strict
-local assurance. Set \code{FALSE} for server-enforced opaque bindings that
-the client cannot observe; this does not disable certificate presentation
-or mTLS endpoint selection. Missing confirmation is then allowed, but
-any observed confirmation is still validated, including mismatches and
-conflicting claims. This flag does not independently enable mTLS.}
+it matches the configured certificate. \code{FALSE} allows missing confirmation
+for server-enforced opaque bindings. Observed confirmation is validated;
+mismatches and conflicting claims are rejected.}
 
 \item{trusted_id_token_audiences}{Character vector of additional ID-token
 audiences explicitly trusted by this client. Defaults to \code{character(0)},
 which permits only \code{client_id}. The token must always include \code{client_id}
 in \code{aud}; when \code{azp} is present it must equal \code{client_id}.
-Values are matched exactly and case-sensitively. Configure only audiences
-trusted for this application's identity tokens, not arbitrary API audiences.}
+Values are matched exactly and case-sensitively and apply to identity-token
+recipients, independently of API resource addresses.}
 
 \item{compare_callback_issuer}{Logical or \code{NULL}. Compare any supplied callback
 \code{iss} exactly with \code{provider@issuer}, while allowing absence when
@@ -551,16 +552,12 @@ its own issuer protection without requiring a redundant outer \code{iss}.}
 \item{client_assertion_typ}{JWT header \code{typ} for client authentication.
 Defaults to \code{"JWT"} for existing providers. Use
 \code{"client-authentication+jwt"} with \code{client_assertion_audience} set to the
-provider's trusted issuer identifier for RFC7523bis-11 / OAuth 2.1 draft 16.
-The explicit type is recommended; it does not replace audience validation.
-This setting does not change JAR, JARM, ID token or DPoP types, or the
-OAuth form parameter \code{client_assertion_type}.}
+provider's trusted issuer identifier for RFC7523bis-11 / OAuth 2.1 draft 16.}
 
 \item{resource_bases}{Optional named character vector of approved API base
-URLs for \code{\link[=oauth_connection]{oauth_connection()}} and \code{\link[=oauth_connections]{oauth_connections()}}. The default
-\code{character()} leaves the existing token/request APIs unchanged. Each resource
-ID starts with a letter and contains letters, digits, \verb{_} or \code{-} (at most
-64 bytes). Up to 64 bases are supported. HTTPS is required except for
+URLs for \code{\link[=oauth_connection]{oauth_connection()}} and \code{\link[=oauth_connections]{oauth_connections()}}, default \code{character()}.
+Each resource ID starts with a letter and contains letters, digits, \verb{_} or
+\code{-} (at most 64 bytes). Up to 64 bases are supported. HTTPS is required except for
 loopback development URLs. Requests through a connection stay within the
 exact scheme, host, effective port and base path; redirects are disabled.
 Bases exclude user information, query strings, fragments, dot segments,
@@ -582,20 +579,18 @@ most 128 bytes without control characters. Labels contain no credentials or
 patient context.}
 
 \item{authorization_method}{Browser method for sending the authorization
-request: \code{"GET"} (default) or \code{"POST"}. Select POST only after confirming
-provider support. It submits form fields instead of a long URL query.
+request: \code{"GET"} (default) or provider-supported \code{"POST"}. POST submits form
+fields instead of a URL query.
 Use the module's \code{request_login()} or \code{\link[=prepare_authorization_request]{prepare_authorization_request()}}; URL-only
-helpers reject POST. This does not select the callback \code{response_mode} or
-replace a provider's PAR or signed Request Object requirements.}
+helpers reject POST.}
 
-\item{scope_policy}{Internal versioned scope policy. Leave the default for
-ordinary OAuth clients. SMART adapters install their own policy, including
-required permissions; these checks cannot be disabled by \code{scope_validation}.
+\item{scope_policy}{Internal versioned scope policy, installed by SMART
+adapters. Ordinary OAuth clients use the default policy. SMART permission
+requirements apply independently of \code{scope_validation}.
 This parameter is not an argument to \code{\link[=oauth_client]{oauth_client()}}.}
 
-\item{smart}{Internal SMART configuration installed by \code{\link[=smart_client]{smart_client()}}.
-Leave the empty default for ordinary clients. This is not an argument to
-\code{\link[=oauth_client]{oauth_client()}}.}
+\item{smart}{Internal SMART configuration installed by \code{\link[=smart_client]{smart_client()}},
+empty for ordinary clients. This is not an argument to \code{\link[=oauth_client]{oauth_client()}}.}
 
 \item{introspect_elements}{Compatibility alias for \code{introspection_checks}.}
 
@@ -630,6 +625,22 @@ Leave the empty default for ordinary clients. This is not an argument to
 \item{authorization_request_ttl}{Compatibility alias for \code{request_object_ttl}.}
 
 \item{authorization_request_nbf_skew}{Compatibility alias for \code{request_object_nbf_skew}.}
+
+\item{token_targets}{Optional named list for obtaining tokens for several APIs
+through one login. Build entries with \code{\link[=oauth_token_target]{oauth_token_target()}} or plain named
+lists. Each entry needs a \code{resource} identifier and \code{scopes}
+(also included in explicit client \code{scopes}). Optional \code{required_scopes} set that API's
+minimum permissions; \code{resource_ids} associate it with named \code{resource_bases}.
+Optional Microsoft \code{scope_aliases} identify unusual short permission names
+in responses. Requires provider support and \code{userinfo_required = FALSE};
+cannot be combined with \code{resource} or SMART configuration.
+See \code{vignette("token-targets", package = "shinyOAuth")}
+(\href{https://lukakoning.github.io/shinyOAuth/articles/token-targets.html}{online guide})
+for examples, provider-specific permission rules and declaration limits.}
+
+\item{token_target_default}{Name of the API to use when a connection method
+omits \code{target}. Required with several targets; the sole target is selected
+automatically.}
 }
 \value{
 Calling the constructor creates an \code{OAuthClient} object.
@@ -654,6 +665,21 @@ features when supported by your provider and required by your deployment. See
 the \href{https://lukakoning.github.io/shinyOAuth/articles/advanced-security.html}{advanced security vignette} for examples. The defaults described below
 refer to \code{\link[=oauth_client]{oauth_client()}} unless stated otherwise.
 }
+\section{Claims requests}{
+
+Use an R list for most applications. \code{values} vectors become JSON arrays,
+including single-element vectors. Each claim entry is \code{NULL} or a named list;
+\code{essential} must be logical, and \code{value} and \code{values} cannot be combined.
+Pre-encoded JSON must use unique member names, object-valued target sections
+and nonempty arrays for \code{values}. Invalid requests are rejected even when
+\code{claims_validation = "none"} disables checking returned values.
+
+Numbers use R's numeric precision and must be finite and within
+\verb{+/- (2^53 - 1)}. Use strings for larger exact identifiers or decimal values
+that R cannot represent accurately. UserInfo claim checks require automatic
+profile retrieval and a configured UserInfo endpoint.
+}
+
 \examples{
 # Register an app with GitHub and store its credentials in your environment.
 # This creates the configuration; it does not start login or contact GitHub.

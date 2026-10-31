@@ -24,9 +24,7 @@
 #' response itself rather than following it, allowing callers to fail with a
 #' clear error rather than silently leaking secrets.
 #'
-#' Behavior can be overridden via `options(shinyOAuth.allow_redirect = TRUE)`,
-#' but this should only be enabled when a deployment deliberately accepts the
-#' redirect-following risk for these sensitive endpoints.
+#' `options(shinyOAuth.allow_redirect = TRUE)` enables redirects for these endpoints.
 #'
 #' @param req httr2 request object.
 #' @return Request object with redirect following disabled, or the original
@@ -431,6 +429,49 @@ check_resp_body_size <- function(
   invisible(TRUE)
 }
 
+# httr2 >= 1.2.2 starts automatic spans with the unredacted URL. It has no
+# per-request opt-out. Use call-local copies of its synchronous dispatchers,
+# with only the instrumentation hook replaced; never modify its namespace,
+# cached tracer, or the application's SDK configuration. Keep transport,
+# request preparation, mocks, and response/error handling in httr2.
+#
+# This compatibility adapter intentionally fails closed if the dispatch layout
+# changes. Remove it when httr2 offers a public per-request tracing control.
+req_perform_without_auto_trace <- function(req, path = NULL) {
+  perform <- httr2::req_perform
+  ns <- asNamespace("httr2")
+  if (
+    utils::packageVersion("httr2") < "1.2.2" ||
+      !identical(environment(perform), ns)
+  ) {
+    # Older versions have no automatic instrumentation. Also preserve test
+    # doubles for the public perform function without depending on their body.
+    return(perform(req, path = path))
+  }
+  perform_one <- get0("req_perform1", envir = ns, inherits = FALSE)
+  if (
+    !is.function(perform_one) ||
+      !"req_perform1" %in% all.names(body(perform)) ||
+      !"req_with_span" %in% all.names(body(perform_one))
+  ) {
+    err_config("Unsupported httr2 HTTP instrumentation; cannot protect URL privacy")
+  }
+  dispatch <- new.env(parent = ns)
+  dispatch[["req_with_span"]] <- function(req, ...) {
+    # Propagate the package's active, sanitized span when tracing is enabled.
+    # This helper also applies the package's telemetry diagnostic policy.
+    headers <- otel_capture_context()
+    if (length(headers)) {
+      req <- httr2::req_headers(req, !!!headers)
+    }
+    req
+  }
+  environment(perform_one) <- dispatch
+  dispatch[["req_perform1"]] <- perform_one
+  environment(perform) <- dispatch
+  perform(req, path = path)
+}
+
 # Download encoded bytes to a temporary file, then read at most the decoded
 # budget plus one sentinel byte. libcurl's connection API can buffer an entire
 # decompression burst before returning to R, so it is not a decoded-size guard.
@@ -453,7 +494,7 @@ req_perform_bounded <- function(req) {
       !download_exceeded
     }
   )
-  resp <- tryCatch(httr2::req_perform(req, path = path), error = function(e) {
+  resp <- tryCatch(req_perform_without_auto_trace(req, path = path), error = function(e) {
     current <- e
     while (!is.null(current)) {
       if (inherits(current, "curl_error_filesize_exceeded")) {
@@ -526,12 +567,9 @@ resolve_retry_status <- function() {
 #' HTTP-date) and otherwise uses exponential backoff with jitter. Used by all
 #' outbound provider-facing HTTP calls.
 #'
-#' Note: This helper currently implements backoff via `Sys.sleep()` on the main
-#' R thread. In Shiny, calling this from the server will block the event loop
-#' during the sleep intervals. To avoid blocking, consider running flows with
-#' `async = TRUE` in `oauth_module_server()` (which can execute network calls
-#' away from the main process when backed by [mirai] or a non-sequential
-#' [future] plan), or reduce retries/timeouts using the options below.
+#' Backoff uses `Sys.sleep()` and blocks the executing R process. With
+#' `async = TRUE` and a non-sequential backend, `oauth_module_server()` runs
+#' these waits in a worker process.
 #'
 #' @param req An httr2 request object.
 #' @param idempotent Logical. When `FALSE`, the request is assumed to consume
@@ -559,6 +597,7 @@ req_with_retry <- function(req, idempotent = TRUE) {
   if (!inherits(req, "httr2_request")) {
     return(httr2::req_perform(req))
   }
+  validate_http_request_headers(req)
 
   # Note: httr2 throws on HTTP error statuses (4xx/5xx) by default
   # We disable that behavior so we can distinguish transport errors (network
@@ -583,6 +622,7 @@ req_with_retry <- function(req, idempotent = TRUE) {
       attempt_req <- prepare_attempt(req, attempt)
     }
     if (inherits(attempt_req, "httr2_request")) {
+      validate_http_request_headers(attempt_req)
       attempt_req[["shinyOAuth_prepare_attempt"]] <- NULL
       attempt_req[["shinyOAuth_response_observer"]] <- NULL
     }

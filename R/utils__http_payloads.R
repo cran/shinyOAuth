@@ -106,8 +106,7 @@ token_response_extra_fields <- function(token_response) {
 #' cannot be smuggled through provider or parser differences.
 #'
 #' @param body Raw response body as a string.
-#' @param resp Optional httr2 response. When supplied, httr2's JSON parser is
-#'   attempted before falling back to `jsonlite::fromJSON()`.
+#' @param resp Optional httr2 response, retained for internal call compatibility.
 #' @return Parsed JSON value, normalized by `normalize_token_response_json()`.
 #' @keywords internal
 #' @noRd
@@ -138,7 +137,7 @@ parse_token_response_json <- function(
 #' whether to fall back to form parsing.
 #'
 #' @param body Raw response body as a string.
-#' @param resp Optional httr2 response for httr2-native parsing.
+#' @param resp Optional httr2 response, retained for internal call compatibility.
 #' @return A list with `ok`, a scalar logical, and `value`, the parsed JSON
 #'   value when `ok` is `TRUE` or `NULL` when JSON parsing failed, plus
 #'   `is_object` indicating whether the payload used a top-level JSON object.
@@ -152,15 +151,9 @@ try_parse_token_response_json <- function(
   reject_duplicate_json_object_members(body, "Token response JSON")
   is_object <- json_text_is_object(body)
 
-  out <- if (inherits(resp, "httr2_response")) {
-    try(httr2::resp_body_json(resp, simplifyVector = FALSE), silent = TRUE)
-  } else {
-    try(jsonlite::fromJSON(body, simplifyVector = FALSE), silent = TRUE)
-  }
-
-  if (inherits(out, "try-error")) {
-    out <- try(jsonlite::fromJSON(body, simplifyVector = FALSE), silent = TRUE)
-  }
+  # Parse literal text only: fromJSON(), including through resp_body_json(),
+  # can interpret an untrusted response as a URL or local filename.
+  out <- try(jsonlite::parse_json(body, simplifyVector = FALSE), silent = TRUE)
   if (inherits(out, "try-error")) {
     return(list(ok = FALSE, value = NULL, is_object = is_object))
   }
@@ -270,39 +263,22 @@ parse_lenient_token_response <- function(body, allow_empty_scope = FALSE) {
 #' @keywords internal
 #' @noRd
 reject_duplicate_form_encoded_members <- function(form_text, label) {
-  if (is.null(form_text) || !nzchar(form_text)) {
-    return(invisible(NULL))
-  }
-
-  parts <- strsplit(form_text, "&", fixed = TRUE)[[1]]
-  parts <- parts[nzchar(parts)]
-  if (!length(parts)) {
-    return(invisible(NULL))
-  }
-
-  seen <- character(0)
-  for (part in parts) {
-    separator <- regexpr("=", part, fixed = TRUE)[[1]]
-    if (separator < 0) {
-      raw_key <- part
-      raw_value <- ""
-    } else {
-      raw_key <- substr(part, 1L, separator - 1L)
-      raw_value <- substr(part, separator + 1L, nchar(part, type = "chars"))
-    }
-
-    key <- decode_form_member(raw_key, label, "parameter name")
-    decode_form_member(raw_value, label, "parameter value")
-    if (key %in% seen) {
-      err_parse(protocol_diagnostic_message(
-        paste0(label, " contains duplicate parameter name"),
-        key
-      ))
-    }
-    seen <- c(seen, key)
-  }
-
+  parse_unique_form_encoded_members(form_text, label)
   invisible(NULL)
+}
+
+# Parse into preallocated vectors and use R's hashed duplicate check. Growing
+# and searching a vector (or named list) per field amplifies small hostile forms.
+parse_unique_form_encoded_members <- function(form_text, label) {
+  pairs <- decode_form_pairs(form_text, label, fail = err_parse)
+  duplicate <- anyDuplicated(names(pairs))
+  if (duplicate) {
+    err_parse(protocol_diagnostic_message(
+      paste0(label, " contains duplicate parameter name"),
+      names(pairs)[[duplicate]]
+    ))
+  }
+  pairs
 }
 
 decode_form_member <- function(value, label, member, fail = err_parse) {
@@ -334,11 +310,14 @@ decode_form_member <- function(value, label, member, fail = err_parse) {
 
 # Decode names and values without collapsing repeated fields. Keep raw query
 # composition separate so unrelated configured query bytes need not be rewritten.
-decode_form_pairs <- function(text, label = "Form/query") {
+decode_form_pairs <- function(
+  text,
+  label = "Form/query",
+  fail = function(message) stop(message, call. = FALSE)
+) {
   if (is.null(text) || !nzchar(text)) {
     return(list())
   }
-  fail <- function(message) stop(message, call. = FALSE)
   parts <- strsplit(text, "&", fixed = TRUE)[[1]]
   parts <- parts[nzchar(parts)]
   keys <- values <- character(length(parts))

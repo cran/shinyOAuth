@@ -16,26 +16,6 @@
 #   client_assertion_private_key_kid = "registered-key-id"
 # )
 
-## ----eval = FALSE-------------------------------------------------------------
-# client@client_assertion_audience <- provider@issuer
-# client@client_assertion_typ <- "client-authentication+jwt"
-
-## ----eval = FALSE-------------------------------------------------------------
-# client@endpoint_auth <- list(
-#   introspection = list(
-#     token_auth_style = "header",
-#     client_id = "registered-inspector",
-#     client_secret = Sys.getenv("INTROSPECTION_SECRET"),
-#     extra_headers = c("X-App" = "registered-app")
-#   ),
-#   revocation = list(
-#     token_auth_style = "private_key_jwt",
-#     client_assertion_private_key = openssl::read_key("keys/revocation-key.pem"),
-#     client_assertion_alg = "RS256",
-#     client_assertion_audience = "https://id.example.com/revocation"
-#   )
-# )
-
 ## ----mtls-provider, eval = FALSE----------------------------------------------
 # provider <- oauth_provider(
 #   name = "example-mtls",
@@ -71,14 +51,24 @@
 # )
 
 ## ----eval = FALSE-------------------------------------------------------------
+# provider <- oauth_provider(
+#   name = "example-par",
+#   issuer = "https://id.example.com",
+#   auth_url = "https://id.example.com/authorize",
+#   token_url = "https://id.example.com/token",
+#   # Enable pushed authorization requests
+#   par_url = "https://id.example.com/par",
+#   par_required = TRUE,
+#   # Keep the browser redirect down to client_id + PAR request_uri
+#   authorization_request_front_channel_mode = "minimal"
+# )
+# 
 # client <- oauth_client(
 #   provider = provider,
 #   client_id = "client-id",
+#   client_secret = "client-secret",
 #   redirect_uri = "https://app.example.com/auth/callback",
-#   mtls_client_cert_file = "certs/client.pem",
-#   mtls_client_key_file = "certs/client-key.pem",
-#   mtls_certificate_bound_access_tokens = TRUE,
-#   mtls_require_observed_cnf = FALSE
+#   scopes = c("openid", "profile")
 # )
 
 ## ----eval = FALSE-------------------------------------------------------------
@@ -104,6 +94,103 @@
 #   # Send the authorization request as a JWT in the request parameter
 #   request_object_mode = "request",
 #   request_object_signing_alg = "RS256"
+# )
+
+## ----eval = FALSE-------------------------------------------------------------
+# base_ui <- shiny::fluidPage(shiny::textOutput("status"))
+# ui <- oauth_form_post_ui(base_ui, id = "auth", client = client)
+# 
+# server <- function(input, output, session) {
+#   auth <- oauth_module_server("auth", client)
+#   output[["status"]] <- shiny::renderText({
+#     if (isTRUE(auth[["authenticated"]])) "Signed in" else "Waiting for login"
+#   })
+# }
+# 
+# app <- shiny::shinyApp(ui, server, uiPattern = ".*")
+
+## ----eval = FALSE-------------------------------------------------------------
+# provider <- oauth_provider(
+#   name = "example-jarm",
+#   issuer = "https://id.example.com",
+#   auth_url = "https://id.example.com/authorize",
+#   token_url = "https://id.example.com/token",
+#   # Advertise the JARM response modes and algorithms this provider supports
+#   response_modes_supported = c("query", "query.jwt", "form_post.jwt"),
+#   jarm_signing_alg_values_supported = c("RS256"),
+#   jarm_encryption_alg_values_supported = c("RSA-OAEP"),
+#   jarm_encryption_enc_values_supported = c("A128CBC-HS256")
+# )
+# 
+# client <- oauth_client(
+#   provider = provider,
+#   client_id = "client-id",
+#   client_secret = "client-secret",
+#   redirect_uri = "https://app.example.com/auth/callback",
+#   scopes = c("openid", "profile"),
+#   # Ask for a JWT-wrapped authorization response
+#   response_mode = "query.jwt",
+#   jarm_signed_response_alg = "RS256"
+# )
+
+## ----eval = FALSE-------------------------------------------------------------
+# provider <- oauth_provider(
+#   name = "example-dpop",
+#   issuer = "https://id.example.com",
+#   auth_url = "https://id.example.com/authorize",
+#   token_url = "https://id.example.com/token",
+#   # Optional metadata check for acceptable DPoP signing algorithms
+#   dpop_signing_alg_values_supported = c("ES256")
+# )
+# 
+# client <- oauth_client(
+#   provider = provider,
+#   client_id = "client-id",
+#   client_secret = "client-secret",
+#   redirect_uri = "https://app.example.com/auth/callback",
+#   scopes = c("openid", "profile", "api.read"),
+#   # Private key used to sign DPoP proofs
+#   dpop_private_key = openssl::read_key("keys/dpop-key.pem"),
+#   dpop_signing_alg = "ES256"
+# )
+
+## ----eval = FALSE-------------------------------------------------------------
+# resp <- perform_resource_req(
+#   auth[["token"]],
+#   "https://api.example.com/me",
+#   # Lets shinyOAuth attach the DPoP proof and handle nonce challenges
+#   client = client
+# )
+
+## ----eval = FALSE-------------------------------------------------------------
+# client@client_assertion_audience <- provider@issuer
+# client@client_assertion_typ <- "client-authentication+jwt"
+
+## ----eval = FALSE-------------------------------------------------------------
+# client@endpoint_auth <- list(
+#   introspection = list(
+#     token_auth_style = "header",
+#     client_id = "registered-inspector",
+#     client_secret = Sys.getenv("INTROSPECTION_SECRET"),
+#     extra_headers = c("X-App" = "registered-app")
+#   ),
+#   revocation = list(
+#     token_auth_style = "private_key_jwt",
+#     client_assertion_private_key = openssl::read_key("keys/revocation-key.pem"),
+#     client_assertion_alg = "RS256",
+#     client_assertion_audience = "https://id.example.com/revocation"
+#   )
+# )
+
+## ----eval = FALSE-------------------------------------------------------------
+# client <- oauth_client(
+#   provider = provider,
+#   client_id = "client-id",
+#   redirect_uri = "https://app.example.com/auth/callback",
+#   mtls_client_cert_file = "certs/client.pem",
+#   mtls_client_key_file = "certs/client-key.pem",
+#   mtls_certificate_bound_access_tokens = TRUE,
+#   mtls_require_observed_cnf = FALSE
 # )
 
 ## ----eval = FALSE-------------------------------------------------------------
@@ -155,40 +242,6 @@
 # )
 
 ## ----eval = FALSE-------------------------------------------------------------
-# provider <- oauth_provider(
-#   name = "example-par",
-#   issuer = "https://id.example.com",
-#   auth_url = "https://id.example.com/authorize",
-#   token_url = "https://id.example.com/token",
-#   # Enable pushed authorization requests
-#   par_url = "https://id.example.com/par",
-#   par_required = TRUE,
-#   # Keep the browser redirect down to client_id + PAR request_uri
-#   authorization_request_front_channel_mode = "minimal"
-# )
-# 
-# client <- oauth_client(
-#   provider = provider,
-#   client_id = "client-id",
-#   client_secret = "client-secret",
-#   redirect_uri = "https://app.example.com/auth/callback",
-#   scopes = c("openid", "profile")
-# )
-
-## ----eval = FALSE-------------------------------------------------------------
-# base_ui <- shiny::fluidPage(shiny::textOutput("status"))
-# ui <- oauth_form_post_ui(base_ui, id = "auth", client = client)
-# 
-# server <- function(input, output, session) {
-#   auth <- oauth_module_server("auth", client)
-#   output[["status"]] <- shiny::renderText({
-#     if (isTRUE(auth[["authenticated"]])) "Signed in" else "Waiting for login"
-#   })
-# }
-# 
-# app <- shiny::shinyApp(ui, server, uiPattern = ".*")
-
-## ----eval = FALSE-------------------------------------------------------------
 # trusted_proxy_uri <- function(req) {
 #   if (!identical(req[["REMOTE_ADDR"]], "10.0.0.10") ||
 #       !identical(req[["HTTP_X_FORWARDED_PROTO"]], "https")) {
@@ -200,30 +253,6 @@
 # ui <- oauth_form_post_ui(
 #   base_ui, id = "auth", client = client,
 #   request_uri_resolver = trusted_proxy_uri
-# )
-
-## ----eval = FALSE-------------------------------------------------------------
-# provider <- oauth_provider(
-#   name = "example-jarm",
-#   issuer = "https://id.example.com",
-#   auth_url = "https://id.example.com/authorize",
-#   token_url = "https://id.example.com/token",
-#   # Advertise the JARM response modes and algorithms this provider supports
-#   response_modes_supported = c("query", "query.jwt", "form_post.jwt"),
-#   jarm_signing_alg_values_supported = c("RS256"),
-#   jarm_encryption_alg_values_supported = c("RSA-OAEP"),
-#   jarm_encryption_enc_values_supported = c("A128CBC-HS256")
-# )
-# 
-# client <- oauth_client(
-#   provider = provider,
-#   client_id = "client-id",
-#   client_secret = "client-secret",
-#   redirect_uri = "https://app.example.com/auth/callback",
-#   scopes = c("openid", "profile"),
-#   # Ask for a JWT-wrapped authorization response
-#   response_mode = "query.jwt",
-#   jarm_signed_response_alg = "RS256"
 # )
 
 ## ----eval = FALSE-------------------------------------------------------------
@@ -239,34 +268,5 @@
 #   jarm_encrypted_response_alg = "RSA-OAEP",
 #   jarm_encrypted_response_enc = "A128CBC-HS256",
 #   jarm_decryption_private_key = openssl::read_key("keys/jarm-decrypt.pem")
-# )
-
-## ----eval = FALSE-------------------------------------------------------------
-# provider <- oauth_provider(
-#   name = "example-dpop",
-#   issuer = "https://id.example.com",
-#   auth_url = "https://id.example.com/authorize",
-#   token_url = "https://id.example.com/token",
-#   # Optional metadata check for acceptable DPoP signing algorithms
-#   dpop_signing_alg_values_supported = c("ES256")
-# )
-# 
-# client <- oauth_client(
-#   provider = provider,
-#   client_id = "client-id",
-#   client_secret = "client-secret",
-#   redirect_uri = "https://app.example.com/auth/callback",
-#   scopes = c("openid", "profile", "api.read"),
-#   # Private key used to sign DPoP proofs
-#   dpop_private_key = openssl::read_key("keys/dpop-key.pem"),
-#   dpop_signing_alg = "ES256"
-# )
-
-## ----eval = FALSE-------------------------------------------------------------
-# resp <- perform_resource_req(
-#   auth[["token"]],
-#   "https://api.example.com/me",
-#   # Lets shinyOAuth attach the DPoP proof and handle nonce challenges
-#   client = client
 # )
 

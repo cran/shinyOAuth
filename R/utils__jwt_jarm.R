@@ -142,12 +142,13 @@ verify_jarm_signature <- function(oauth_client, jwt_str, alg, kid = NULL) {
   prov <- oauth_client@provider
 
   if (alg %in% c("HS256", "HS384", "HS512")) {
+    check_client_hmac_algorithm(oauth_client, alg, "JARM verification", err_invalid_state)
     if (!is_valid_string(oauth_client@client_secret)) {
       err_invalid_state("JARM HMAC validation requires client_secret")
     }
 
     min_secret_bytes <- min_hmac_key_bytes(alg)
-    if (nchar(oauth_client@client_secret, type = "bytes") < min_secret_bytes) {
+    if (length(hmac_secret_bytes(oauth_client@client_secret)) < min_secret_bytes) {
       err_invalid_state(paste0(
         "JARM ",
         alg,
@@ -548,7 +549,7 @@ parse_jarm_payload <- function(
   assert_json_text_is_object(payload_text, "JWT payload")
 
   tryCatch(
-    jsonlite::fromJSON(payload_text, simplifyVector = FALSE),
+    jsonlite::parse_json(payload_text, simplifyVector = FALSE),
     error = function(e) {
       err_parse(
         "Failed to parse JWT payload JSON",
@@ -930,20 +931,22 @@ validate_jarm_response <- function(
     outer_alg <- outer_header_fields[["alg"]] %||% ""
     outer_enc <- outer_header_fields[["enc"]] %||% ""
     if (!identical(outer_alg, encryption_config[["alg"]])) {
-      err_invalid_state(paste0(
-        "Encrypted JARM alg mismatch: expected ",
-        encryption_config[["alg"]],
-        ", got ",
-        outer_alg
-      ))
+      err_claim_validation(
+        "Encrypted JARM alg mismatch",
+        claim = "alg",
+        expected = encryption_config[["alg"]],
+        received = outer_alg,
+        error = err_invalid_state
+      )
     }
     if (!identical(outer_enc, encryption_config[["enc"]])) {
-      err_invalid_state(paste0(
-        "Encrypted JARM enc mismatch: expected ",
-        encryption_config[["enc"]],
-        ", got ",
-        outer_enc
-      ))
+      err_claim_validation(
+        "Encrypted JARM enc mismatch",
+        claim = "enc",
+        expected = encryption_config[["enc"]],
+        received = outer_enc,
+        error = err_invalid_state
+      )
     }
 
     decrypted <- tryCatch(
@@ -1008,12 +1011,13 @@ validate_jarm_response <- function(
     err_invalid_state("JARM alg=none is not allowed")
   }
   if (!identical(alg, expected_alg)) {
-    err_invalid_state(paste0(
-      "JARM signing alg mismatch: expected ",
-      expected_alg,
-      ", got ",
-      alg
-    ))
+    err_claim_validation(
+      "JARM signing alg mismatch",
+      claim = "alg",
+      expected = expected_alg,
+      received = alg,
+      error = err_invalid_state
+    )
   }
 
   claims <- tryCatch(

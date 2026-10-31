@@ -2,9 +2,9 @@
 # See `?devtools::test()` for more information.
 
 # The mTLS request fixtures use separate PEM certificate/key files. Select the
-# backend before loading curl through Shiny/httr2. test-mtls-backend separately
-# checks the fresh Windows default. Keep this out of the package-check process
-# so curl's backend startup diagnostic does not create a check NOTE.
+# backend before loading curl through Shiny/httr2. Keep this out of the
+# package-check process so curl's backend startup diagnostic does not create a
+# check NOTE.
 if (
   .Platform[["OS.type"]] == "windows" && !nzchar(Sys.getenv("CURL_SSL_BACKEND"))
 ) {
@@ -23,6 +23,10 @@ if (file.exists(helper_otel)) {
 # covers larger adversarial matrices, subprocesses, browser flows and telemetry.
 # Keep the selection here so devtools::test()/testthat::test_local() continue to
 # discover every test file. CI and tests/run-local.R explicitly set NOT_CRAN=true.
+# Both suites should assert shinyOAuth behavior. Avoid pinning dependency error
+# wording, private output attributes or malformed-input handling when multiple
+# upstream behaviors are safe for shinyOAuth. Remove such assertions rather than
+# hiding them from CRAN; retain package-level rejection and interoperability tests.
 cran_tests <- c(
   # Public constructors, provider defaults and input validation.
   "basic",

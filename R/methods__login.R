@@ -66,7 +66,11 @@ prepare_call_internal <- function(
   .defer_build = FALSE,
   .transaction_context = NULL,
   .smart_launch = NULL,
-  .authorization_request = FALSE
+  .authorization_request = FALSE,
+  .requested_scopes = NULL,
+  .target_limits = NULL,
+  .accepted_extra_scopes = NULL,
+  .preflight = FALSE
 ) {
   # Verify input  --------------------------------------------------------------
 
@@ -99,7 +103,37 @@ prepare_call_internal <- function(
   validate_browser_token(browser_token)
 
   flow_trace_id <- gen_trace_id()
+  if (!is.null(.target_limits)) {
+    .target_limits <- token_target_reauthorization_limits(
+      oauth_client,
+      .target_limits
+    )
+  }
   effective_scopes <- effective_client_scopes(oauth_client)
+  configured_scopes <- NULL
+  if (!is.null(.requested_scopes)) {
+    .requested_scopes <- authorization_scope_limit(
+      oauth_client,
+      .requested_scopes
+    )
+    configured_scopes <- effective_scopes
+    effective_scopes <- .requested_scopes
+  }
+  # An empty retained grant is a bound, not permission to accept new defaults.
+  empty_extra_scope_limit <- !is.null(.accepted_extra_scopes) &&
+    !length(effective_scopes)
+  .accepted_extra_scopes <- authorization_extra_scope_limit(
+    oauth_client,
+    .accepted_extra_scopes,
+    effective_scopes
+  )
+  if (
+    length(.accepted_extra_scopes) &&
+      is.null(.requested_scopes) &&
+      length(effective_scopes)
+  ) {
+    err_input("Extra scope evidence requires a reauthorization scope limit")
+  }
   requested_max_age <- provider_auth_max_age(oauth_client@provider)
   if (!is.null(.requested_max_age)) {
     max_age_info <- inspect_auth_max_age(list(max_age = .requested_max_age))
@@ -187,6 +221,17 @@ prepare_call_internal <- function(
           client_id = oauth_client@client_id,
           redirect_uri = oauth_client@redirect_uri,
           scopes = effective_scopes,
+          configured_scopes = configured_scopes,
+          accepted_extra_scopes = if (
+            length(.accepted_extra_scopes) || empty_extra_scope_limit
+          ) {
+            connection_data_encode(.accepted_extra_scopes)
+          },
+          target_limits = if (is.null(.target_limits)) {
+            NULL
+          } else {
+            connection_data_encode(.target_limits)
+          },
           max_age = requested_max_age,
           provider = oauth_client@provider |> provider_fingerprint(),
           client_policy = state_client_policy_fingerprint(oauth_client),
@@ -210,6 +255,12 @@ prepare_call_internal <- function(
           )
         }
         state_decrypt_gcm(payload, key = oauth_client@state_key)
+
+        # Replacement preflight uses the exact state encoder and both size
+        # policies, but creates no pending login and performs no provider work.
+        if (isTRUE(.preflight)) {
+          return(invisible(NULL))
+        }
 
         # Store in state store -----------------------------------------------------
 
@@ -444,24 +495,28 @@ build_authorization_params <- function(
 
   scopes <- as_scope_tokens(scopes %||% NULL)
   if (length(scopes) > 0) {
-    params[["scope"]] <- paste(scopes, collapse = " ")
+    params[["scope"]] <- paste(
+      token_target_authorization_parameters(oauth_client, scopes),
+      collapse = " "
+    )
   }
-  if (length(oauth_client@resource) > 0) {
+  if (
+    token_targets_configured(oauth_client) &&
+      identical(oauth_client@provider@token_target_mode, "rfc8707")
+  ) {
+    params[["resource"]] <- unique(vapply(
+      oauth_client@token_targets,
+      function(item) item[["resource"]],
+      ""
+    ))
+  } else if (length(oauth_client@resource) > 0) {
     params[["resource"]] <- oauth_client@resource
   }
 
   # OIDC claims parameter (OIDC Core Section 5.5): JSON-encode claim lists while
   # preserving explicit null values used to request claims without parameters.
   if (!is.null(oauth_client@claims)) {
-    if (is.list(oauth_client@claims)) {
-      params[["claims"]] <- jsonlite::toJSON(
-        oauth_client@claims,
-        auto_unbox = TRUE,
-        null = "null"
-      )
-    } else {
-      params[["claims"]] <- oauth_client@claims
-    }
+    params[["claims"]] <- claims_request_json(oauth_client@claims)
   }
 
   # OIDC Core allows acr_values as a voluntary hint to the provider.
@@ -626,6 +681,7 @@ push_authorization_request <- function(client, params, shiny_session = NULL) {
       )
       req <- httr2::req_method(req, "POST")
 
+      request_started_at <- as.numeric(Sys.time())
       resp <- with_otel_span(
         "shinyOAuth.login.par.http",
         {
@@ -633,7 +689,12 @@ push_authorization_request <- function(client, params, shiny_session = NULL) {
           # request_uri, so do not replay it after transport or transient HTTP
           # failures. req_with_dpop_retry() still performs the one bounded
           # replay required to answer a DPoP nonce challenge.
-          resp <- req_with_dpop_retry(req, client, idempotent = FALSE)
+          resp <- req_with_dpop_retry(
+            req,
+            client,
+            idempotent = FALSE,
+            track_start = TRUE
+          )
           otel_record_http_result(resp)
           resp
         },
@@ -709,6 +770,13 @@ push_authorization_request <- function(client, params, shiny_session = NULL) {
         )
       }
       if (
+        !is_absolute_uri(request_uri) || grepl("#", request_uri, fixed = TRUE)
+      ) {
+        err_token(
+          "Pushed authorization request response request_uri must be an absolute URI without a fragment"
+        )
+      }
+      if (
         !is.numeric(expires_in) ||
           length(expires_in) != 1L ||
           !is.finite(expires_in) ||
@@ -724,7 +792,21 @@ push_authorization_request <- function(client, params, shiny_session = NULL) {
         )
       }
 
-      list(request_uri = request_uri, expires_in = expires_in)
+      started_at <- attr(
+        resp,
+        "shinyOAuth.request_started_at",
+        exact = TRUE
+      ) %||%
+        request_started_at
+      if (as.numeric(Sys.time()) >= started_at + expires_in) {
+        err_token(
+          "Pushed authorization request URI expired before it could be used"
+        )
+      }
+      structure(
+        list(request_uri = request_uri, expires_in = expires_in),
+        shinyOAuth.par_started_at = started_at
+      )
     },
     attributes = otel_client_attributes(
       client = client,
@@ -751,15 +833,15 @@ push_authorization_request <- function(client, params, shiny_session = NULL) {
 #'
 #' @param auth_url Length-1 authorization URL string.
 #' @param par_resp List returned by `push_authorization_request()`.
-#' @param issued_at Optional numeric timestamp in seconds since the Unix epoch.
-#'   Defaults to the current time.
+#' @param issued_at Conservative request start time in seconds since the Unix
+#'   epoch. Defaults to the successful PAR attempt's recorded start time.
 #' @return `auth_url`, with PAR metadata attributes attached when possible.
 #' @keywords internal
 #' @noRd
 attach_par_auth_url_metadata <- function(
   auth_url,
   par_resp,
-  issued_at = as.numeric(Sys.time())
+  issued_at = attr(par_resp, "shinyOAuth.par_started_at", exact = TRUE)
 ) {
   if (
     (!is_valid_string(auth_url) && !is.list(auth_url)) || !is.list(par_resp)
@@ -792,6 +874,11 @@ attach_par_auth_url_metadata <- function(
     )
   } else {
     NULL
+  }
+  if (!is.null(expires_at) && Sys.time() >= expires_at) {
+    err_token(
+      "Pushed authorization request URI expired before it could be used"
+    )
   }
 
   structure(
@@ -1030,6 +1117,7 @@ build_auth_url <- function(
     }
 
     if (isTRUE(par_used)) {
+      par_started_at <- as.numeric(Sys.time())
       par_resp <- push_authorization_request(
         client = oauth_client,
         params = list(
@@ -1051,7 +1139,16 @@ build_auth_url <- function(
         )
       )
 
-      return(attach_par_auth_url_metadata(auth_url, par_resp))
+      return(attach_par_auth_url_metadata(
+        auth_url,
+        par_resp,
+        issued_at = attr(
+          par_resp,
+          "shinyOAuth.par_started_at",
+          exact = TRUE
+        ) %||%
+          par_started_at
+      ))
     }
 
     return(authorization_url_append(
@@ -1064,6 +1161,7 @@ build_auth_url <- function(
   }
 
   if (isTRUE(par_used)) {
+    par_started_at <- as.numeric(Sys.time())
     par_resp <- push_authorization_request(
       client = oauth_client,
       params = params
@@ -1081,7 +1179,12 @@ build_auth_url <- function(
       )
     )
 
-    return(attach_par_auth_url_metadata(auth_url, par_resp))
+    return(attach_par_auth_url_metadata(
+      auth_url,
+      par_resp,
+      issued_at = attr(par_resp, "shinyOAuth.par_started_at", exact = TRUE) %||%
+        par_started_at
+    ))
   }
 
   authorization_url_append(oauth_client@provider@auth_url, params)
@@ -1167,7 +1270,7 @@ otel_callback_parent_hint <- function(oauth_client, encrypted_payload) {
 
 ## 2.1 Entry point -------------------------------------------------------------
 
-#' Handle OAuth 2.0 callback: verify state, swap code for token, verify token
+#' Validate an OAuth 2.0 callback and retrieve tokens
 #'
 #' Check a returning login request and exchange the provider's temporary
 #' authorization code for an [OAuthToken] (OAuth 2.0 Authorization Code flow).
@@ -1189,12 +1292,11 @@ otel_callback_parent_hint <- function(oauth_client, encrypted_payload) {
 #' @param code Authorization code received from the provider on a classic
 #'   direct callback.
 #' @param state Encrypted state payload returned by the provider on a classic
-#'   direct callback. This should be the same value that was originally sent in
-#'   [prepare_call()].
+#'   direct callback, unchanged from the value sent by [prepare_call()].
 #' @param browser_token Browser token present in the user's session. This is
 #'   usually managed by [oauth_module_server()].
-#' @param shiny_session Optional captured Shiny session details for audit events.
-#'   Normally supplied by the module; leave `NULL` when calling directly.
+#' @param shiny_session Optional captured Shiny session details for audit events,
+#'   normally supplied by the module.
 #'
 #' @param iss Optional RFC 9207 callback issuer (`iss`) from the authorization
 #'   response. Pass this when one callback URL can receive responses from more
@@ -1402,7 +1504,8 @@ handle_callback_internal <- function(
   state_store_values = NULL,
   trace_id_seeded = FALSE,
   shiny_session = NULL,
-  .transaction_context = NULL
+  .transaction_context = NULL,
+  .on_state_validated = NULL
 ) {
   # Type checks ----------------------------------------------------------------
 
@@ -1641,6 +1744,9 @@ handle_callback_internal <- function(
         )
       }
       audit_callback_validation_success(oauth_client, payload, shiny_session)
+      if (!is.null(.on_state_validated)) {
+        .on_state_validated(payload)
+      }
 
       # Swap code for token --------------------------------------------------------
 
@@ -1686,17 +1792,32 @@ handle_callback_internal <- function(
         }
       )
 
+      target_request <- token_target_request(
+        oauth_client,
+        limits = if (is.null(payload[["target_limits"]])) {
+          NULL
+        } else {
+          connection_data_decode(payload[["target_limits"]])
+        }
+      )
       # Perform token exchange
       token_request_started_at <- as.numeric(Sys.time())
       token_set <- tryCatch(
         {
-          ts <- call_with_optional_shiny_session(
-            swap_code_for_token_set,
+          exchange_args <- list(
             client = oauth_client,
             code = code,
             code_verifier = code_verifier,
             shiny_session = shiny_session
           )
+          if (!is.null(target_request)) {
+            exchange_args[["target_request"]] <- target_request
+          }
+          ts <- do.call(
+            call_with_optional_shiny_session,
+            c(list(swap_code_for_token_set), exchange_args)
+          )
+          ts <- token_target_response(oauth_client, ts, target_request)
           try(
             audit_event(
               "token_exchange",
@@ -1825,7 +1946,13 @@ handle_callback_internal <- function(
         nonce = nonce,
         is_refresh = FALSE,
         requested_max_age = payload_requested_max_age(payload),
-        requested_scopes = payload[["scopes"]] %||% NULL,
+        requested_scopes = token_target_verification_scopes(
+          oauth_client,
+          target_request,
+          token_set
+        ) %||%
+          payload[["scopes"]] %||%
+          NULL,
         shiny_session = shiny_session,
         defer_certificate_binding = defer_certificate_binding,
         introspection_pending = isTRUE(introspect)
@@ -1885,12 +2012,18 @@ handle_callback_internal <- function(
           oauth_client = oauth_client,
           token = token,
           introspection_result = intro_res,
-          requested_scopes = payload[["scopes"]] %||%
+          requested_scopes = token_target_verification_scopes(
+            oauth_client,
+            target_request,
+            token_set
+          ) %||%
+            payload[["scopes"]] %||%
             effective_client_scopes(oauth_client),
           phase = "exchange_code",
           token_response_cnf = token_set[["cnf"]],
           expires_in_missing = is.null(token_set[["expires_in"]]),
-          defer_subject_match = TRUE
+          defer_subject_match = TRUE,
+          target_request = target_request
         )
         validate_token_cnf_consistency(
           access_token = token@access_token,
@@ -1975,6 +2108,30 @@ handle_callback_internal <- function(
 
       # Audit: login success with redacted identifiers
       token <- smart_update_token_context(oauth_client, token)
+      validate_token_target_grant(
+        oauth_client,
+        token@granted_scopes,
+        target_request
+      )
+      if (
+        is.null(target_request) &&
+          (!is.null(payload[["configured_scopes"]]) ||
+            !is.null(payload[["accepted_extra_scopes"]]))
+      ) {
+        validate_refresh_scope_grant(
+          oauth_client,
+          token@granted_scopes,
+          list(
+            scopes = payload[["scopes"]],
+            required_scopes = oauth_client@required_scopes,
+            accepted_extra_scopes = if (
+              !is.null(payload[["accepted_extra_scopes"]])
+            ) {
+              connection_data_decode(payload[["accepted_extra_scopes"]])
+            }
+          )
+        )
+      }
       validate_token_acceptance_deadline(token)
       try(
         {
@@ -2102,6 +2259,8 @@ resolve_userinfo_subject <- function(oauth_client, userinfo) {
 #'   client's effective scopes.
 #' @param expires_in_missing Whether the token response omitted its lifetime.
 #' @param defer_subject_match Defer subject comparison that needs UserInfo.
+#' @param target_request Optional validated target request, used to qualify
+#'   Microsoft introspection scopes for the resource being acquired.
 #' @return The updated [OAuthToken], with `cnf` and `token_type` augmented from
 #'   the introspection response when available.
 #' @keywords internal
@@ -2114,7 +2273,8 @@ enforce_token_introspection_policy <- function(
   phase = NULL,
   token_response_cnf = NULL,
   expires_in_missing = FALSE,
-  defer_subject_match = FALSE
+  defer_subject_match = FALSE,
+  target_request = NULL
 ) {
   S7::check_is_S7(oauth_client, class = OAuthClient)
   S7::check_is_S7(token, class = OAuthToken)
@@ -2233,6 +2393,14 @@ enforce_token_introspection_policy <- function(
       requested_scopes %||% effective_client_scopes(oauth_client)
     )
     intro_scope_raw <- raw[["scope"]] %||% NULL
+    if (token_targets_configured(oauth_client) && !is.null(intro_scope_raw)) {
+      # Introspection describes the access token, including when the token
+      # endpoint omitted scope. Refresh consent is retained separately.
+      requested_scopes <- setdiff(
+        requested_scopes,
+        intersect("offline_access", token_target_oidc_scopes(oauth_client))
+      )
+    }
     if ("scope" %in% names(raw)) {
       validate_response_scope(
         intro_scope_raw,
@@ -2240,6 +2408,15 @@ enforce_token_introspection_policy <- function(
         allow_empty = client_uses_smart_scopes(oauth_client) ||
           length(requested_scopes) == 0L
       )
+    }
+    if (!is.null(intro_scope_raw) && !is.null(target_request)) {
+      # Introspection describes the same selected resource as the token
+      # response. Validate its raw shape before applying provider conventions.
+      intro_scope_raw <- token_target_response(
+        oauth_client,
+        list(scope = intro_scope_raw),
+        target_request
+      )[["scope"]]
     }
     if (client_uses_smart_scopes(oauth_client)) {
       if (is.null(intro_scope_raw)) {
@@ -2286,7 +2463,11 @@ enforce_token_introspection_policy <- function(
       } else {
         intro_scopes <- normalize_scope_tokens(intro_scope_raw)
 
-        missing <- evaluate_scope_coverage(requested_scopes, intro_scopes)[[
+        missing <- client_scope_coverage(
+          oauth_client,
+          requested_scopes,
+          intro_scopes
+        )[[
           "missing"
         ]]
         if (length(missing) > 0) {
@@ -2475,7 +2656,8 @@ swap_code_for_token_set <- function(
   client,
   code,
   code_verifier,
-  shiny_session = NULL
+  shiny_session = NULL,
+  target_request = NULL
 ) {
   S7::check_is_S7(client, class = OAuthClient)
 
@@ -2487,6 +2669,14 @@ swap_code_for_token_set <- function(
         code = code,
         redirect_uri = client@redirect_uri,
         code_verifier = code_verifier
+      )
+      target_request <- validate_token_target_request(
+        client,
+        target_request %||% token_target_request(client)
+      )
+      params <- utils::modifyList(
+        params,
+        token_target_parameters(client, target_request)
       )
       if (length(client@resource) > 0) {
         params[["resource"]] <- client@resource
@@ -2568,9 +2758,9 @@ swap_code_for_token_set <- function(
       )
       # Security: reject redirect responses to prevent credential leakage
       reject_redirect_response(resp, context = "token_exchange")
-      if (httr2::resp_is_error(resp)) {
+      if (httr2::resp_status(resp) != 200L) {
         err_http(
-          "Token exchange failed",
+          "Token exchange failed: successful token responses require HTTP 200",
           resp,
           context = list(phase = "exchange_code")
         )
@@ -2709,6 +2899,18 @@ verify_token_set <- function(
   if (!is_valid_access_token(token_set[["access_token"]])) {
     err_token("Token response access_token contains invalid characters")
   }
+  # Refresh may omit an ID token, but a supplied value must not be mistaken
+  # for omission and silently inherit the previously validated identity.
+  if (
+    !is.null(token_set[["id_token"]]) &&
+      !is_valid_string(token_set[["id_token"]])
+  ) {
+    err_id_token("Token response id_token must be a non-empty string")
+  }
+  token_set[["scope"]] <- normalize_provider_response_scope(
+    client@provider,
+    token_set[["scope"]]
+  )
   token_set <- smart_verify_token_response(client, token_set, is_refresh)
 
   scope_validation_mode <- client@scope_validation %||% "warn"
@@ -2838,7 +3040,11 @@ verify_token_set <- function(
           length(requested_scopes) > 0 &&
           !scope_is_omitted
       ) {
-        missing <- evaluate_scope_coverage(requested_scopes, granted_scopes)[[
+        missing <- client_scope_coverage(
+          client,
+          requested_scopes,
+          granted_scopes
+        )[[
           "missing"
         ]]
         if (length(missing) > 0) {
