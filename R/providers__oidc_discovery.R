@@ -48,10 +48,13 @@
 #' match the issuer host; use `jwks_host_allow_only` for a known different host.
 #'
 #' The document must advertise the code flow (`response_types_supported`
-#' includes `"code"`), non-empty `subject_types_supported`, RS256 in
-#' `id_token_signing_alg_values_supported`, and a `jwks_uri` even when automatic
-#' ID token validation is disabled. The permitted ID token algorithms are the
-#' intersection of `id_token_allowed_algs` and the advertised algorithms; an empty
+#' includes `"code"`), non-empty `subject_types_supported`, signing algorithm
+#' metadata, and a `jwks_uri` even when automatic ID token validation is disabled.
+#' Standard OIDC requires RS256 in the signing metadata. Explicit
+#' `id_token_profile = "fapi2"` instead requires a FAPI signing capability and
+#' restricts negotiation to implemented FAPI algorithms. The permitted algorithms
+#' are the intersection of the profile, `id_token_allowed_algs` and the
+#' advertised algorithms; an empty
 #' intersection is an error. Discovery keeps PKCE `S256` and errors when the
 #' provider explicitly excludes it, unless you select `pkce_method = "plain"`.
 #'
@@ -99,6 +102,13 @@
 #'  supported algorithms, the intersection of advertised and caller-provided
 #'  algorithms is used to avoid runtime mismatches. If there's no overlap,
 #'  discovery fails with a configuration error (no fallback).
+#' @param id_token_profile ID-token algorithm policy: `"oidc"` (default)
+#'  requires the standard RS256 discovery capability. `"fapi2"` accepts FAPI 2.0
+#'  signing metadata without RS256 and restricts the negotiated algorithms to
+#'  the implemented FAPI choices ES256, Ed25519 and EdDSA. Caller restrictions
+#'  and advertised algorithms still apply. This selects only the ID-token
+#'  algorithm policy; configure PAR, client authentication and sender constraint
+#'  separately. It does not establish FAPI conformance.
 #' @param allowed_token_types Character vector of allowed token types for
 #'  access tokens issued by this provider. Defaults to 'Bearer'
 #' @param jwks_host_issuer_match When TRUE (default), require the discovered
@@ -143,8 +153,45 @@ oauth_provider_oidc_discover <- function(
   jwks_host_issuer_match = TRUE,
   issuer_match = c("url", "host", "none"),
   ...,
-  allowed_algs = NULL
+  allowed_algs = NULL,
+  id_token_profile = c("oidc", "fapi2")
 ) {
+  args <- as.list(match.call())[-1L]
+  if (".oauth_only" %in% names(args)) {
+    err_input("Unsupported discovery argument")
+  }
+  args <- lapply(args, eval, envir = parent.frame())
+  do.call(.discover_provider, args)
+}
+
+.discover_provider <- function(
+  issuer,
+  name = NULL,
+  use_pkce = TRUE,
+  use_nonce = TRUE,
+  id_token_validation = TRUE,
+  token_auth_style = NULL,
+  id_token_allowed_algs = c(
+    "RS256",
+    "RS384",
+    "RS512",
+    "ES256",
+    "ES384",
+    "ES512",
+    "Ed25519",
+    "EdDSA"
+  ),
+  allowed_token_types = c("Bearer"),
+  jwks_host_issuer_match = TRUE,
+  issuer_match = c("url", "host", "none"),
+  ...,
+  allowed_algs = NULL,
+  id_token_profile = c("oidc", "fapi2"),
+  .oauth_only = FALSE
+) {
+  id_token_profile <- match.arg(id_token_profile)
+  default_id_token_algs <- missing(id_token_allowed_algs) &&
+    missing(allowed_algs)
   allowed_algs <- resolve_argument_alias(
     id_token_allowed_algs,
     allowed_algs,
@@ -153,9 +200,25 @@ oauth_provider_oidc_discover <- function(
     "id_token_allowed_algs",
     "allowed_algs"
   )
+  userinfo_default_algs <- allowed_algs
+  if (identical(id_token_profile, "fapi2")) {
+    fapi_algs <- c("ES256", "ED25519", "EDDSA")
+    if (default_id_token_algs) {
+      allowed_algs <- fapi_algs
+    } else {
+      allowed_algs <- intersect(toupper(allowed_algs), fapi_algs)
+    }
+    if (!length(allowed_algs)) {
+      err_config("No supported FAPI 2.0 ID-token algorithms allowed")
+    }
+  }
   issuer_match <- match.arg(issuer_match)
   original_input <- issuer
-  issuer <- .discover_normalize_issuer_input(issuer)
+  issuer <- if (.oauth_only) {
+    issuer
+  } else {
+    .discover_normalize_issuer_input(issuer)
+  }
   document_input <- !identical(original_input, issuer)
 
   # If callers explicitly turn off ID
@@ -174,7 +237,11 @@ oauth_provider_oidc_discover <- function(
   .discover_assert_valid_issuer(issuer)
 
   # 2) Build and fetch discovery document
-  req <- .discover_build_request(issuer)
+  req <- if (.oauth_only) {
+    .discover_build_oauth_request(issuer)
+  } else {
+    .discover_build_request(issuer)
+  }
   resp <- .discover_fetch_response(req, issuer)
 
   # 3) Parse JSON and normalize to list
@@ -182,7 +249,11 @@ oauth_provider_oidc_discover <- function(
   .discover_validate_jose_metadata(disc)
 
   # 3a) Reject incomplete or malformed required OIDC Provider Metadata.
-  .discover_validate_required_metadata(disc)
+  .discover_validate_required_metadata(
+    disc,
+    id_token_profile,
+    oauth_only = .oauth_only
+  )
 
   # 4) Extract key endpoints
   endpoints <- .discover_extract_endpoints(disc)
@@ -195,7 +266,8 @@ oauth_provider_oidc_discover <- function(
     .discover_assert_valid_issuer(disc[["issuer"]])
     if (!identical(rtrim_slash(disc[["issuer"]]), issuer)) {
       err_config(
-        "OIDC discovery issuer mismatch: issuer does not map to the requested metadata location"
+        "OIDC discovery issuer mismatch: issuer does not map to the requested metadata location",
+        context = list(claim = "iss", reason = "discovery_issuer_mismatch")
       )
     }
     expected_issuer <- disc[["issuer"]]
@@ -259,7 +331,7 @@ oauth_provider_oidc_discover <- function(
   # UserInfo has independent discovery metadata and must retain the caller's
   # policy before the ID-token intersection narrows it.
   userinfo_allowed_algs <- toupper(
-    dots[["userinfo_allowed_algs"]] %||% allowed_algs
+    dots[["userinfo_allowed_algs"]] %||% userinfo_default_algs
   )
   userinfo_allowed_algs <- intersect(
     userinfo_allowed_algs,
@@ -277,7 +349,9 @@ oauth_provider_oidc_discover <- function(
   dots[["userinfo_allowed_algs"]] <- userinfo_allowed_algs
 
   # 11) Negotiate allowed ID token algs
-  allowed_algs <- .discover_negotiate_algs(allowed_algs, disc, iss)
+  if (!.oauth_only) {
+    allowed_algs <- .discover_negotiate_algs(allowed_algs, disc, iss)
+  }
   par_required <- .discover_parse_optional_boolean(
     disc,
     "require_pushed_authorization_requests"
@@ -427,7 +501,7 @@ oauth_provider_oidc_discover <- function(
   if (length(duplicate_dot_names) > 0) {
     provider_args[duplicate_dot_names] <- NULL
   }
-  provider_args[["infer_oidc_from_issuer"]] <- TRUE
+  provider_args[["infer_oidc_from_issuer"]] <- !.oauth_only
   dots[["infer_oidc_from_issuer"]] <- NULL
 
   do.call(oauth_provider, c(provider_args, dots))
@@ -647,7 +721,7 @@ oauth_provider_oidc_discover <- function(
   disc
 }
 
-#' Internal: validate required OpenID Provider Metadata
+#' Internal: validate required discovery metadata for the selected protocol
 #'
 #' Enforces the mandatory metadata and capabilities needed by shinyOAuth's
 #' Authorization Code Flow before any discovered values are used.
@@ -658,7 +732,11 @@ oauth_provider_oidc_discover <- function(
 #'
 #' @keywords internal
 #' @noRd
-.discover_validate_required_metadata <- function(disc) {
+.discover_validate_required_metadata <- function(
+  disc,
+  id_token_profile = "oidc",
+  oauth_only = FALSE
+) {
   response_types <- .discover_require_string_array(
     disc,
     "response_types_supported"
@@ -673,32 +751,67 @@ oauth_provider_oidc_discover <- function(
     )
   }
 
-  .discover_require_string_array(disc, "subject_types_supported")
+  if (!oauth_only) {
+    .discover_require_string_array(disc, "subject_types_supported")
 
-  signing_algs <- .discover_require_string_array(
-    disc,
-    "id_token_signing_alg_values_supported"
-  )
-  if (!("RS256" %in% signing_algs)) {
-    err_parse(
-      c(
-        "x" = paste(
-          "Discovery id_token_signing_alg_values_supported must include",
-          "RS256"
+    signing_algs <- .discover_require_string_array(
+      disc,
+      "id_token_signing_alg_values_supported"
+    )
+    required_algs <- if (identical(id_token_profile, "fapi2")) {
+      c("PS256", "ES256", "Ed25519", "EdDSA")
+    } else {
+      "RS256"
+    }
+    if (!any(required_algs %in% signing_algs)) {
+      err_parse(
+        c(
+          "x" = paste(
+            "Discovery id_token_signing_alg_values_supported must include",
+            paste(required_algs, collapse = " or ")
+          )
+        ),
+        context = list(
+          id_token_signing_alg_values_supported = signing_algs
         )
-      ),
-      context = list(
-        id_token_signing_alg_values_supported = signing_algs
       )
+    }
+
+    jwks_uri <- disc[["jwks_uri"]] %||% ""
+    if (!is_valid_string(jwks_uri) || !nzchar(trimws(jwks_uri))) {
+      err_parse(
+        "Discovery missing required jwks_uri metadata",
+        context = list(jwks_uri = jwks_uri)
+      )
+    }
+  }
+  if (
+    oauth_only &&
+      any(
+        c("private_key_jwt", "client_secret_jwt") %in%
+          unlist(disc[["token_endpoint_auth_methods_supported"]])
+      ) &&
+      is.null(disc[["token_endpoint_auth_signing_alg_values_supported"]])
+  ) {
+    err_parse(
+      "OAuth discovery requires token_endpoint_auth_signing_alg_values_supported for JWT client authentication"
     )
   }
-
-  jwks_uri <- disc[["jwks_uri"]] %||% ""
-  if (!is_valid_string(jwks_uri) || !nzchar(trimws(jwks_uri))) {
+  if (
+    oauth_only &&
+      "none" %in%
+        unlist(disc[["token_endpoint_auth_signing_alg_values_supported"]])
+  ) {
     err_parse(
-      "Discovery missing required jwks_uri metadata",
-      context = list(jwks_uri = jwks_uri)
+      "OAuth discovery must not advertise none for JWT client authentication"
     )
+  }
+  if (
+    oauth_only &&
+      "jwks_uri" %in% names(disc) &&
+      !is_valid_string(disc[["jwks_uri"]])
+  ) {
+    err_parse("OAuth discovery jwks_uri must be a non-empty URL string")
   }
 
   # OIDC Discovery 4.2 requires zero-element claims to be omitted. In

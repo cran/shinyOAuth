@@ -1,7 +1,7 @@
 Package: shinyOAuth
 Title: OIDC Authentication and OAuth Authorization for 'shiny'
         Applications
-Version: 0.7.0
+Version: 0.8.0
 Authors@R: 
     person("Luka", "Koning", email = "koningluka@gmail.com", role = c("aut", "cre", "cph"))
 Description: Provides a simple, configurable framework for 'OpenID Connect'
@@ -16,7 +16,7 @@ Description: Provides a simple, configurable framework for 'OpenID Connect'
 License: MIT + file LICENSE
 Encoding: UTF-8
 Imports: S7 (>= 0.2.0), R6 (>= 2.0), rlang (>= 1.0.0), shiny (>=
-        1.7.0), jsonlite (>= 1.6), openssl (>= 2.1.2), httr2 (>=
+        1.7.0), jsonlite (>= 1.6), openssl (>= 2.6.0), httr2 (>=
         1.1.0), curl, urltools (>= 1.7.3), cachem (>= 1.1.0), callr (>=
         3.7.6), jose (>= 1.2.0), lifecycle (>= 1.0.0), cli (>= 3.0.0),
         htmltools (>= 0.5.0), otel (>= 0.2.0)
@@ -30,10 +30,10 @@ VignetteBuilder: knitr
 URL: https://github.com/lukakoning/shinyOAuth,
         https://lukakoning.github.io/shinyOAuth/
 BugReports: https://github.com/lukakoning/shinyOAuth/issues
-Config/roxygen2/version: 8.1.0
+Config/roxygen2/version: 8.1.1
 NeedsCompilation: no
-Packaged: 2026-10-31 12:08:44 UTC; dhrko
+Packaged: 2026-11-17 22:38:12 UTC; dhrko
 Author: Luka Koning [aut, cre, cph]
 Maintainer: Luka Koning <koningluka@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-10-31 12:30:02 UTC
+Date/Publication: 2026-11-17 23:00:02 UTC

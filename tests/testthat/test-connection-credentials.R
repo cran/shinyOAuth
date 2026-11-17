@@ -35,6 +35,18 @@ test_that("encrypted credential schemas retain token continuity without live obj
   key <- openssl::rand_bytes(32L)
   sealed <- connection_credentials_seal(token, owner, id, client, key, 1000)
   expect_false(grepl("synthetic", sealed, fixed = TRUE))
+  wrapper <- state_test_unwrap(sealed)
+  expect_identical(wrapper[["v"]], 2L)
+  for (field in c("ct", "tg", "iv")) {
+    altered <- wrapper
+    altered[[field]] <- base64url_encode(state_test_flip_byte(
+      base64url_decode_raw(wrapper[[field]])
+    ))
+    expect_error(
+      connection_credentials_open(state_test_wrap(altered), owner, id, client, key),
+      "unavailable or incompatible", class = "shinyOAuth_token_error"
+    )
+  }
   restored <- connection_credentials_open(sealed, owner, id, client, key)
   expect_identical(
     connection_credentials_open(
@@ -99,6 +111,41 @@ test_that("encrypted credential schemas retain token continuity without live obj
   expect_error(
     connection_credentials_seal(token, owner, id, client, "password", 1000),
     "32-byte raw key"
+  )
+})
+
+test_that("GCM credential ciphertext fits the exact plaintext limit", {
+  skip_on_cran()
+  client <- connection_test_client(make_test_client(), c(api = "https://api.example/v1"))
+  token <- OAuthToken(
+    access_token = "synthetic-access", token_type = "Bearer",
+    extra_fields = list(note = "")
+  )
+  owner <- strrep("a", 32)
+  id <- strrep("b", 32)
+  key <- openssl::rand_bytes(32L)
+  empty <- connection_credentials_seal(token, owner, id, client, key, 1000)
+  payload <- state_decrypt_gcm(empty, connection_credential_key(key))
+  overhead <- nchar(jsonlite::toJSON(
+    payload, auto_unbox = TRUE, digits = NA, null = "null"
+  ), type = "bytes")
+  # JSON escaping reaches the serialized limit within the plain-data byte budget.
+  remaining <- 1024^2 - overhead
+  token@extra_fields <- list(note = paste0(
+    strrep("\n", remaining %/% 2L), strrep("x", remaining %% 2L)
+  ))
+  sealed <- connection_credentials_seal(token, owner, id, client, key, 1000)
+  wrapper <- jsonlite::fromJSON(rawToChar(base64url_decode_raw(sealed)))
+  expect_length(
+    base64url_decode_raw(wrapper[["ct"]]),
+    1024^2
+  )
+  restored <- connection_credentials_open(sealed, owner, id, client, key)
+  expect_identical(restored[["token"]]@extra_fields, token@extra_fields)
+  token@extra_fields <- list(note = paste0(token@extra_fields[["note"]], "x"))
+  expect_error(
+    connection_credentials_seal(token, owner, id, client, key, 1000),
+    "credential data exceeds the size limit"
   )
 })
 

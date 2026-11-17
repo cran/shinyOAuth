@@ -116,10 +116,10 @@ validate_id_token <- function(
     err_id_token(protocol_diagnostic_message("Unsupported JWT alg", alg))
   }
   if (!isTRUE(skip_signature) && !(alg %in% allowed_algs)) {
-    err_id_token(paste0(
-      "JWT alg not allowed by provider: ",
-      header_fields[["alg"]]
-    ))
+    err_id_token(
+      paste0("JWT alg not allowed by provider: ", header_fields[["alg"]]),
+      context = list(reason = "disallowed_algorithm")
+    )
   }
 
   parsed_payload <- tryCatch(
@@ -272,7 +272,10 @@ validate_id_token <- function(
         ) {
           err_id_token("No Microsoft JWKS key matches token issuer scope")
         }
-        err_id_token("ID token signature invalid")
+        err_id_token(
+          "ID token signature invalid",
+          context = list(reason = "invalid_signature")
+        )
       }
       if (identical(alg, "EdDSA")) {
         verified_eddsa_curve <- resolve_verified_eddsa_curve(
@@ -307,7 +310,12 @@ validate_id_token <- function(
         err_input("HS* validation requires client_secret")
       }
 
-      check_client_hmac_algorithm(client, alg, "ID token verification", err_id_token)
+      check_client_hmac_algorithm(
+        client,
+        alg,
+        "ID token verification",
+        err_id_token
+      )
 
       min_secret_bytes <- min_hmac_key_bytes(alg)
       if (length(hmac_secret_bytes(client_secret)) < min_secret_bytes) {
@@ -341,7 +349,7 @@ validate_id_token <- function(
   # For Microsoft tenant-independent metadata, the effective issuer is derived
   # from the token's GUID tid claim.
   if (!is_valid_string(payload[["iss"]])) {
-    err_id_token("Issuer mismatch/invalid")
+    err_id_token("Issuer mismatch/invalid", context = list(claim = "iss"))
   }
   if (
     !identical(
@@ -349,7 +357,7 @@ validate_id_token <- function(
       issuer_expectation[["expected_issuer"]]
     )
   ) {
-    err_id_token("Issuer mismatch/invalid")
+    err_id_token("Issuer mismatch/invalid", context = list(claim = "iss"))
   }
   aud <- normalize_jwt_audience(payload[["aud"]])
   # OIDC: aud MAY be a string or an array of strings. Accept length >= 1.
@@ -359,16 +367,25 @@ validate_id_token <- function(
       !anyNA(aud) &&
       all(nzchar(aud)))
   ) {
-    err_id_token("Audience invalid")
+    err_id_token("Audience invalid", context = list(claim = "aud"))
   }
   if (!(client_id %in% aud)) {
-    err_id_token("Audience does not include client_id")
+    err_id_token(
+      "Audience does not include client_id",
+      context = list(claim = "aud")
+    )
   }
   if (!all(aud %in% c(client_id, client@trusted_id_token_audiences))) {
-    err_id_token("ID token contains untrusted additional audiences")
+    err_id_token(
+      "ID token contains untrusted additional audiences",
+      context = list(claim = "aud")
+    )
   }
   if (!is_valid_oidc_sub(payload[["sub"]])) {
-    err_id_token("ID token sub claim must be 1 to 255 ASCII characters")
+    err_id_token(
+      "ID token sub claim must be 1 to 255 ASCII characters",
+      context = list(claim = "sub")
+    )
   }
   payload <- normalize_authenticated_id_token_claims(
     payload,
@@ -381,14 +398,20 @@ validate_id_token <- function(
     is_valid_string(expected_sub) &&
       !identical(payload[["sub"]], expected_sub)
   ) {
-    err_id_token("ID token sub claim does not match original (OIDC 12.2)")
+    err_id_token(
+      "ID token sub claim does not match original (OIDC 12.2)",
+      context = list(claim = "sub")
+    )
   }
   if (is.null(payload[["exp"]])) {
-    err_id_token("ID token missing exp claim")
+    err_id_token("ID token missing exp claim", context = list(claim = "exp"))
   }
   # Validate temporal claims are single, finite numerics before arithmetic
   if (!jwt_is_single_finite_number(payload[["exp"]])) {
-    err_id_token("exp claim must be a single finite number")
+    err_id_token(
+      "exp claim must be a single finite number",
+      context = list(claim = "exp")
+    )
   }
   exp_val <- as.numeric(payload[["exp"]])
 
@@ -399,14 +422,17 @@ validate_id_token <- function(
     lwe <- 0
   }
   if (exp_val <= (now - lwe)) {
-    err_id_token("ID token expired")
+    err_id_token("ID token expired", context = list(claim = "exp"))
   }
   # OIDC Core requires iat to be present on ID Tokens
   if (is.null(payload[["iat"]])) {
-    err_id_token("ID token missing iat claim")
+    err_id_token("ID token missing iat claim", context = list(claim = "iat"))
   }
   if (!jwt_is_single_finite_number(payload[["iat"]])) {
-    err_id_token("iat claim must be a single finite number when present")
+    err_id_token(
+      "iat claim must be a single finite number when present",
+      context = list(claim = "iat")
+    )
   }
   iat_val <- as.numeric(payload[["iat"]])
   if (iat_val > exp_val) {
@@ -467,19 +493,26 @@ validate_id_token <- function(
   # OIDC Core section 2 defines nonce as a string even when the request omitted
   # it. Test membership so an explicit JSON null cannot masquerade as absence.
   if (
-    "nonce" %in% names(payload) &&
+    "nonce" %in%
+      names(payload) &&
       !(is.character(payload[["nonce"]]) &&
         length(payload[["nonce"]]) == 1L &&
         !is.na(payload[["nonce"]]))
   ) {
-    err_id_token("ID token nonce claim must be a JSON string when present")
+    err_id_token(
+      "ID token nonce claim must be a JSON string when present",
+      context = list(claim = "nonce")
+    )
   }
   if (is_valid_string(expected_nonce)) {
     if (is.null(payload[["nonce"]])) {
-      err_id_token("ID token missing nonce claim")
+      err_id_token(
+        "ID token missing nonce claim",
+        context = list(claim = "nonce")
+      )
     }
     if (!identical(payload[["nonce"]], expected_nonce)) {
-      err_id_token("ID token nonce mismatch")
+      err_id_token("ID token nonce mismatch", context = list(claim = "nonce"))
     }
   }
   # OIDC Core §3.1.3.7 permits extension-specific azp validation. Our policy

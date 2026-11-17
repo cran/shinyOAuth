@@ -165,24 +165,28 @@ state_decrypt_fail <- function(msg, context = list()) {
   err_invalid_state(msg, context = context)
 }
 
-#' Internal: encrypt a state payload into the compact GCM envelope
+#' Internal: encrypt a state payload into an authenticated envelope
 #'
-#' Serializes the payload as JSON, encrypts it with AES-GCM, and returns the
-#' package's base64url-wrapped state token format containing version, IV, tag,
+#' Uses AES-256-GCM with a separate authentication tag. Returns a
+#' base64url-wrapped token containing version, IV, tag,
 #' and ciphertext. Used when login state is created before redirect.
 #'
 #' @param payload State payload to encrypt.
 #' @param key Character passphrase or raw key material.
-#' @param version Envelope version number.
+#' @param version Envelope version. Only version 2 is supported.
 #' @param min_key_chars Minimum passphrase length for character keys.
 #' @return Compact encrypted state token string.
 #' @keywords internal
 #' @noRd
-state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
+state_encrypt_gcm <- function(payload, key, version = 2L, min_key_chars = 32L) {
   if (is.null(payload)) {
     err_input(c("x" = "payload is NULL"), context = list(phase = "encrypt"))
   }
   key <- normalize_key32(key, min_chars = min_key_chars)
+  version <- normalize_state_envelope_version(version)
+  if (is.na(version) || version != 2L) {
+    err_input("New state envelopes must use version 2")
+  }
 
   json <- jsonlite::toJSON(
     payload,
@@ -197,47 +201,19 @@ state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
     )
   }
 
-  iv <- openssl::rand_bytes(12L) # 96-bit IV for GCM
-
-  enc <- openssl::aes_gcm_encrypt(charToRaw(json), key = key, iv = iv)
-
-  # Handle both return shapes (list with [["data"]]/[["tag"]] or raw(ct||tag))
-  if (
-    is.list(enc) &&
-      !is.null(enc[["data"]]) &&
-      !is.null(enc[["tag"]])
-  ) {
-    ct <- enc[["data"]]
-    tag <- enc[["tag"]]
-  } else if (is.raw(enc) && !is.null(attr(enc, "tag", exact = TRUE))) {
-    # Some versions return ciphertext as raw with tag attribute
-    ct <- enc
-    tag <- attr(enc, "tag", exact = TRUE)
-    if (!is.raw(tag) || length(tag) != 16L) {
-      err_config(
-        c("x" = "Unexpected GCM tag attribute length"),
-        context = list(phase = "encrypt")
-      )
-    }
-  } else if (is.raw(enc)) {
-    n <- length(enc)
-    if (n < 16L) {
-      err_invalid_state(
-        c("x" = "ciphertext too short"),
-        context = list(phase = "encrypt")
-      )
-    }
-    if (n == 16L) {
-      # zero-length ciphertext, tag only
-      tag <- enc
-      ct <- raw(0)
-    } else {
-      tag <- enc[(n - 15L):n]
-      ct <- enc[1:(n - 16L)]
-    }
-  } else {
+  plaintext <- charToRaw(json)
+  iv <- openssl::rand_bytes(12L)
+  enc <- openssl::aes_gcm_encrypt(plaintext, key = key, iv = iv)
+  if (!is.raw(enc) || length(enc) != length(plaintext)) {
     err_config(
-      c("x" = "Unexpected return type from aes_gcm_encrypt()"),
+      "Unexpected ciphertext from aes_gcm_encrypt()",
+      context = list(phase = "encrypt")
+    )
+  }
+  tag <- attr(enc, "tag", exact = TRUE)
+  if (!is.raw(tag) || length(tag) != 16L) {
+    err_config(
+      "AES-GCM encryption requires a 16-byte authentication tag",
       context = list(phase = "encrypt")
     )
   }
@@ -246,7 +222,7 @@ state_encrypt_gcm <- function(payload, key, version = 1L, min_key_chars = 32L) {
     v = as.integer(version),
     iv = base64url_encode(iv),
     tg = base64url_encode(tag),
-    ct = base64url_encode(ct)
+    ct = base64url_encode(enc)
   )
   base64url_encode(charToRaw(jsonlite::toJSON(token_obj, auto_unbox = TRUE)))
 }
@@ -272,17 +248,18 @@ normalize_state_envelope_version <- function(value) {
   as.integer(value)
 }
 
-#' Internal: decrypt and validate the compact state GCM envelope
+#' Internal: decrypt and validate an authenticated state envelope
 #'
 #' Decodes the outer base64url wrapper, validates the version and envelope
-#' members, decrypts the ciphertext with AES-GCM, and returns the parsed JSON
+#' members, verifies the authentication tag, and returns the parsed JSON
 #' payload. The helper enforces size caps and emits audit events for parse
 #' failures without disclosing plaintext or key material. Used when callback
 #' handling resumes after the provider redirects back.
 #'
 #' @param token Compact encrypted state token.
 #' @param key Character passphrase or raw key material.
-#' @param expected_version Expected envelope version.
+#' @param expected_version Expected envelope version. Only version 2 is
+#'   supported; legacy versions are always rejected.
 #' @param size_limits Optional internal envelope budgets; external state uses
 #'   the configured state limits by default.
 #' @param min_key_chars Minimum passphrase length for character keys.
@@ -292,7 +269,7 @@ normalize_state_envelope_version <- function(value) {
 state_decrypt_gcm <- function(
   token,
   key,
-  expected_version = 1L,
+  expected_version = 2L,
   min_key_chars = 32L,
   size_limits = NULL
 ) {
@@ -446,8 +423,9 @@ state_decrypt_gcm <- function(
   expected_version <- normalize_state_envelope_version(expected_version)
   if (
     is.na(found_version) ||
-      is.na(expected_version) ||
-      !identical(found_version, expected_version)
+      anyNA(expected_version) ||
+      found_version != 2L ||
+      found_version != expected_version
   ) {
     audit_fail(
       "token_version_mismatch",
@@ -477,7 +455,7 @@ state_decrypt_gcm <- function(
   if (length(iv) != 12L) {
     audit_fail("iv_len_invalid", details = list(iv_len = length(iv)))
     state_fail(
-      sprintf("invalid GCM IV length: %d", length(iv)),
+      sprintf("invalid state IV length: %d", length(iv)),
       context = list(phase = "decrypt")
     )
   }
@@ -496,7 +474,7 @@ state_decrypt_gcm <- function(
   if (length(tg) != 16L) {
     audit_fail("tag_len_invalid", details = list(tag_len = length(tg)))
     state_fail(
-      sprintf("invalid GCM tag length: %d", length(tg)),
+      sprintf("invalid state tag length: %d", length(tg)),
       context = list(phase = "decrypt")
     )
   }
@@ -538,7 +516,7 @@ state_decrypt_gcm <- function(
     audit_fail("ciphertext_empty")
     state_fail("empty ciphertext", context = list(phase = "decrypt"))
   }
-  # Cap decoded ciphertext size to avoid expensive GCM on large inputs
+  # Cap decoded ciphertext size before authentication and decryption.
   if (length(ct) > max_ct_bytes) {
     audit_fail(
       "ciphertext_too_large",
@@ -550,20 +528,22 @@ state_decrypt_gcm <- function(
     )
   }
 
-  # 3-arg API expects data = ct||tag
-  res <- try(
-    openssl::aes_gcm_decrypt(data = c(ct, tg), key = key, iv = iv),
-    silent = TRUE
-  )
-  if (inherits(res, "try-error")) {
-    audit_fail("gcm_auth_failed")
+  auth_fail <- function() {
+    audit_fail("state_auth_failed")
     state_fail(
       c(
-        "x" = "GCM authentication failed",
+        "x" = "State authentication failed",
         "!" = "This often indicates the state key/secret does not match the one used to encrypt the state (e.g., OAuthClient created inside a Shiny session so the key changes on redirect/new session, different Shiny worker, or rotated secret)."
       ),
       context = list(phase = "decrypt")
     )
+  }
+  res <- try(
+    openssl::aes_gcm_decrypt(data = ct, tag = tg, key = key, iv = iv),
+    silent = TRUE
+  )
+  if (inherits(res, "try-error")) {
+    auth_fail()
   }
   # Decrypted wrapper payload is JSON text; reject embedded NULs to avoid
   # truncation-acceptance edge cases.
